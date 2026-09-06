@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { PI_MODULE_PREFS_DEFAULTS } from "@/modules/pi/lib/settingsSchema";
 import { currentWorkspaceEnv } from "@/modules/workspace";
+import { quoteShellArg } from "@/lib/shellQuote";
 import { useEffect, useState } from "react";
 
 type CommandOutput = {
@@ -12,11 +14,32 @@ type Props = {
   cwd?: string;
   /** Bumped by the parent after any board_ tool execution. */
   refreshKey?: number;
+  /** Overrides the configured board CLI path. */
+  boardBin?: string;
 };
+
+// The binary is an absolute setting, not a cwd-relative lookup; --root points
+// it at the project whose .pi/board.db it should read while the shell keeps
+// the tab cwd as working directory.
+export function boardListCommand(boardBin: string, root: string): string {
+  return `${quoteShellArg(boardBin)} --root ${quoteShellArg(root)} board`;
+}
+
+export function boardShowCommand(
+  boardBin: string,
+  root: string,
+  ticketId: string,
+): string {
+  return `${quoteShellArg(boardBin)} --root ${quoteShellArg(root)} show ${quoteShellArg(ticketId)}`;
+}
 
 // The board is read through <cwd>/bin/board via the existing one-shot shell
 // command; text output only, no SQLite dependency.
-export function BoardPane({ cwd, refreshKey = 0 }: Props) {
+export function BoardPane({
+  cwd,
+  refreshKey = 0,
+  boardBin = PI_MODULE_PREFS_DEFAULTS.boardBin,
+}: Props) {
   const [lines, setLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -26,7 +49,7 @@ export function BoardPane({ cwd, refreshKey = 0 }: Props) {
     if (!cwd) return;
     let alive = true;
     invoke<CommandOutput>("shell_run_command", {
-      command: "bin/board board",
+      command: boardListCommand(boardBin, cwd),
       cwd,
       timeoutSecs: 15,
       workspace: currentWorkspaceEnv(),
@@ -54,7 +77,7 @@ export function BoardPane({ cwd, refreshKey = 0 }: Props) {
     setSelected(id);
     setDetail(null);
     void invoke<CommandOutput>("shell_run_command", {
-      command: `bin/board show ${id}`,
+      command: boardShowCommand(boardBin, cwd, id),
       cwd,
       timeoutSecs: 15,
       workspace: currentWorkspaceEnv(),
