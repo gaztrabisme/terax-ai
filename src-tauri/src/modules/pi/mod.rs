@@ -49,6 +49,7 @@ pub async fn pi_open(
     state: tauri::State<'_, PiState>,
     registry: tauri::State<'_, WorkspaceRegistry>,
     cwd: Option<String>,
+    launcher_dir: Option<String>,
     program: Option<String>,
     args: Option<Vec<String>>,
     env: Option<HashMap<String, String>>,
@@ -72,8 +73,14 @@ pub async fn pi_open(
                 cwd: canonical.as_ref().map(|p| p.to_string_lossy().into_owned()),
                 env,
             },
-            // Empty program: resolve bin/efficient-pi, then bin/pi, under cwd.
-            _ => launch::resolve_spec(canonical.as_deref(), &args.unwrap_or_default(), env)?,
+            // Empty program: resolve bin/efficient-pi, then bin/pi, under
+            // launcherDir (workspace-local bin/ when launcherDir is empty).
+            _ => launch::resolve_spec(
+                canonical.as_deref(),
+                launcher_dir.as_deref(),
+                &args.unwrap_or_default(),
+                env,
+            )?,
         };
         session::spawn_session(
             spec,

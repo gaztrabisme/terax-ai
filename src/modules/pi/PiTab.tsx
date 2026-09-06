@@ -8,6 +8,7 @@ import { Transcript } from "./components/Transcript";
 import { useChildStore } from "./lib/childStore";
 import { usePiStore } from "./lib/piStore";
 import { watchTranscripts } from "./lib/rpc-client";
+import { PI_MODULE_PREFS_DEFAULTS } from "./lib/settingsSchema";
 
 type StackProps = {
   tabs: Tab[];
@@ -64,10 +65,12 @@ export function PiTab({
   tabId,
   cwd,
   onOpenChild,
+  launcherDir = PI_MODULE_PREFS_DEFAULTS.launcherDir,
 }: {
   tabId: number;
   cwd?: string;
   onOpenChild: (path: string) => void;
+  launcherDir?: string;
 }) {
   const entry = usePiStore((s) => s.tabs[tabId]);
   const openSession = usePiStore((s) => s.openSession);
@@ -80,11 +83,11 @@ export function PiTab({
   const seenBoardTool = useRef(false);
 
   useEffect(() => {
-    void openSession(tabId, { cwd });
+    void openSession(tabId, { cwd, launcherDir });
     return () => {
       usePiStore.getState().close(tabId);
     };
-  }, [tabId, cwd, openSession]);
+  }, [tabId, cwd, launcherDir, openSession]);
 
   // Tail the parent's agent-hub dir; every child line lands in the per-file
   // child store, feeding the run graph and transcript tabs.

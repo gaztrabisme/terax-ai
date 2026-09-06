@@ -7,6 +7,8 @@ import { z } from "zod";
 export const piModulePrefsSchema = z.object({
   launchMode: z.enum(["auto", "launcher", "direct"]).default("auto"),
   draftDir: z.string().default(".pi/drafts"),
+  /** Dir holding bin/efficient-pi (or bin/pi); a leading $HOME/ expands Rust-side from HOME. */
+  launcherDir: z.string().default("$HOME/Documents/Work/Lab/efficient-pi"),
   defaultAgentDir: z.string().default(""),
   /** Path to the efficient-pi board CLI (same one board.mjs uses); a leading $HOME/ expands in the shell. */
   boardBin: z.string().default("$HOME/Documents/Work/Lab/efficient-pi/bin/board"),

@@ -14,6 +14,7 @@ import { openPiSession, type PiSessionHandle } from "./rpc-client";
 
 export type PiOpenOptions = {
   cwd?: string;
+  launcherDir?: string;
   program?: string;
   args?: string[];
   env?: Record<string, string>;

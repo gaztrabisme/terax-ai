@@ -3,7 +3,9 @@ import { currentWorkspaceEnv } from "@/modules/workspace";
 
 export type PiOpenOptions = {
   cwd?: string;
-  /** Empty/undefined resolves bin/efficient-pi then bin/pi under cwd (Rust side). */
+  /** Dir whose bin/efficient-pi (then bin/pi) launches the session; empty falls back to cwd-local bin/. A leading $HOME/ expands Rust-side. */
+  launcherDir?: string;
+  /** Empty/undefined lets the Rust side resolve the binary from launcherDir. */
   program?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -70,6 +72,7 @@ export async function openPiSession(
 
   const id = await invoke<number>("pi_open", {
     cwd: opts.cwd ?? null,
+    launcherDir: opts.launcherDir ?? null,
     program: opts.program ?? null,
     args: opts.args ?? null,
     env: opts.env ?? null,
