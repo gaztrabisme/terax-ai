@@ -1,13 +1,16 @@
 import { Markdown as TiptapMarkdown } from "@tiptap/markdown";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { StarterKit } from "@tiptap/starter-kit";
-import { Table } from "@tiptap/extension-table";
+import { TableKit } from "@tiptap/extension-table";
 import { useMemo } from "react";
 
 // One extension set for the composer and the read-only renderers: content
 // round-trips through the exact same schema in both directions.
 export function piEditorExtensions() {
-  return [StarterKit, TiptapMarkdown, Table];
+  // TableKit registers table, tableRow, tableHeader and tableCell together;
+  // Table alone leaves the schema without tableRow and the editor throws on
+  // creation, which unmounts the whole app.
+  return [StarterKit, TiptapMarkdown, TableKit];
 }
 
 export function MarkdownRenderer({ content }: { content: string }) {
