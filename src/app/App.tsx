@@ -63,7 +63,7 @@ import {
   type SearchTarget,
 } from "@/modules/header";
 import { MarkdownStack } from "@/modules/markdown";
-import { PiStack } from "@/modules/pi";
+import { AgentTranscriptStack, PiStack } from "@/modules/pi";
 import { PreviewStack, type PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -196,6 +196,7 @@ export default function App() {
     newPreviewTab,
     newMarkdownTab,
     newPiTab,
+    openAgentTranscriptTab,
     openAiDiffTab,
     closeAiDiffTab,
     openGitDiffTab,
@@ -507,6 +508,7 @@ export default function App() {
   const isPreviewTab = activeTab?.kind === "preview";
   const isMarkdownTab = activeTab?.kind === "markdown";
   const isPiTab = activeTab?.kind === "pi";
+  const isAgentTranscriptTab = activeTab?.kind === "agent-transcript";
   const isAiDiffTab = activeTab?.kind === "ai-diff";
   const isGitDiffTab =
     activeTab?.kind === "git-diff" || activeTab?.kind === "git-commit-file";
@@ -870,6 +872,13 @@ export default function App() {
   const openNewPiTab = useCallback(() => {
     newPiTab(inheritedCwdForNewTab());
   }, [newPiTab, inheritedCwdForNewTab]);
+
+  const openChildTranscript = useCallback(
+    (path: string) => {
+      openAgentTranscriptTab(path);
+    },
+    [openAgentTranscriptTab],
+  );
 
   const sendCd = useCallback(
     (path: string) => {
@@ -1457,7 +1466,20 @@ export default function App() {
         )}
         aria-hidden={!isPiTab}
       >
-        <PiStack tabs={tabs} activeId={activeId} />
+        <PiStack
+          tabs={tabs}
+          activeId={activeId}
+          onOpenChild={openChildTranscript}
+        />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 px-3 pt-2 pb-2",
+          !isAgentTranscriptTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isAgentTranscriptTab}
+      >
+        <AgentTranscriptStack tabs={tabs} activeId={activeId} />
       </div>
       <div
         className={cn(

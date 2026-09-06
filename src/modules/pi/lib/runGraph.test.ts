@@ -1,0 +1,102 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import {
+  applyEvent,
+  initialPiSessionState,
+  type PiSessionState,
+} from "./parse";
+import { buildRunGraph, PARENT_NODE_ID, summarizeChild } from "./runGraph";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+// The q6 fixture is a raw child transcript: the child's own event stream
+// (session header, agent_start, message_*, turn_*, agent_end), exactly what
+// pi_watch_transcripts streams line by line.
+const FIXTURE_LINES = readFileSync(
+  path.join(here, "__fixtures__", "q6-child-transcript-sample.jsonl"),
+  "utf8",
+)
+  .split("\n")
+  .filter((line) => line.trim().length > 0);
+
+const CHILD_FILE = "agent-hub/22838/worker-1.transcript.jsonl";
+
+function replayChild(lines: string[] = FIXTURE_LINES): PiSessionState {
+  let state = initialPiSessionState();
+  for (const line of lines) {
+    state = applyEvent(state, line);
+  }
+  return state;
+}
+
+describe("runGraph over the q6 child transcript", () => {
+  it("marks the child done from agent_end presence", () => {
+    const state = replayChild();
+    const node = summarizeChild(CHILD_FILE, state);
+    expect(node.status).toBe("done");
+    expect(node.role).toBe("child");
+  });
+
+  it("reports running when the stream has no agent_end yet", () => {
+    const state = replayChild(
+      FIXTURE_LINES.filter((l) => !l.includes('"agent_end"')),
+    );
+    expect(summarizeChild(CHILD_FILE, state).status).toBe("running");
+  });
+
+  it("sums turn_end usage into tokens", () => {
+    const node = summarizeChild(CHILD_FILE, replayChild());
+    expect(node.tokens).toBe(3912);
+  });
+
+  it("measures elapsed from the first to the last turn timestamp", () => {
+    const node = summarizeChild(CHILD_FILE, replayChild());
+    expect(node.elapsedMs).toBe(0);
+    const late = replayChild(
+      FIXTURE_LINES.map((l) =>
+        l.includes('"turnIndex":0')
+          ? l.replace('"turnIndex":0', '"turnIndex":1')
+          : l,
+      ),
+    );
+    expect(late.startedMs).not.toBeNull();
+  });
+
+  it("counts tool calls", () => {
+    const withTool = replayChild([
+      ...FIXTURE_LINES,
+      '{"type":"tool_execution_start","toolCallId":"call_x","toolName":"bash","args":{}}',
+      '{"type":"tool_execution_end","toolCallId":"call_x","toolName":"bash","result":{"content":[{"type":"text","text":"ok"}]},"isError":false}',
+    ]);
+    expect(summarizeChild(CHILD_FILE, withTool).toolCalls).toBe(1);
+  });
+
+  it("wires the parent to every child and summarizes the parent", () => {
+    const graph = buildRunGraph(replayChild(), {
+      [CHILD_FILE]: replayChild(),
+      "agent-hub/22838/scout-1.transcript.jsonl": replayChild(
+        FIXTURE_LINES.filter((l) => !l.includes('"agent_end"')),
+      ),
+    });
+    expect(graph.nodes).toHaveLength(3);
+    expect(graph.edges).toEqual([
+      { source: PARENT_NODE_ID, target: CHILD_FILE },
+      {
+        source: PARENT_NODE_ID,
+        target: "agent-hub/22838/scout-1.transcript.jsonl",
+      },
+    ]);
+    const parent = graph.nodes.find((n) => n.id === PARENT_NODE_ID);
+    expect(parent?.role).toBe("parent");
+    expect(parent?.status).toBe("done");
+    const labels = graph.nodes.map((n) => n.label);
+    expect(labels).toContain("worker-1");
+  });
+
+  it("ignores the session header line like any unknown type", () => {
+    const state = replayChild();
+    expect(state.sessionId).toBe("8b394965-ac25-4144-8d5e-87dc14d04ad6");
+  });
+});

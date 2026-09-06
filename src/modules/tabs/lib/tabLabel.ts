@@ -11,6 +11,7 @@ export function labelFor(t: Tab): string {
   if (t.kind === "preview") return t.title;
   if (t.kind === "markdown") return t.title;
   if (t.kind === "pi") return t.title;
+  if (t.kind === "agent-transcript") return t.title;
   if (t.kind === "ai-diff") return t.title;
   if (t.kind === "git-diff") return t.title;
   if (t.kind === "git-history") return t.title;

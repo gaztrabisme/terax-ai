@@ -1,4 +1,5 @@
 export { PiStack } from "./PiTab";
+export { AgentTranscriptStack } from "./components/AgentTranscriptPane";
 export { usePiStore, type PiOpenOptions } from "./lib/piStore";
 export {
   effectiveQuestionId,

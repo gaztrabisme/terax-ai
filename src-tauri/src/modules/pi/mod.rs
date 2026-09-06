@@ -1,5 +1,6 @@
 mod launch;
 mod session;
+pub mod transcripts;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -7,8 +8,24 @@ use std::sync::{Arc, RwLock};
 
 use tauri::ipc::Channel;
 
-use crate::modules::workspace::{authorize_user_spawn_cwd, WorkspaceEnv, WorkspaceRegistry};
+use crate::modules::workspace::{
+    authorize_spawn_cwd, authorize_user_spawn_cwd, WorkspaceEnv, WorkspaceRegistry,
+};
 use session::{PiSession, SpawnSpec};
+
+pub struct PiTranscriptState {
+    watchers: RwLock<HashMap<u32, Arc<transcripts::WatchHandle>>>,
+    next_watch_id: AtomicU32,
+}
+
+impl Default for PiTranscriptState {
+    fn default() -> Self {
+        Self {
+            watchers: RwLock::new(HashMap::new()),
+            next_watch_id: AtomicU32::new(1),
+        }
+    }
+}
 
 pub struct PiState {
     sessions: RwLock<HashMap<u32, Arc<PiSession>>>,
@@ -112,6 +129,46 @@ pub fn pi_kill(state: tauri::State<'_, PiState>, id: u32) -> Result<(), String> 
         log::info!("pi killed id={} pid={}", id, s.pid);
     } else {
         log::debug!("pi_kill: unknown id={id}");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn pi_watch_transcripts(
+    state: tauri::State<'_, PiTranscriptState>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+    agent_dir: String,
+    workspace: Option<WorkspaceEnv>,
+    on_line: Channel<transcripts::TranscriptLine>,
+) -> Result<u32, String> {
+    let workspace_env = WorkspaceEnv::from_option(workspace);
+    let canonical =
+        authorize_spawn_cwd(&registry, Some(&agent_dir), &workspace_env)?;
+    let id = state.next_watch_id.fetch_add(1, Ordering::Relaxed);
+    let handle = Arc::new(transcripts::watch_with(
+        canonical
+            .as_deref()
+            .ok_or_else(|| "agent dir required".to_string())?,
+        move |line| {
+            if let Err(e) = on_line.send(line) {
+                log::debug!("pi transcript send failed (channel closed): {e}");
+            }
+        },
+    )?);
+    state.watchers.write().unwrap().insert(id, handle);
+    log::info!("pi transcripts watched id={id}");
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn pi_unwatch(
+    state: tauri::State<'_, PiTranscriptState>,
+    id: u32,
+) -> Result<(), String> {
+    if state.watchers.write().unwrap().remove(&id).is_some() {
+        log::info!("pi transcripts unwatched id={id}");
+    } else {
+        log::debug!("pi_unwatch: unknown id={id}");
     }
     Ok(())
 }

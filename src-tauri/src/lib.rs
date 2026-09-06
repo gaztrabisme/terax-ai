@@ -157,6 +157,7 @@ pub fn run() {
         })
         .manage(pty::PtyState::default())
         .manage(pi::PiState::default())
+        .manage(pi::PiTranscriptState::default())
         .manage(shell::ShellState::default())
         .manage(secrets::SecretsState::default())
         .manage(fs::watch::FsWatchState::default())
@@ -179,6 +180,8 @@ pub fn run() {
             pi::pi_open,
             pi::pi_send,
             pi::pi_kill,
+            pi::pi_watch_transcripts,
+            pi::pi_unwatch,
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,

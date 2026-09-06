@@ -8,6 +8,7 @@ export {
   type PreviewTab,
   type MarkdownTab,
   type PiTab,
+  type AgentTranscriptTab,
   type AiDiffTab,
   type GitDiffTab,
   type GitHistoryTab,

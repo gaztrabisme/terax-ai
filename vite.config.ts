@@ -58,7 +58,7 @@ export default defineConfig(async ({ mode }) => ({
             return "motion";
           if (
             id.includes("/react-dom/") ||
-            id.includes("/react/") ||
+            id.includes("/node_modules/react/") ||
             id.includes("/scheduler/")
           )
             return "react";

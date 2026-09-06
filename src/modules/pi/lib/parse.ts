@@ -68,6 +68,11 @@ export type PiSessionState = {
   askPos: Record<string, number>;
   tokens: PiUsage | null;
   seq: number;
+  /** First and latest turn_start epoch ms: child run elapsed. */
+  startedMs: number | null;
+  lastMs: number | null;
+  /** Sum of turn_end usage.totalTokens across turns. */
+  turnTokens: number;
 };
 
 export function initialPiSessionState(): PiSessionState {
@@ -80,6 +85,9 @@ export function initialPiSessionState(): PiSessionState {
     askPos: {},
     tokens: null,
     seq: 0,
+    startedMs: null,
+    lastMs: null,
+    turnTokens: 0,
   };
 }
 
@@ -172,10 +180,15 @@ export function applyEvent(state: PiSessionState, raw: string): PiSessionState {
     case "agent_start":
     case "turn_start": {
       const sessionId = asString(event.sessionId);
+      const ts = typeof event.timestamp === "number" ? event.timestamp : null;
       return {
         ...state,
         status: state.status === "awaiting-ask" ? state.status : "thinking",
         ...(sessionId !== null && { sessionId }),
+        ...(ts !== null && {
+          startedMs: state.startedMs ?? ts,
+          lastMs: ts,
+        }),
       };
     }
     case "message_start":
@@ -189,7 +202,11 @@ export function applyEvent(state: PiSessionState, raw: string): PiSessionState {
         isRecord(event.message) ? event.message.usage : null,
       );
       if (!usage) return state;
-      return { ...state, tokens: usage };
+      return {
+        ...state,
+        tokens: usage,
+        turnTokens: state.turnTokens + usage.totalTokens,
+      };
     }
     case "agent_end":
       return { ...state, status: "done" };

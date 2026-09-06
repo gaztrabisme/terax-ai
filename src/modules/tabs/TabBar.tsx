@@ -355,7 +355,7 @@ function TabIcon({ tab }: { tab: Tab }) {
       />
     );
   }
-  if (tab.kind === "pi") {
+  if (tab.kind === "pi" || tab.kind === "agent-transcript") {
     return (
       <HugeiconsIcon
         icon={AiChat02Icon}

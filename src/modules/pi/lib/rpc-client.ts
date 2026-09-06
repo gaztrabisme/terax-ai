@@ -18,6 +18,35 @@ export type PiSessionHandle = {
   kill: () => Promise<void>;
 };
 
+export type PiTranscriptLine = { file: string; line: string };
+
+export type TranscriptWatch = { id: number; close: () => Promise<void> };
+
+export async function watchTranscripts(
+  agentDir: string,
+  onLine: (line: PiTranscriptLine) => void,
+): Promise<TranscriptWatch> {
+  const channel = new Channel<PiTranscriptLine>();
+  let released = false;
+  channel.onmessage = (line) => {
+    if (!released) onLine(line);
+  };
+  const id = await invoke<number>("pi_watch_transcripts", {
+    agentDir,
+    workspace: currentWorkspaceEnv(),
+    onLine: channel,
+  });
+  return {
+    id,
+    close: async () => {
+      if (released) return;
+      released = true;
+      channel.onmessage = () => {};
+      await invoke("pi_unwatch", { id });
+    },
+  };
+}
+
 export async function openPiSession(
   opts: PiOpenOptions,
 ): Promise<PiSessionHandle> {

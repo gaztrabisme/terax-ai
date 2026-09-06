@@ -64,6 +64,13 @@ export type PiTab = {
   cwd?: string;
 };
 
+export type AgentTranscriptTab = {
+  id: number;
+  kind: "agent-transcript";
+  title: string;
+  path: string;
+};
+
 export type AiDiffStatus = "pending" | "approved" | "rejected";
 
 export type AiDiffTab = {
@@ -115,6 +122,7 @@ export type Tab =
   | PreviewTab
   | MarkdownTab
   | PiTab
+  | AgentTranscriptTab
   | AiDiffTab
   | GitDiffTab
   | GitHistoryTab
@@ -416,6 +424,27 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       const id = nextIdRef.current++;
       targetId = id;
       return [...curr, { id, kind: "markdown", title: basename(path), path }];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
+  const openAgentTranscriptTab = useCallback((path: string) => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find(
+        (t) => t.kind === "agent-transcript" && t.path === path,
+      );
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [
+        ...curr,
+        { id, kind: "agent-transcript", title: basename(path), path },
+      ];
     });
     if (targetId !== null) setActiveId(targetId);
     return targetId;
@@ -823,6 +852,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     newPreviewTab,
     newMarkdownTab,
     newPiTab,
+    openAgentTranscriptTab,
     openAiDiffTab,
     openGitDiffTab,
     openCommitHistoryTab,
