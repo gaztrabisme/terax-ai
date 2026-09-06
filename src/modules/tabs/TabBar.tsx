@@ -17,6 +17,7 @@ import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
+  AiChat02Icon,
   Cancel01Icon,
   Clock01Icon,
   ComputerTerminal02Icon,
@@ -40,6 +41,7 @@ type Props = {
   onNewPrivate: () => void;
   onNewPreview: () => void;
   onNewEditor: () => void;
+  onNewPi: () => void;
   onNewGitGraph: () => void;
   onClose: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
@@ -57,6 +59,7 @@ export function TabBar({
   onNewPrivate,
   onNewPreview,
   onNewEditor,
+  onNewPi,
   onNewGitGraph,
   onClose,
   onPin,
@@ -271,6 +274,10 @@ export function TabBar({
                 {fmtShortcut(MOD_KEY, "E")}
               </span>
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onNewPi()}>
+              <HugeiconsIcon icon={AiChat02Icon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">Pi</span>
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onNewPreview()}>
               <HugeiconsIcon icon={Globe02Icon} size={14} strokeWidth={1.75} />
               <span className="flex-1">Preview</span>
@@ -279,7 +286,11 @@ export function TabBar({
               </span>
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onNewGitGraph()}>
-              <HugeiconsIcon icon={GitBranchIcon} size={14} strokeWidth={1.75} />
+              <HugeiconsIcon
+                icon={GitBranchIcon}
+                size={14}
+                strokeWidth={1.75}
+              />
               <span className="flex-1">Git Graph</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
@@ -338,6 +349,16 @@ function TabIcon({ tab }: { tab: Tab }) {
     return (
       <HugeiconsIcon
         icon={Clock01Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
+  if (tab.kind === "pi") {
+    return (
+      <HugeiconsIcon
+        icon={AiChat02Icon}
         size={14}
         strokeWidth={2}
         className="shrink-0"

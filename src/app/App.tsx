@@ -63,10 +63,14 @@ import {
   type SearchTarget,
 } from "@/modules/header";
 import { MarkdownStack } from "@/modules/markdown";
+import { PiStack } from "@/modules/pi";
 import { PreviewStack, type PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { onKeysChanged, setThemeId as persistThemeId } from "@/modules/settings/store";
+import {
+  onKeysChanged,
+  setThemeId as persistThemeId,
+} from "@/modules/settings/store";
 import {
   ShortcutsDialog,
   useGlobalShortcuts,
@@ -74,10 +78,7 @@ import {
   type ShortcutId,
 } from "@/modules/shortcuts";
 import { SidebarRail, type SidebarViewId } from "@/modules/sidebar";
-import {
-  SourceControlPanel,
-  useSourceControl,
-} from "@/modules/source-control";
+import { SourceControlPanel, useSourceControl } from "@/modules/source-control";
 import { StatusBar } from "@/modules/statusbar";
 import { MAX_PANES_PER_TAB, useTabs, useWorkspaceCwd } from "@/modules/tabs";
 import {
@@ -95,7 +96,10 @@ import {
   useTerminalFileDrop,
 } from "@/modules/terminal";
 import { ThemeProvider } from "@/modules/theme";
-import { listCustomThemes, saveCustomTheme } from "@/modules/theme/customThemes";
+import {
+  listCustomThemes,
+  saveCustomTheme,
+} from "@/modules/theme/customThemes";
 import {
   isThemeFilePath,
   onThemeEdit,
@@ -191,6 +195,7 @@ export default function App() {
     pinTab,
     newPreviewTab,
     newMarkdownTab,
+    newPiTab,
     openAiDiffTab,
     closeAiDiffTab,
     openGitDiffTab,
@@ -238,7 +243,8 @@ export default function App() {
   const sidebarRef = useRef<PanelImperativeHandle | null>(null);
   const sidebarWidthRef = useRef(readSidebarWidth());
   const sidebarWidthWriteTimerRef = useRef(0);
-  const [sidebarView, setSidebarViewState] = useState<SidebarViewId>(readSidebarView);
+  const [sidebarView, setSidebarViewState] =
+    useState<SidebarViewId>(readSidebarView);
   const persistSidebarView = useCallback((view: SidebarViewId) => {
     setSidebarViewState(view);
     try {
@@ -326,7 +332,9 @@ export default function App() {
 
   const [home, setHome] = useState<string | null>(null);
   const [pendingCloseTab, setPendingCloseTab] = useState<number | null>(null);
-  const [pendingTerminalCloseTab, setPendingTerminalCloseTab] = useState<number | null>(null);
+  const [pendingTerminalCloseTab, setPendingTerminalCloseTab] = useState<
+    number | null
+  >(null);
   const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
   const setWorkspaceEnv = useWorkspaceEnvStore((s) => s.setEnv);
   const [launchCwd, setLaunchCwd] = useState<string | null>(null);
@@ -359,7 +367,9 @@ export default function App() {
       }
       const dirty = tabsRef.current.some((t) => t.kind === "editor" && t.dirty);
       if (dirty) {
-        window.alert("Save or close unsaved editor tabs before switching workspace.");
+        window.alert(
+          "Save or close unsaved editor tabs before switching workspace.",
+        );
         return;
       }
 
@@ -441,7 +451,9 @@ export default function App() {
     (ollamaBaseURL.trim().length > 0 && ollamaModelId.trim().length > 0) ||
     (openaiCompatibleBaseURL.trim().length > 0 &&
       openaiCompatibleModelId.trim().length > 0) ||
-    customEndpoints.some((e) => e.baseURL.trim().length > 0 && e.modelId.trim().length > 0);
+    customEndpoints.some(
+      (e) => e.baseURL.trim().length > 0 && e.modelId.trim().length > 0,
+    );
   const hasComposer = hasAnyKey(apiKeys) || hasLocalModel;
 
   const prefsHydrated = usePreferencesStore((s) => s.hydrated);
@@ -494,6 +506,7 @@ export default function App() {
   const isEditorTab = activeTab?.kind === "editor";
   const isPreviewTab = activeTab?.kind === "preview";
   const isMarkdownTab = activeTab?.kind === "markdown";
+  const isPiTab = activeTab?.kind === "pi";
   const isAiDiffTab = activeTab?.kind === "ai-diff";
   const isGitDiffTab =
     activeTab?.kind === "git-diff" || activeTab?.kind === "git-commit-file";
@@ -520,20 +533,21 @@ export default function App() {
 
   useEffect(() => {
     type FileWrittenPayload = { path: string; source?: string };
-    const unlistenPromise = getCurrentWebviewWindow().listen<FileWrittenPayload>(
-      "fs:file-written",
-      (event) => {
-        if (event.payload.source === "editor") return;
-        const normalizedPath = event.payload.path.replace(/\\/g, "/");
-        const currentTabs = tabsRef.current;
-        for (const t of currentTabs) {
-          if (t.kind !== "editor") continue;
-          if (t.path.replace(/\\/g, "/") === normalizedPath) {
-            editorRefs.current.get(t.id)?.reload();
+    const unlistenPromise =
+      getCurrentWebviewWindow().listen<FileWrittenPayload>(
+        "fs:file-written",
+        (event) => {
+          if (event.payload.source === "editor") return;
+          const normalizedPath = event.payload.path.replace(/\\/g, "/");
+          const currentTabs = tabsRef.current;
+          for (const t of currentTabs) {
+            if (t.kind !== "editor") continue;
+            if (t.path.replace(/\\/g, "/") === normalizedPath) {
+              editorRefs.current.get(t.id)?.reload();
+            }
           }
-        }
-      },
-    );
+        },
+      );
     return () => {
       void unlistenPromise.then((un) => un());
     };
@@ -576,30 +590,32 @@ export default function App() {
   // the code editor. Saving it re-ingests into the runtime store + applies live.
   useEffect(() => {
     type FileWrittenPayload = { path: string; source?: string };
-    const unlistenPromise = getCurrentWebviewWindow().listen<FileWrittenPayload>(
-      "fs:file-written",
-      (event) => {
-        if (event.payload.source !== "editor") return;
-        if (!isThemeFilePath(event.payload.path)) return;
-        void (async () => {
-          try {
-            const res = await invoke<{ kind: string; content?: string }>(
-              "fs_read_file",
-              { path: event.payload.path, workspace: currentWorkspaceEnv() },
-            );
-            if (res.kind !== "text" || typeof res.content !== "string") return;
-            const parsed = parseThemeFile(res.content);
-            if (!parsed.ok) {
-              console.warn("[terax] theme not applied:", parsed.error);
-              return;
+    const unlistenPromise =
+      getCurrentWebviewWindow().listen<FileWrittenPayload>(
+        "fs:file-written",
+        (event) => {
+          if (event.payload.source !== "editor") return;
+          if (!isThemeFilePath(event.payload.path)) return;
+          void (async () => {
+            try {
+              const res = await invoke<{ kind: string; content?: string }>(
+                "fs_read_file",
+                { path: event.payload.path, workspace: currentWorkspaceEnv() },
+              );
+              if (res.kind !== "text" || typeof res.content !== "string")
+                return;
+              const parsed = parseThemeFile(res.content);
+              if (!parsed.ok) {
+                console.warn("[terax] theme not applied:", parsed.error);
+                return;
+              }
+              await saveCustomTheme(parsed.theme);
+            } catch (e) {
+              console.warn("[terax] theme ingest failed:", e);
             }
-            await saveCustomTheme(parsed.theme);
-          } catch (e) {
-            console.warn("[terax] theme ingest failed:", e);
-          }
-        })();
-      },
-    );
+          })();
+        },
+      );
     return () => {
       void unlistenPromise.then((un) => un());
     };
@@ -641,7 +657,9 @@ export default function App() {
 
   useEffect(() => {
     setActiveSearchAddon(
-      activeLeafId !== null ? (searchAddons.current.get(activeLeafId) ?? null) : null,
+      activeLeafId !== null
+        ? (searchAddons.current.get(activeLeafId) ?? null)
+        : null,
     );
     setActiveEditorHandle(editorRefs.current.get(activeId) ?? null);
   }, [activeId, activeLeafId]);
@@ -849,6 +867,10 @@ export default function App() {
     newPrivateTab(inheritedCwdForNewTab());
   }, [newPrivateTab, inheritedCwdForNewTab]);
 
+  const openNewPiTab = useCallback(() => {
+    newPiTab(inheritedCwdForNewTab());
+  }, [newPiTab, inheritedCwdForNewTab]);
+
   const sendCd = useCallback(
     (path: string) => {
       if (activeLeafId === null) return;
@@ -978,8 +1000,7 @@ export default function App() {
       ),
     [tabs],
   );
-  const sourceControlActive =
-    hasOpenGitTab || sidebarView === "source-control";
+  const sourceControlActive = hasOpenGitTab || sidebarView === "source-control";
   // Stable per-session path so switching tabs / cd-ing in a shell does NOT
   // re-fire git IPC for the badge. The active panel resolves the current
   // context path on its own when the user actually opens git.
@@ -1266,7 +1287,11 @@ export default function App() {
     const findCwd = () => {
       const active = tabs.find((x) => x.id === activeId);
       if (active?.kind === "terminal") {
-        return findLeafCwd(active.paneTree, active.activeLeafId) ?? active.cwd ?? null;
+        return (
+          findLeafCwd(active.paneTree, active.activeLeafId) ??
+          active.cwd ??
+          null
+        );
       }
       for (let i = tabs.length - 1; i >= 0; i--) {
         const t = tabs[i];
@@ -1313,8 +1338,12 @@ export default function App() {
         if (!trimmed) return null;
         const oneLine = trimmed.replace(/\s*\r?\n\s*/g, " ");
         const cwd = findCwd();
-        const short = oneLine.length > 32 ? `${oneLine.slice(0, 32)}…` : oneLine;
-        const { tabId, leafId } = newAgentTab(cwd ?? undefined, `claude · ${short}`);
+        const short =
+          oneLine.length > 32 ? `${oneLine.slice(0, 32)}…` : oneLine;
+        const { tabId, leafId } = newAgentTab(
+          cwd ?? undefined,
+          `claude · ${short}`,
+        );
         useManagedAgentsStore
           .getState()
           .register({ leafId, tabId, sessionId, task: oneLine, cwd });
@@ -1424,6 +1453,15 @@ export default function App() {
       <div
         className={cn(
           "absolute inset-0 px-3 pt-2 pb-2",
+          !isPiTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isPiTab}
+      >
+        <PiStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 px-3 pt-2 pb-2",
           !isAiDiffTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isAiDiffTab}
@@ -1467,28 +1505,29 @@ export default function App() {
         <div className="relative flex h-screen flex-col overflow-hidden bg-background text-foreground">
           {!zenMode && (
             <Header
-            tabs={tabs}
-            activeId={activeId}
-            onSelect={setActiveId}
-            onNew={openNewTab}
-            onNewPrivate={openNewPrivateTab}
-            onNewPreview={() => openPreviewTab("")}
-            onNewEditor={() => setNewEditorOpen(true)}
-            onNewGitGraph={openGitGraphFromContext}
-            onClose={handleClose}
-            onPin={pinTab}
-            onRename={handleRenameTab}
-            onToggleSidebar={toggleSidebar}
-            onSplit={splitActivePaneInActiveTab}
-            canSplit={
-              activeTerminalTab !== null &&
-              leafIds(activeTerminalTab.paneTree).length < MAX_PANES_PER_TAB
-            }
-            onActivateAgent={onActivateAgent}
-            onActivateLocalAgent={onActivateLocalAgent}
-            onOpenSettings={() => void openSettingsWindow()}
-            searchTarget={searchTarget}
-            searchRef={searchInlineRef}
+              tabs={tabs}
+              activeId={activeId}
+              onSelect={setActiveId}
+              onNew={openNewTab}
+              onNewPrivate={openNewPrivateTab}
+              onNewPreview={() => openPreviewTab("")}
+              onNewEditor={() => setNewEditorOpen(true)}
+              onNewPi={openNewPiTab}
+              onNewGitGraph={openGitGraphFromContext}
+              onClose={handleClose}
+              onPin={pinTab}
+              onRename={handleRenameTab}
+              onToggleSidebar={toggleSidebar}
+              onSplit={splitActivePaneInActiveTab}
+              canSplit={
+                activeTerminalTab !== null &&
+                leafIds(activeTerminalTab.paneTree).length < MAX_PANES_PER_TAB
+              }
+              onActivateAgent={onActivateAgent}
+              onActivateLocalAgent={onActivateLocalAgent}
+              onOpenSettings={() => void openSettingsWindow()}
+              searchTarget={searchTarget}
+              searchRef={searchInlineRef}
             />
           )}
 
@@ -1573,16 +1612,16 @@ export default function App() {
 
           {!zenMode && (
             <StatusBar
-            cwd={activeCwd}
-            filePath={activeFilePath}
-            home={home}
-            onCd={sendCd}
-            onWorkspaceChange={switchWorkspace}
-            onOpenMini={openMini}
-            hasComposer={hasComposer}
-            privateActive={
-              activeTab?.kind === "terminal" && activeTab.private === true
-            }
+              cwd={activeCwd}
+              filePath={activeFilePath}
+              home={home}
+              onCd={sendCd}
+              onWorkspaceChange={switchWorkspace}
+              onOpenMini={openMini}
+              hasComposer={hasComposer}
+              privateActive={
+                activeTab?.kind === "terminal" && activeTab.private === true
+              }
             />
           )}
 

@@ -39,6 +39,7 @@ type Props = {
   onNewPrivate: () => void;
   onNewPreview: () => void;
   onNewEditor: () => void;
+  onNewPi: () => void;
   onNewGitGraph: () => void;
   onClose: (id: number) => void;
   /** Promote a preview (transient) tab to persistent. */
@@ -66,6 +67,7 @@ export function Header({
   onNewPrivate,
   onNewPreview,
   onNewEditor,
+  onNewPi,
   onNewGitGraph,
   onClose,
   onPin,
@@ -178,10 +180,12 @@ export function Header({
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {!IS_MAC && <NotificationBell
+        {!IS_MAC && (
+          <NotificationBell
             onActivate={onActivateAgent}
             onActivateLocal={onActivateLocalAgent}
-          />}
+          />
+        )}
       </div>
 
       {!IS_MAC && <span className="mx-1 h-5 w-px shrink-0 bg-border" />}
@@ -200,6 +204,7 @@ export function Header({
           onNewPrivate={onNewPrivate}
           onNewPreview={onNewPreview}
           onNewEditor={onNewEditor}
+          onNewPi={onNewPi}
           onNewGitGraph={onNewGitGraph}
           onClose={onClose}
           onPin={onPin}

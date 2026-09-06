@@ -57,6 +57,13 @@ export type MarkdownTab = {
   path: string;
 };
 
+export type PiTab = {
+  id: number;
+  kind: "pi";
+  title: string;
+  cwd?: string;
+};
+
 export type AiDiffStatus = "pending" | "approved" | "rejected";
 
 export type AiDiffTab = {
@@ -107,6 +114,7 @@ export type Tab =
   | EditorTab
   | PreviewTab
   | MarkdownTab
+  | PiTab
   | AiDiffTab
   | GitDiffTab
   | GitHistoryTab
@@ -177,26 +185,23 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return tabId;
   }, []);
 
-  const newAgentTab = useCallback(
-    (cwd: string | undefined, title: string) => {
-      const tabId = nextIdRef.current++;
-      const leafId = nextIdRef.current++;
-      setTabs((t) => [
-        ...t,
-        {
-          id: tabId,
-          kind: "terminal",
-          title,
-          cwd,
-          paneTree: { kind: "leaf", id: leafId, cwd },
-          activeLeafId: leafId,
-        },
-      ]);
-      setActiveId(tabId);
-      return { tabId, leafId };
-    },
-    [],
-  );
+  const newAgentTab = useCallback((cwd: string | undefined, title: string) => {
+    const tabId = nextIdRef.current++;
+    const leafId = nextIdRef.current++;
+    setTabs((t) => [
+      ...t,
+      {
+        id: tabId,
+        kind: "terminal",
+        title,
+        cwd,
+        paneTree: { kind: "leaf", id: leafId, cwd },
+        activeLeafId: leafId,
+      },
+    ]);
+    setActiveId(tabId);
+    return { tabId, leafId };
+  }, []);
 
   const newPrivateTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
@@ -416,6 +421,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return targetId;
   }, []);
 
+  const newPiTab = useCallback((cwd?: string) => {
+    const id = nextIdRef.current++;
+    setTabs((t) => [...t, { id, kind: "pi", title: "pi", cwd }]);
+    setActiveId(id);
+    return id;
+  }, []);
+
   const openGitDiffTab = useCallback(
     (input: {
       path: string;
@@ -475,9 +487,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       const existing = curr.find(
         (t) => t.kind === "git-history" && t.repoRoot === input.repoRoot,
       );
-      const title = input.branch
-        ? `History · ${input.branch}`
-        : "Git History";
+      const title = input.branch ? `History · ${input.branch}` : "Git History";
       if (existing) {
         const nextTabs = curr.map((t) =>
           t.id === existing.id ? { ...t, title } : t,
@@ -590,7 +600,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             ...(patch.title !== undefined && { title: patch.title }),
             ...(patch.cwd !== undefined && { cwd: patch.cwd }),
             ...(patch.customTitle !== undefined && {
-              customTitle: patch.customTitle === "" ? undefined : patch.customTitle,
+              customTitle:
+                patch.customTitle === "" ? undefined : patch.customTitle,
             }),
           };
         }
@@ -765,8 +776,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       }
       const remaining = leafIds(newTree);
       const sib = siblingLeafOf(t.paneTree, target);
-      const newActive =
-        sib && remaining.includes(sib) ? sib : remaining[0];
+      const newActive = sib && remaining.includes(sib) ? sib : remaining[0];
       removedLeaf = target;
       return curr.map((x) =>
         x.id === tabId
@@ -812,6 +822,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     pinTab,
     newPreviewTab,
     newMarkdownTab,
+    newPiTab,
     openAiDiffTab,
     openGitDiffTab,
     openCommitHistoryTab,
