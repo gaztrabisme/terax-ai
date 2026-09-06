@@ -47,7 +47,7 @@ import {
   GitHistoryStack,
   type GitHistorySearchHandle,
 } from "@/modules/git-history";
-import { getLaunchDir } from "@/lib/launchDir";
+import { consumeLaunchPi, getLaunchDir } from "@/lib/launchDir";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useZoom } from "@/lib/useZoom";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
@@ -408,12 +408,20 @@ export default function App() {
     [workspaceEnv, setWorkspaceEnv, resetWorkspace],
   );
   useEffect(() => {
+    let alive = true;
     native
       .workspaceCurrentDir()
-      .then(setLaunchCwd)
+      .then(async (cwd) => {
+        if (!alive) return;
+        setLaunchCwd(cwd);
+        if (await consumeLaunchPi()) newPiTab(cwd);
+      })
       .catch(() => setLaunchCwd(null))
       .finally(() => setLaunchCwdResolved(true));
-  }, []);
+    return () => {
+      alive = false;
+    };
+  }, [newPiTab]);
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [newEditorOpen, setNewEditorOpen] = useState(false);

@@ -16,6 +16,28 @@ fn get_launch_dir(state: State<'_, LaunchDir>) -> Option<String> {
     state.0.lock().expect("LaunchDir mutex poisoned").take()
 }
 
+/// Drained on first read so HMR / re-mounts can't replay the launch flag.
+#[derive(Default)]
+struct LaunchPi(Mutex<bool>);
+
+#[tauri::command]
+fn get_launch_pi(state: State<'_, LaunchPi>) -> bool {
+    let mut flag = state.0.lock().expect("LaunchPi mutex poisoned");
+    std::mem::take(&mut *flag)
+}
+
+fn parse_launch_pi() -> bool {
+    launch_pi_from_args(std::env::args().skip(1))
+}
+
+fn launch_pi_from_args<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter().any(|arg| arg.as_ref() == "--pi")
+}
+
 fn parse_launch_dir() -> Option<String> {
     for arg in std::env::args().skip(1) {
         if arg.starts_with('-') {
@@ -113,6 +135,7 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let cli_dir = parse_launch_dir();
+    let cli_pi = parse_launch_pi();
     workspace::init_launch_cwd(cli_dir.as_deref());
 
     tauri::Builder::default()
@@ -170,6 +193,7 @@ pub fn run() {
             registry
         })
         .manage(LaunchDir(Mutex::new(cli_dir)))
+        .manage(LaunchPi(Mutex::new(cli_pi)))
         .invoke_handler(tauri::generate_handler![
             pty::pty_open,
             pty::pty_write,
@@ -229,6 +253,7 @@ pub fn run() {
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             get_launch_dir,
+            get_launch_pi,
             open_settings_window,
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
@@ -242,4 +267,31 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod launch_args_tests {
+    use super::launch_pi_from_args;
+
+    #[test]
+    fn bare_flag_is_detected() {
+        assert!(launch_pi_from_args(["--pi"]));
+    }
+
+    #[test]
+    fn flag_is_detected_among_positional_and_flags() {
+        assert!(launch_pi_from_args(["/tmp", "--pi"]));
+        assert!(launch_pi_from_args(["--pi", "/tmp"]));
+        assert!(launch_pi_from_args(["--some-flag", "/tmp", "--pi"]));
+    }
+
+    #[test]
+    fn similar_but_distinct_args_are_not_detected() {
+        assert!(!launch_pi_from_args(["--pia", "--pi=1", "pi", "-p"]));
+    }
+
+    #[test]
+    fn empty_argv_is_false() {
+        assert!(!launch_pi_from_args(Vec::<&str>::new()));
+    }
 }

@@ -12,3 +12,12 @@ export async function initLaunchDir(): Promise<void> {
 export function getLaunchDir(): string | undefined {
   return cached;
 }
+
+// Backend drains the flag on first read; a failed call is treated as absent.
+export async function consumeLaunchPi(): Promise<boolean> {
+  try {
+    return (await invoke<boolean>("get_launch_pi")) === true;
+  } catch {
+    return false;
+  }
+}
