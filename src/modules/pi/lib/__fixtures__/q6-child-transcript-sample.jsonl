@@ -1,4 +1,4 @@
-{"type":"session","version":3,"id":"8b394965-ac25-4144-8d5e-87dc14d04ad6","timestamp":"2026-09-06T13:25:00.834Z","cwd":"/Users/GaryT/Documents/Work/Lab/efficient-pi","provider":"omlx","modelId":"Qwen3.6-35B-A3B-OptiQ-4bit","thinkingLevel":"off"}
+{"type":"session","version":3,"id":"8b394965-ac25-4144-8d5e-87dc14d04ad6","timestamp":"2026-09-06T13:25:00.834Z","cwd":"/home/user/Documents/Work/Lab/efficient-pi","provider":"omlx","modelId":"Qwen3.6-35B-A3B-OptiQ-4bit","thinkingLevel":"off"}
 {"type":"agent_start","sessionId":"8b394965-ac25-4144-8d5e-87dc14d04ad6"}
 {"type":"message_start","message":{"role":"user","content":"Task: Reply with exactly: RESULT: done and nothing else","timestamp":1788701100842}}
 {"type":"message_end","message":{"role":"user","content":"Task: Reply with exactly: RESULT: done and nothing else","timestamp":1788701100842}}

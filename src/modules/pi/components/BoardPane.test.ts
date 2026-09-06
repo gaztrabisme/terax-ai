@@ -17,7 +17,7 @@ describe("board command shape", () => {
 
   it("defaults the binary to the efficient-pi checkout", () => {
     expect(PI_MODULE_PREFS_DEFAULTS.boardBin).toBe(
-      "/Users/GaryT/Documents/Work/Lab/efficient-pi/bin/board",
+      "$HOME/Documents/Work/Lab/efficient-pi/bin/board",
     );
   });
 });

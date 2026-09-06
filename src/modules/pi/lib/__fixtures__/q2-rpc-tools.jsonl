@@ -1,4 +1,4 @@
-{"cmd": ["/Users/GaryT/Documents/Work/Lab/efficient-pi/bin/pi", "--mode", "rpc", "--tools", "bash"], "pid": 34694, "hard_timeout_s": 120, "dir": "meta", "ts": 475613.031}
+{"cmd": ["/home/user/Documents/Work/Lab/efficient-pi/bin/pi", "--mode", "rpc", "--tools", "bash"], "pid": 34694, "hard_timeout_s": 120, "dir": "meta", "ts": 475613.031}
 {"raw": "{\"id\": \"1\", \"type\": \"prompt\", \"message\": \"Call the bash tool with cmd 'echo hello-r2'. Do nothing else.\"}", "dir": "stdin", "ts": 475613.848}
 {"bytes": 63, "raw": "{\"command\":\"prompt\",\"id\":\"1\",\"success\":true,\"type\":\"response\"}", "dir": "stdout", "ts": 475613.849}
 {"bytes": 74, "raw": "{\"type\":\"agent_start\",\"sessionId\":\"e6ed721c-ec64-494b-b03d-89c430d5f4c7\"}", "dir": "stdout", "ts": 475613.896}

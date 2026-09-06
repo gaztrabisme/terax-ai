@@ -8,10 +8,8 @@ export const piModulePrefsSchema = z.object({
   launchMode: z.enum(["auto", "launcher", "direct"]).default("auto"),
   draftDir: z.string().default(".pi/drafts"),
   defaultAgentDir: z.string().default(""),
-  /** Absolute path to the efficient-pi board CLI (same one board.mjs uses). */
-  boardBin: z
-    .string()
-    .default("/Users/GaryT/Documents/Work/Lab/efficient-pi/bin/board"),
+  /** Path to the efficient-pi board CLI (same one board.mjs uses); a leading $HOME/ expands in the shell. */
+  boardBin: z.string().default("$HOME/Documents/Work/Lab/efficient-pi/bin/board"),
 });
 
 export type PiSettingsSection = z.infer<typeof piModulePrefsSchema>;

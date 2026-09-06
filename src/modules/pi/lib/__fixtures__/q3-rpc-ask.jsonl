@@ -1,4 +1,4 @@
-{"cmd": ["/Users/GaryT/Documents/Work/Lab/efficient-pi/bin/pi", "--mode", "rpc", "--tools", "read,ask"], "pid": 35868, "hard_timeout_s": 120, "dir": "meta", "ts": 476010.703}
+{"cmd": ["/home/user/Documents/Work/Lab/efficient-pi/bin/pi", "--mode", "rpc", "--tools", "read,ask"], "pid": 35868, "hard_timeout_s": 120, "dir": "meta", "ts": 476010.703}
 {"raw": "{\"id\": \"1\", \"type\": \"prompt\", \"message\": \"Mandatory: call the ask tool right now, no other action. Ask the question 'Proceed?' with options Yes and No. Do not answer in text.\"}", "dir": "stdin", "ts": 476011.519}
 {"bytes": 63, "raw": "{\"command\":\"prompt\",\"id\":\"1\",\"success\":true,\"type\":\"response\"}", "dir": "stdout", "ts": 476011.519}
 {"bytes": 74, "raw": "{\"type\":\"agent_start\",\"sessionId\":\"831b3a32-760a-452f-ba3e-880e687e554e\"}", "dir": "stdout", "ts": 476011.566}

@@ -21,8 +21,14 @@ type Props = {
 // The binary is an absolute setting, not a cwd-relative lookup; --root points
 // it at the project whose .pi/board.db it should read while the shell keeps
 // the tab cwd as working directory.
+function quoteBin(boardBin: string): string {
+  return boardBin.startsWith("$HOME/")
+    ? `"$HOME"/${quoteShellArg(boardBin.slice("$HOME/".length))}`
+    : quoteShellArg(boardBin);
+}
+
 export function boardListCommand(boardBin: string, root: string): string {
-  return `${quoteShellArg(boardBin)} --root ${quoteShellArg(root)} board`;
+  return `${quoteBin(boardBin)} --root ${quoteShellArg(root)} board`;
 }
 
 export function boardShowCommand(
@@ -30,7 +36,7 @@ export function boardShowCommand(
   root: string,
   ticketId: string,
 ): string {
-  return `${quoteShellArg(boardBin)} --root ${quoteShellArg(root)} show ${quoteShellArg(ticketId)}`;
+  return `${quoteBin(boardBin)} --root ${quoteShellArg(root)} show ${quoteShellArg(ticketId)}`;
 }
 
 // The board is read through <cwd>/bin/board via the existing one-shot shell
