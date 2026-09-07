@@ -146,7 +146,9 @@ export function useUpdater({ autoCheck = true }: HookOptions = {}) {
   }, []);
 
   useEffect(() => {
-    if (!autoCheck) return;
+    // Forks built with VITE_TERAX_UPDATER=off never check upstream releases;
+    // an accepted update would replace the fork with the upstream build.
+    if (!autoCheck || import.meta.env.VITE_TERAX_UPDATER === "off") return;
     void runCheck();
   }, [autoCheck, runCheck]);
 
