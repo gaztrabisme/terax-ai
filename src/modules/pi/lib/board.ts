@@ -131,16 +131,44 @@ export function quoteBin(bin: string): string {
     : quoteShellArg(bin);
 }
 
-export function boardListCommand(boardBin: string, root: string): string {
-  return `${quoteBin(boardBin)} --root ${quoteShellArg(root)} board --json`;
+/**
+ * Resolves the agent binary once and returns it; callers that build a board
+ * command with a blank board binary await this so the fallback never runs an
+ * empty program.
+ */
+export function ensureAgentBin(agentBin = ""): Promise<string> {
+  const pref = agentBin.trim();
+  if (pref) return Promise.resolve(pref);
+  if (resolvedAgentBin) return Promise.resolve(resolvedAgentBin);
+  return loadResolvedAgentBin().then((bin) => bin ?? "");
+}
+
+/**
+ * Read verbs: the bin/board shim when a board binary is set (it exports
+ * HARNESS_DB from --root and execs the agent), else the harness agent directly
+ * against <root>/.pi/board.db, which is what the shim does.
+ */
+export function boardListCommand(
+  boardBin: string,
+  root: string,
+  agentBin = "",
+): string {
+  if (boardBin.trim()) {
+    return `${quoteBin(boardBin)} --root ${quoteShellArg(root)} board --json`;
+  }
+  return `HARNESS_DB=${quoteShellArg(`${root}/.pi/board.db`)} ${quoteBin(effectiveAgentBin(agentBin))} board --json`;
 }
 
 export function boardShowCommand(
   boardBin: string,
   root: string,
   ticketId: string,
+  agentBin = "",
 ): string {
-  return `${quoteBin(boardBin)} --root ${quoteShellArg(root)} show ${quoteShellArg(ticketId)} --json`;
+  if (boardBin.trim()) {
+    return `${quoteBin(boardBin)} --root ${quoteShellArg(root)} show ${quoteShellArg(ticketId)} --json`;
+  }
+  return `HARNESS_DB=${quoteShellArg(`${root}/.pi/board.db`)} ${quoteBin(effectiveAgentBin(agentBin))} show ${quoteShellArg(ticketId)} --json`;
 }
 
 // Human keystone actions run the harness binary directly against the board DB.

@@ -15,6 +15,7 @@ import {
   DEFAULT_AGENT_BIN,
   boardActionCommand,
   boardShowCommand,
+  ensureAgentBin,
   parseTicket,
   stateLabel,
   type BoardVerb,
@@ -103,12 +104,15 @@ export function TicketSheet({
     let alive = true;
     setTicket(null);
     setLoadError(null);
-    invoke<CommandOutput>("shell_run_command", {
-      command: boardShowCommand(boardBin, cwd, ticketId),
-      cwd,
-      timeoutSecs: 15,
-      workspace: currentWorkspaceEnv(),
-    })
+    ensureAgentBin(agentBin)
+      .then((bin) =>
+        invoke<CommandOutput>("shell_run_command", {
+          command: boardShowCommand(boardBin, cwd, ticketId, bin),
+          cwd,
+          timeoutSecs: 15,
+          workspace: currentWorkspaceEnv(),
+        }),
+      )
       .then((out) => {
         if (!alive) return;
         try {
@@ -148,12 +152,15 @@ export function TicketSheet({
     setArmed(null);
     setRunning(true);
     setActionError(null);
-    invoke<CommandOutput>("shell_run_command", {
-      command: boardActionCommand(agentBin, cwd, verb, ticketId),
-      cwd,
-      timeoutSecs: 30,
-      workspace: currentWorkspaceEnv(),
-    })
+    ensureAgentBin(agentBin)
+      .then((bin) =>
+        invoke<CommandOutput>("shell_run_command", {
+          command: boardActionCommand(bin, cwd, verb, ticketId),
+          cwd,
+          timeoutSecs: 30,
+          workspace: currentWorkspaceEnv(),
+        }),
+      )
       .then((out) => {
         setRunning(false);
         if (out.exit_code !== 0) {

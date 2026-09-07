@@ -96,7 +96,7 @@ export function PiTab({
 
   // Sessions pane collapse is local state, not the persisted layout: the
   // pane starts closed so the rail keeps today's geometry.
-  const [sessionsCollapsed, setSessionsCollapsed] = useState(true);
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
 
   // Which artifact the pane shows; null means "the latest one".
   const [artifactSel, setArtifactSel] = useState<{
@@ -372,7 +372,7 @@ export function PiTab({
           <ResizablePanel
             id={`pi-sessions-${tabId}`}
             panelRef={sessionsRef}
-            defaultSize={0}
+            defaultSize="18%"
             minSize="48px"
             collapsible
             onResize={handleSessionsResize}

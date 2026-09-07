@@ -5,6 +5,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   boardListCommand,
+  ensureAgentBin,
   parseBoard,
   railTickets,
   type BoardSnapshot,
@@ -53,12 +54,15 @@ export function BoardView({
   const refresh = useCallback(() => {
     if (!cwd) return;
     const seq = ++loadSeq.current;
-    invoke<CommandOutput>("shell_run_command", {
-      command: boardListCommand(boardBin, cwd),
-      cwd,
-      timeoutSecs: 15,
-      workspace: currentWorkspaceEnv(),
-    })
+    ensureAgentBin(agentBin)
+      .then((bin) =>
+        invoke<CommandOutput>("shell_run_command", {
+          command: boardListCommand(boardBin, cwd, bin),
+          cwd,
+          timeoutSecs: 15,
+          workspace: currentWorkspaceEnv(),
+        }),
+      )
       .then((out) => {
         if (seq !== loadSeq.current) return;
         if (out.exit_code !== 0 && out.stdout.trim() === "") {
@@ -79,7 +83,7 @@ export function BoardView({
           setError(e instanceof Error ? e.message : String(e));
         }
       });
-  }, [cwd, boardBin]);
+  }, [cwd, boardBin, agentBin]);
 
   // Refresh on mount, on refreshKey bumps, and every 10s while the document
   // is visible; the interval is cleared on unmount or when the deps change.

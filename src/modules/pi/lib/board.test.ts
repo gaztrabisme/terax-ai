@@ -235,3 +235,21 @@ describe("rail and labels", () => {
     expect(stateLabel("custom_state")).toBe("custom state");
   });
 });
+
+describe("board read commands with a blank board binary", () => {
+  it("runs the harness agent against the project board database", () => {
+    const cmd = boardListCommand("", "/tmp/proj", "/opt/agent");
+    expect(cmd).toBe("HARNESS_DB='/tmp/proj/.pi/board.db' '/opt/agent' board --json");
+  });
+
+  it("shows a ticket through the agent the same way", () => {
+    const cmd = boardShowCommand("", "/tmp/proj", "T-1", "/opt/agent");
+    expect(cmd).toBe("HARNESS_DB='/tmp/proj/.pi/board.db' '/opt/agent' show 'T-1' --json");
+  });
+
+  it("keeps the shim when a board binary is set", () => {
+    expect(boardListCommand("/x/board", "/tmp/proj", "/opt/agent")).toBe(
+      "'/x/board' --root '/tmp/proj' board --json",
+    );
+  });
+});
