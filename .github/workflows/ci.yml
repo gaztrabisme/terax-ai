@@ -49,7 +49,7 @@ jobs:
         with:
           repository: gaztrabisme/efficient-pi
           ref: master
-          path: ../efficient-pi
+          path: sidecar-src/efficient-pi
 
       - uses: actions/setup-node@v6
         with:
@@ -63,7 +63,7 @@ jobs:
           node scripts/prepare-sidecars.mjs --triple x86_64-unknown-linux-gnu
           --pi sidecars/pi_linux_amd64
           --agent sidecars/agent-x86_64-unknown-linux-gnu
-          --agent-dir ../efficient-pi/pi-home/agent
+          --agent-dir sidecar-src/efficient-pi/pi-home/agent
 
       - name: Install Linux build dependencies
         run: |
@@ -122,7 +122,7 @@ jobs:
         with:
           repository: gaztrabisme/efficient-pi
           ref: master
-          path: ../efficient-pi
+          path: sidecar-src/efficient-pi
 
       - uses: actions/setup-node@v6
         with:
@@ -136,7 +136,7 @@ jobs:
           node scripts/prepare-sidecars.mjs --triple ${{ matrix.triple }}
           --pi sidecars/${{ matrix.pi-asset }}
           --agent sidecars/${{ matrix.agent-asset }}
-          --agent-dir ../efficient-pi/pi-home/agent
+          --agent-dir sidecar-src/efficient-pi/pi-home/agent
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -168,7 +168,7 @@ jobs:
         with:
           repository: gaztrabisme/efficient-pi
           ref: master
-          path: ../efficient-pi
+          path: sidecar-src/efficient-pi
 
       - uses: actions/setup-node@v6
         with:
@@ -182,7 +182,7 @@ jobs:
           node scripts/prepare-sidecars.mjs --triple x86_64-unknown-linux-gnu
           --pi sidecars/pi_linux_amd64
           --agent sidecars/agent-x86_64-unknown-linux-gnu
-          --agent-dir ../efficient-pi/pi-home/agent
+          --agent-dir sidecar-src/efficient-pi/pi-home/agent
 
       - name: Install Linux build dependencies
         run: |

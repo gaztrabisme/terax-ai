@@ -27,4 +27,4 @@ src-tauri/resources/pi-home/
 *.sln
 *.sw?
 
-*.tsbuildinfo
+*.tsbuildinfosidecar-src/

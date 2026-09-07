@@ -54,7 +54,7 @@ jobs:
         with:
           repository: gaztrabisme/efficient-pi
           ref: master
-          path: ../efficient-pi
+          path: sidecar-src/efficient-pi
 
       - name: Install Linux build dependencies
         if: matrix.os == 'ubuntu-22.04'
@@ -95,7 +95,7 @@ jobs:
           node scripts/prepare-sidecars.mjs --triple ${{ matrix.triple }}
           --pi sidecars/${{ matrix.pi-asset }}
           --agent sidecars/${{ matrix.agent-asset }}
-          --agent-dir ../efficient-pi/pi-home/agent
+          --agent-dir sidecar-src/efficient-pi/pi-home/agent
 
       # On pi-v* tags this creates a draft release named after the tag and
       # uploads the bundles to it. On branch pushes the release inputs resolve
