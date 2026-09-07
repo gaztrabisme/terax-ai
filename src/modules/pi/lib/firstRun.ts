@@ -5,6 +5,7 @@
 
 import {
   authStatus,
+  cloudProvider,
   piAuthStatusLabel,
   PI_OAUTH_PROVIDERS,
   resolvePiPrefs,
@@ -15,6 +16,7 @@ import {
   type PiRuntimeAgentDir,
   type PiRuntimePrefs,
 } from "@/modules/pi/lib/providers";
+import { cloudKeyStatus, cloudKeyStatusLabel } from "@/modules/pi/lib/secrets";
 
 export type CheckStatus = "ok" | "warn" | "missing";
 
@@ -35,6 +37,16 @@ export type CheckRow = {
 
 /** The two role values the panel checks: prefs.provider and prefs.smol. */
 export type PiRoles = { provider: string; smol: string };
+
+/**
+ * Stored-key and env-var presence per provider, the shapes pi_secret_status
+ * (already mapped to booleans) and pi_secret_env_status answer. Optional so
+ * a failed load degrades to "not set" instead of hiding the rows.
+ */
+export type PiCloudKeyInputs = {
+  stored?: Record<string, boolean>;
+  env?: Record<string, boolean>;
+};
 
 /** Twin of the Rust pi_health response (health.rs HealthResult). */
 export type PiHealthResult = {
@@ -178,15 +190,19 @@ export function rolesScopeLabel(cwd: string | null): string {
 
 /**
  * One row per role (orchestrator, subagent), each labeled with the scope the
- * roles were resolved for. A provider is green when it holds a key or OAuth
- * token, or needs no auth.json entry at all: endpoint providers like bppc and
- * omlx carry their key in models.json.tmpl.
+ * roles were resolved for. Cloud providers go through cloudKeyStatus: the
+ * app's stored key or an env var the spawn would carry counts as green, an
+ * auth.json entry still counts, and "not set" offers Add key, which focuses
+ * the Cloud keys group. Non-cloud providers are green when they hold a key
+ * or OAuth token, or need no auth.json entry at all: endpoint providers like
+ * bppc and omlx carry their key in models.json.tmpl.
  */
 export function providerRows(
   roles: PiRoles,
   authEntries: unknown,
   providerList: PiProviderRow[],
   scope = "global",
+  cloudKeys: PiCloudKeyInputs = {},
 ): CheckRow[] {
   const roleList = [
     {
@@ -210,13 +226,36 @@ export function providerRows(
         action: { label: "Open roles", kind: "focus-roles" },
       };
     }
-    const stored = authStatus(authEntries, provider);
-    if (stored !== "none") {
+    const auth = authStatus(authEntries, provider);
+    if (cloudProvider(provider)) {
+      const status = cloudKeyStatus(
+        provider,
+        cloudKeys.stored?.[provider] === true,
+        cloudKeys.env?.[provider] === true,
+        auth,
+      );
+      if (status === "none") {
+        return {
+          id,
+          label,
+          status: "missing",
+          detail: `${provider}: not set (add one under Cloud keys)`,
+          action: { label: "Add key", kind: "add-key", provider },
+        };
+      }
       return {
         id,
         label,
         status: "ok",
-        detail: `${provider}: ${piAuthStatusLabel(stored)}`,
+        detail: `${provider}: ${cloudKeyStatusLabel(status)}`,
+      };
+    }
+    if (auth !== "none") {
+      return {
+        id,
+        label,
+        status: "ok",
+        detail: `${provider}: ${piAuthStatusLabel(auth)}`,
       };
     }
     const isOAuth = (PI_OAUTH_PROVIDERS as readonly string[]).includes(
@@ -315,6 +354,7 @@ export function buildRows(input: {
   endpoints: PiEndpointView[] | null;
   health: PiHealthMap;
   rolesScope?: string;
+  cloudKeys?: PiCloudKeyInputs;
 }): CheckRow[] {
   return [
     ...pathRows(input.paths),
@@ -323,6 +363,7 @@ export function buildRows(input: {
       input.authEntries,
       input.providerList,
       input.rolesScope,
+      input.cloudKeys,
     ),
     ...endpointRows(input.roles, input.endpoints, input.health),
   ];

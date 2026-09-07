@@ -57,6 +57,14 @@ export const PI_OAUTH_PROVIDERS = [
   "gitlab",
 ] as const;
 
+/**
+ * pi's own warning before an Anthropic consumer-OAuth login (vendor
+ * main.rs setup flow, rendered before the PKCE dance starts); the app shows
+ * the same wording next to the sign-in button.
+ */
+export const PI_ANTHROPIC_OAUTH_WARNING =
+  "Anthropic OAuth (Claude Code consumer account) is no longer recommended. Using consumer OAuth tokens outside the official client may violate Anthropic's consumer Terms of Service and can result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_API_KEY) instead.";
+
 /** Layout listens for this and opens a terminal running `command` in `cwd`. */
 export const PI_OPEN_TERMINAL_EVENT = "pi:open-terminal";
 
@@ -386,6 +394,40 @@ export function removeProviderAuth(
   const base = { ...entries };
   delete base[providerId];
   return base;
+}
+
+/// ---------------------------------------------------------------------------
+/// Cloud keys (Settings > Pi "Cloud keys" group, spawn env injection)
+/// ---------------------------------------------------------------------------
+
+/**
+ * The four cloud providers the app stores keys for under the app data dir.
+ * envVars lists every variable pi reads for the provider (google holds two:
+ * pi's provider metadata lists GEMINI_API_KEY and GOOGLE_API_KEY). Rust twin:
+ * PROVIDER_ENVS in src-tauri/src/modules/pi/secrets.rs.
+ */
+export type PiCloudProvider = {
+  id: string;
+  label: string;
+  envVars: readonly string[];
+};
+
+export const PI_CLOUD_PROVIDERS: readonly PiCloudProvider[] = [
+  { id: "anthropic", label: "Anthropic", envVars: ["ANTHROPIC_API_KEY"] },
+  { id: "openai", label: "OpenAI", envVars: ["OPENAI_API_KEY"] },
+  {
+    id: "google",
+    label: "Google",
+    envVars: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+  },
+  { id: "openrouter", label: "OpenRouter", envVars: ["OPENROUTER_API_KEY"] },
+];
+
+/** The cloud provider table row for an id, or null when it is not cloud. */
+export function cloudProvider(providerId: string): PiCloudProvider | null {
+  return (
+    PI_CLOUD_PROVIDERS.find((p) => p.id === providerId.trim()) ?? null
+  );
 }
 
 /// ---------------------------------------------------------------------------

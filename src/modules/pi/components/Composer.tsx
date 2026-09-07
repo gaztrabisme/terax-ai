@@ -9,6 +9,14 @@ import { cn } from "@/lib/utils";
 import { native } from "@/lib/native";
 import { clearDraft, loadDraft, saveDraft } from "@/modules/pi/lib/drafts";
 import type { PiImageAttachment } from "@/modules/pi/lib/parse";
+import {
+  completeSlashLine,
+  filterPrompts,
+  loadPrompts,
+  slashDraft,
+  type PiPromptEntry,
+} from "@/modules/pi/lib/prompts";
+import { PromptMenu } from "./PromptMenu";
 import { piEditorExtensions } from "./renderers/Markdown";
 
 // Tiptap's Link autolinks any dotted word, so typing CLAUDE.md produced
@@ -260,6 +268,53 @@ export function Composer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
+  /// Slash menu (prompt library). pi expands "/name args" lines itself on the
+  /// rpc prompt path (vendor rpc.rs calls ResourceLoader::expand_input), so a
+  /// selection completes the typed name and sends the line unchanged; pi
+  /// echoes the expanded body back as the user message.
+  const [prompts, setPrompts] = useState<PiPromptEntry[]>([]);
+  const promptsLoadedRef = useRef(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuOpenRef = useRef(false);
+  const [filterQuery, setFilterQuery] = useState("");
+  const filterQueryRef = useRef("");
+  const [highlight, setHighlight] = useState(0);
+  const highlightRef = useRef(0);
+  const filteredRef = useRef<PiPromptEntry[]>([]);
+  // Escape keeps the menu closed until a fresh line starts with "/" again.
+  const menuDismissedRef = useRef(false);
+  const ensurePromptsRef = useRef<() => void>(() => {});
+
+  const setMenu = (open: boolean) => {
+    menuOpenRef.current = open;
+    setMenuOpen(open);
+  };
+
+  // One fetch per mount: templates change between sessions, not keystrokes.
+  const ensurePrompts = () => {
+    if (promptsLoadedRef.current) return;
+    promptsLoadedRef.current = true;
+    void loadPrompts(cwd).then((list) => setPrompts(list));
+  };
+  ensurePromptsRef.current = ensurePrompts;
+
+  const selectPrompt = (prompt: PiPromptEntry) => {
+    if (!editor) return;
+    const line = completeSlashLine(editor.getMarkdown(), prompt.name);
+    submitRef.current(
+      line,
+      imagesRef.current.map((img) => ({
+        mediaType: img.mediaType,
+        data: img.data,
+      })),
+    );
+    editor.commands.clearContent();
+    setChips([]);
+    setNotice(null);
+    setMenu(false);
+    if (cwd) void clearDraft(cwd, tabId);
+  };
+
   const setChips = (next: PendingImage[]) => {
     imagesRef.current = next;
     setImages(next);
@@ -379,22 +434,34 @@ export function Composer({
 
   // Assigned after the editor exists; the Enter shortcut closes over the ref.
   const performSubmitRef = useRef<() => boolean>(() => false);
+  const selectPromptRef = useRef<(prompt: PiPromptEntry) => void>(() => {});
+  // Enter and the arrows reach the editor as keyboard shortcuts; both go
+  // through refs so the handlers always see this render's state.
+  const performSelectRef = useRef<() => boolean>(() => false);
+  const moveHighlightRef = useRef<(delta: number) => boolean>(() => false);
+  const dismissMenuRef = useRef<() => void>(() => {});
 
   const editor = useEditor({
     extensions: [
       ...composerExtensions(),
       // Enter sends, Shift+Enter inserts a newline. Bold/italic stay on the
       // starter-kit Cmd+B / Cmd+I bindings; the markdown serializer turns
-      // them into ** and *.
+      // them into ** and *. With the prompt menu open, Enter selects the
+      // highlighted template, Escape closes (until a fresh line starts with
+      // "/"), and the arrows move the highlight.
       Extension.create({
         name: "piSubmit",
         addKeyboardShortcuts() {
           return {
-            Enter: () => {
-              if (disabledRef.current) return false;
-              return performSubmitRef.current();
-            },
+            Enter: () => performSelectRef.current(),
             "Shift-Enter": () => this.editor.commands.splitBlock(),
+            Escape: () => {
+              if (!menuOpenRef.current) return false;
+              dismissMenuRef.current();
+              return true;
+            },
+            ArrowDown: () => moveHighlightRef.current(1),
+            ArrowUp: () => moveHighlightRef.current(-1),
           };
         },
       }),
@@ -432,6 +499,76 @@ export function Composer({
     return true;
   };
   performSubmitRef.current = performSubmit;
+
+  // The filtered menu list, mirrored into a ref for the key shortcuts, which
+  // fire outside the render cycle. filterPrompts is deterministic, so this
+  // list matches what PromptMenu renders from the same inputs.
+  const filtered = filterPrompts(prompts, filterQuery);
+  filteredRef.current = filtered;
+  selectPromptRef.current = selectPrompt;
+  highlightRef.current = highlight;
+
+  performSelectRef.current = () => {
+    if (menuOpenRef.current && filteredRef.current.length > 0) {
+      const list = filteredRef.current;
+      selectPromptRef.current(
+        list[Math.min(highlightRef.current, list.length - 1)],
+      );
+      return true;
+    }
+    if (disabledRef.current) return false;
+    return performSubmitRef.current();
+  };
+
+  moveHighlightRef.current = (delta) => {
+    if (!menuOpenRef.current) return false;
+    const count = filteredRef.current.length;
+    if (count > 0) {
+      setHighlight((h) => (h + delta + count) % count);
+    }
+    return true;
+  };
+
+  dismissMenuRef.current = () => {
+    menuDismissedRef.current = true;
+    setMenu(false);
+  };
+
+  // Tracks the editor text: the menu opens when "/" turns an empty composer
+  // into a one-line slash command (editor focused, so a restored draft never
+  // opens it), stays open while the line stays one, and closes on anything
+  // else. Escape keeps it closed until a fresh "/" line starts.
+  useEffect(() => {
+    if (!editor) return;
+    let wasEmpty = editor.isEmpty;
+    const update = () => {
+      const md = editor.getMarkdown();
+      if (md === "/") menuDismissedRef.current = false;
+      const draft = slashDraft(md);
+      const open =
+        !!draft &&
+        editor.view.hasFocus() &&
+        !menuDismissedRef.current &&
+        (wasEmpty || menuOpenRef.current);
+      if (open) {
+        ensurePromptsRef.current();
+        setMenu(true);
+        if (draft && draft.nameToken !== filterQueryRef.current) {
+          filterQueryRef.current = draft.nameToken;
+          setFilterQuery(draft.nameToken);
+          setHighlight(0);
+          highlightRef.current = 0;
+        }
+      } else if (menuOpenRef.current) {
+        setMenu(false);
+      }
+      wasEmpty = editor.isEmpty;
+    };
+    editor.on("update", update);
+    return () => {
+      editor.off("update", update);
+    };
+  }, [editor]);
 
   // Restore the persisted draft once, before the user types.
   useEffect(() => {
@@ -531,7 +668,21 @@ export function Composer({
       {notice ? (
         <div className="mb-1.5 text-xs text-destructive">{notice}</div>
       ) : null}
-      <EditorContent editor={editor} />
+      <div className="relative">
+        {menuOpen && !disabled ? (
+          <PromptMenu
+            prompts={prompts}
+            query={filterQuery}
+            highlighted={Math.min(
+              highlight,
+              Math.max(0, filtered.length - 1),
+            )}
+            onHighlight={setHighlight}
+            onSelect={selectPrompt}
+          />
+        ) : null}
+        <EditorContent editor={editor} />
+      </div>
       {modelAcceptsImages !== true ? (
         <div className="mt-1.5 text-xs text-muted-foreground">
           This model may not accept images; pi decides what to do with them.

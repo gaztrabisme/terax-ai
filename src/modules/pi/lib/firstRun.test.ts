@@ -174,43 +174,76 @@ describe("providerRows", () => {
       providerList,
     );
     expect(rows[0].status).toBe("ok");
-    expect(rows[0].detail).toBe("anthropic: OAuth token");
+    expect(rows[0].detail).toBe("anthropic: auth.json entry");
     expect(rows[1].status).toBe("ok");
-    expect(rows[1].detail).toBe("openrouter: key stored");
+    expect(rows[1].detail).toBe("openrouter: auth.json entry");
   });
 
-  it("asks an unsigned OAuth provider to sign in", () => {
-    const rows = providerRows(
-      { provider: "anthropic", smol: "bppc/m" },
+  it("is ok for a cloud provider with the app's own stored key or env var", () => {
+    const withStored = providerRows(
+      { provider: "anthropic", smol: "openrouter/m" },
       null,
       providerList,
+      "global",
+      { stored: { anthropic: true, openrouter: false } },
+    );
+    expect(withStored[0].status).toBe("ok");
+    expect(withStored[0].detail).toBe("anthropic: stored key");
+    expect(withStored[1].status).toBe("missing");
+    const withEnv = providerRows(
+      { provider: "anthropic", smol: "openrouter/m" },
+      null,
+      providerList,
+      "global",
+      { env: { anthropic: false, openrouter: true } },
+    );
+    expect(withEnv[0].status).toBe("missing");
+    expect(withEnv[1].status).toBe("ok");
+    expect(withEnv[1].detail).toBe("openrouter: env var present");
+    // A stored key outranks an auth.json entry and the env var.
+    const both = providerRows(
+      { provider: "anthropic", smol: "anthropic/m" },
+      { anthropic: { type: "oauth", access: "t" } },
+      providerList,
+      "global",
+      { stored: { anthropic: true }, env: { anthropic: true } },
+    );
+    expect(both[0].detail).toBe("anthropic: stored key");
+  });
+
+  it("asks an unsigned non-cloud OAuth provider to sign in", () => {
+    const rows = providerRows(
+      { provider: "openai-codex", smol: "bppc/m" },
+      null,
+      [],
     );
     expect(rows[0].status).toBe("missing");
-    expect(rows[0].detail).toBe("anthropic is not signed in");
+    expect(rows[0].detail).toBe("openai-codex is not signed in");
     expect(rows[0].action).toEqual({
       label: "Sign in",
       kind: "sign-in",
-      provider: "anthropic",
+      provider: "openai-codex",
     });
   });
 
-  it("asks a key provider with no stored key to add one", () => {
+  it("asks a cloud provider with nothing set to add a key", () => {
     const rows = providerRows(
       { provider: "openrouter", smol: "anthropic/m" },
       {},
       providerList,
+      "global",
+      { stored: { openrouter: false, anthropic: false } },
     );
     expect(rows[0].status).toBe("missing");
-    expect(rows[0].detail).toBe(
-      "openrouter has no key (env OPENROUTER_API_KEY)",
-    );
+    expect(rows[0].detail).toBe("openrouter: not set (add one under Cloud keys)");
     expect(rows[0].action).toEqual({
       label: "Add key",
       kind: "add-key",
       provider: "openrouter",
     });
-    // The smol role reuses the OAuth branch for anthropic.
-    expect(rows[1].action?.kind).toBe("sign-in");
+    // The smol role reuses the cloud branch for anthropic.
+    expect(rows[1].action?.kind).toBe("add-key");
+    expect(rows[1].action?.provider).toBe("anthropic");
   });
 
   it("treats unlisted providers as needing no auth.json entry", () => {

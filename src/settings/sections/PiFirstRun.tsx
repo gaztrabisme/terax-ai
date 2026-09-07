@@ -48,6 +48,8 @@ type PiFirstRunProps = {
   onFocusRoles: () => void;
   onFocusEndpoints: () => void;
   onSignIn: (provider: string) => void;
+  /** Kept for the section's call site; Add key now focuses the Cloud keys
+   *  group instead of opening a per-provider input. */
   onAddKey: (provider: string) => void;
 };
 
@@ -135,12 +137,41 @@ async function loadWorkspaceOverrides(cwd: string | null): Promise<unknown> {
   }
 }
 
+/**
+ * Which cloud providers hold a key stored under the app data dir
+ * (pi_secret_status answers "set"/"unset"; the key itself never leaves the
+ * backend). A failed load degrades to empty, so the role rows just fall back
+ * to the auth.json check.
+ */
+async function loadStoredCloudKeys(): Promise<Record<string, boolean>> {
+  try {
+    const res = await invoke<Record<string, string>>("pi_secret_status");
+    const stored: Record<string, boolean> = {};
+    for (const [id, value] of Object.entries(res ?? {})) {
+      stored[id] = value === "set";
+    }
+    return stored;
+  } catch {
+    return {};
+  }
+}
+
+/** Which cloud env vars the app process already carries (booleans only). */
+async function loadCloudEnvPresence(): Promise<Record<string, boolean>> {
+  try {
+    return (
+      (await invoke<Record<string, boolean>>("pi_secret_env_status")) ?? {}
+    );
+  } catch {
+    return {};
+  }
+}
+
 export function PiFirstRun({
   onFocusPaths,
   onFocusRoles,
   onFocusEndpoints,
   onSignIn,
-  onAddKey,
 }: PiFirstRunProps) {
   const piLauncherDir = usePreferencesStore((s) => s.piLauncherDir);
   const piBoardBin = usePreferencesStore((s) => s.piBoardBin);
@@ -213,11 +244,14 @@ export function PiFirstRun({
       // read there, not from the launcher dir.
       const runtimeDir = paths.runtimeAgentDir.path;
       const ready = !!runtimeDir && !runtimeDir.startsWith("$HOME");
-      const [authEntries, endpoints, providerList] = await Promise.all([
-        loadAuthEntries(runtimeDir, ready),
-        loadEndpoints(runtimeDir, ready),
-        loadProviderList(paths.pi.path, runtimeDir, ready),
-      ]);
+      const [authEntries, endpoints, providerList, storedKeys, envPresence] =
+        await Promise.all([
+          loadAuthEntries(runtimeDir, ready),
+          loadEndpoints(runtimeDir, ready),
+          loadProviderList(paths.pi.path, runtimeDir, ready),
+          loadStoredCloudKeys(),
+          loadCloudEnvPresence(),
+        ]);
       const probes: Probe[] = chosenLocalEndpoints(roles).map((id) => ({
         id,
         url: probeUrlFor(endpoints, id),
@@ -236,6 +270,7 @@ export function PiFirstRun({
           endpoints,
           health,
           rolesScope: scope,
+          cloudKeys: { stored: storedKeys, env: envPresence },
         }),
       );
     } catch (e) {
@@ -283,7 +318,11 @@ export function PiFirstRun({
         if (action.provider) onSignIn(action.provider);
         break;
       case "add-key":
-        if (action.provider) onAddKey(action.provider);
+        // Cloud keys live in their own group now: the check row scrolls to
+        // it instead of opening the legacy per-provider input.
+        document
+          .getElementById("pi-group-cloud-keys")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
         break;
     }
   };

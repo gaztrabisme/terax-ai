@@ -1,7 +1,10 @@
 pub mod health;
 mod launch;
 mod launcher;
+pub mod prompts;
+pub mod secrets;
 mod session;
+pub mod sessions;
 pub mod transcripts;
 
 use std::collections::HashMap;
@@ -14,9 +17,21 @@ use tauri::ipc::Channel;
 use tauri::Manager;
 
 use crate::modules::workspace::{
-    authorize_spawn_cwd, authorize_user_spawn_cwd, WorkspaceEnv, WorkspaceRegistry,
+    authorize_spawn_cwd, authorize_user_spawn_cwd, grant_asset_scope, WorkspaceEnv,
+    WorkspaceRegistry,
 };
 use session::{PiSession, SpawnSpec};
+
+/// Lets the webview render bitmaps pi writes under
+/// <agent dir>/tool-output-artifacts/ via the asset protocol. Granting the
+/// subdirectory keeps the rest of the agent dir (credentials, models.json)
+/// out of the scope.
+fn grant_agent_artifacts(app: &tauri::AppHandle, agent_dir: &Path) {
+    let artifacts = agent_dir.join("tool-output-artifacts");
+    if grant_asset_scope(app, &artifacts) {
+        log::info!("pi asset scope granted: {}", artifacts.display());
+    }
+}
 
 pub struct PiTranscriptState {
     watchers: RwLock<HashMap<u32, Arc<transcripts::WatchHandle>>>,
@@ -77,7 +92,7 @@ pub async fn pi_open(
             log::warn!("pi_open: cwd rejected: {e}");
             e
         })?;
-    let env = launch::expand_env_homes(&env.unwrap_or_default());
+    let mut env = launch::expand_env_homes(&env.unwrap_or_default());
     // Roles ride in the spawn env today (EFFICIENT_PI_* via piSpawnEnv); the
     // direct path renders them through prepare_session, whose report env
     // replaces these values at spawn. The oMLX key falls back to the bash
@@ -114,6 +129,12 @@ pub async fn pi_open(
     let app_data_dir = app.path().app_data_dir().unwrap_or_default();
     let app_version = app.package_info().version.to_string();
     let home = launch::home_dir();
+    // Cloud keys (Settings > Pi) ride into the spawn env on both spawn paths:
+    // stored values fill any cloud env var the caller left unset, so a cloud
+    // orchestrator works the same under the checkout launcher and the direct
+    // spawn without touching either agent dir. The caller's own env wins, and
+    // the values never reach launcher.log: it records step outcomes only.
+    secrets::inject_secret_env(&mut env, &app_data_dir);
     let prefs = launch::PiPrefs {
         launcher_dir: launcher_dir.clone(),
         ..launch::PiPrefs::default()
@@ -145,6 +166,7 @@ pub async fn pi_open(
                 }
             }
         };
+        grant_agent_artifacts(&app, &agent_dir);
         hub.agent_dirs
             .write()
             .expect("pi hub agent dirs poisoned")
@@ -314,6 +336,7 @@ pub fn pi_prepare(
         allow_any_dir: input.allow_any_dir,
     };
     let report = launcher::prepare_session(input);
+    grant_agent_artifacts(&app, &report.agent_dir);
     log::info!(
         "pi_prepare: {}",
         report

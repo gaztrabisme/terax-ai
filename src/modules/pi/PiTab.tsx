@@ -12,6 +12,7 @@ import { BoardView } from "./components/BoardPane";
 import { ChatPane } from "./components/ChatPane";
 import { RailPane } from "./components/RailPane";
 import { RunGraph } from "./components/RunGraph";
+import { SessionSearch } from "./components/SessionSearch";
 import { useChildStore } from "./lib/childStore";
 import { detectArtifacts, type ArtifactDoc } from "./lib/artifacts";
 import { usePiLayout } from "./lib/layoutStore";
@@ -91,6 +92,11 @@ export function PiTab({
   const graphRef = useRef<PanelImperativeHandle | null>(null);
   const boardRef = useRef<PanelImperativeHandle | null>(null);
   const artifactRef = useRef<PanelImperativeHandle | null>(null);
+  const sessionsRef = useRef<PanelImperativeHandle | null>(null);
+
+  // Sessions pane collapse is local state, not the persisted layout: the
+  // pane starts closed so the rail keeps today's geometry.
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(true);
 
   // Which artifact the pane shows; null means "the latest one".
   const [artifactSel, setArtifactSel] = useState<{
@@ -168,6 +174,22 @@ export function PiTab({
     if (!panel) return;
     if (panel.isCollapsed()) panel.expand();
     else panel.collapse();
+  };
+
+  const toggleSessions = () => {
+    const panel = sessionsRef.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) panel.expand();
+    else panel.collapse();
+  };
+
+  const handleSessionsResize = (
+    size: PanelSize,
+    _id: string | number | undefined,
+    prev: PanelSize | undefined,
+  ) => {
+    if (prev === undefined) return;
+    setSessionsCollapsed(size.inPixels <= 0);
   };
 
   useEffect(() => {
@@ -271,7 +293,10 @@ export function PiTab({
       className="min-h-0 flex-1 gap-2"
     >
       <ResizablePanel id={`pi-chat-${tabId}`} minSize="20%">
-        <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border/60">
+        <div
+          data-pi-chat={tabId}
+          className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border/60"
+        >
           <ChatPane tabId={tabId} cwd={cwd} onOpenChild={onOpenChild} />
         </div>
       </ResizablePanel>
@@ -341,6 +366,23 @@ export function PiTab({
               onToggleCollapse={toggleArtifact}
             >
               <ArtifactPane doc={selectedArtifact} cwd={cwd} />
+            </RailPane>
+          </ResizablePanel>
+          <ResizableHandle withHandle className="bg-transparent" />
+          <ResizablePanel
+            id={`pi-sessions-${tabId}`}
+            panelRef={sessionsRef}
+            defaultSize={0}
+            minSize="48px"
+            collapsible
+            onResize={handleSessionsResize}
+          >
+            <RailPane
+              title="Sessions"
+              collapsed={sessionsCollapsed}
+              onToggleCollapse={toggleSessions}
+            >
+              <SessionSearch tabId={tabId} cwd={cwd} />
             </RailPane>
           </ResizablePanel>
         </ResizablePanelGroup>

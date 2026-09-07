@@ -32,6 +32,8 @@ import {
   piAuthStatusLabel,
   piSignInCommandResolved,
   piSignInPayload,
+  PI_ANTHROPIC_OAUTH_WARNING,
+  PI_CLOUD_PROVIDERS,
   PI_OPEN_TERMINAL_EVENT,
   PI_OAUTH_PROVIDERS,
   PI_THINKING_LEVELS,
@@ -39,11 +41,17 @@ import {
   serializeModelsJsonTmpl,
   setProviderApiKey,
   type PiAuthStatus,
+  type PiCloudProvider,
   type PiEndpointView,
   type PiModelRow,
   type PiProviderRow,
   type PiResolvedPaths,
 } from "@/modules/pi/lib/providers";
+import {
+  cloudKeyStatus,
+  cloudKeyStatusLabel,
+  type PiCloudKeyStatus,
+} from "@/modules/pi/lib/secrets";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -137,6 +145,18 @@ export function PiSection() {
   const [reveal, setReveal] = useState<Record<string, string | null>>({});
   const [endpoints, setEndpoints] = useState<PiEndpointView[] | null>(null);
   const [endpointsNote, setEndpointsNote] = useState<string | null>(null);
+  // Cloud keys: which providers hold a stored key (pi_secret_status) and
+  // which env vars the app process already carries (pi_secret_env_status).
+  // Presence only: no command in this group ever returns the key itself.
+  const [secretStatus, setSecretStatus] = useState<Record<
+    string,
+    string
+  > | null>(null);
+  const [envStatus, setEnvStatus] = useState<Record<string, boolean> | null>(
+    null,
+  );
+  const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
+  const [cloudKeysNote, setCloudKeysNote] = useState<string | null>(null);
   const tmplDocRef = useRef<Record<string, unknown>>({});
 
   const launcherDirPath = expandHomePath(piLauncherDir, home);
@@ -157,6 +177,37 @@ export function PiSection() {
   useEffect(() => {
     void invoke<string | null>("pi_home_dir").then(setHome).catch(() => {});
   }, []);
+
+  const loadSecretStatus = useMemo(
+    () => async () => {
+      try {
+        setSecretStatus(
+          await invoke<Record<string, string>>("pi_secret_status"),
+        );
+      } catch {
+        setSecretStatus(null);
+      }
+    },
+    [],
+  );
+
+  const loadEnvStatus = useMemo(
+    () => async () => {
+      try {
+        setEnvStatus(
+          await invoke<Record<string, boolean>>("pi_secret_env_status"),
+        );
+      } catch {
+        setEnvStatus(null);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    void loadSecretStatus();
+    void loadEnvStatus();
+  }, [loadSecretStatus, loadEnvStatus]);
 
   useEffect(() => {
     let alive = true;
@@ -337,6 +388,40 @@ export function PiSection() {
       await loadAuth(runtimeDirPath);
     } catch {
       setProvidersError("could not write auth.json");
+    }
+  };
+
+  // Cloud key badge: the app's stored key wins, then an env var the spawn
+  // would carry anyway, then the runtime agent dir's auth.json entry.
+  const cloudBadge = (providerId: string): PiCloudKeyStatus =>
+    cloudKeyStatus(
+      providerId,
+      secretStatus?.[providerId] === "set",
+      envStatus?.[providerId] === true,
+      authStatus(authEntries, providerId),
+    );
+
+  const saveSecret = async (providerId: string) => {
+    const key = (secretDrafts[providerId] ?? "").trim();
+    if (!key) return;
+    try {
+      await invoke("pi_secret_set", { provider: providerId, key });
+      setSecretDrafts((d) => ({ ...d, [providerId]: "" }));
+      setCloudKeysNote(null);
+      await loadSecretStatus();
+    } catch (e) {
+      setCloudKeysNote(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const clearSecret = async (providerId: string) => {
+    try {
+      await invoke("pi_secret_clear", { provider: providerId });
+      setSecretDrafts((d) => ({ ...d, [providerId]: "" }));
+      setCloudKeysNote(null);
+      await loadSecretStatus();
+    } catch (e) {
+      setCloudKeysNote(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -597,6 +682,30 @@ export function PiSection() {
         </SettingRow>
       </div>
 
+      <div id="pi-group-cloud-keys" className="flex flex-col gap-2">
+        <GroupTitle>Cloud keys</GroupTitle>
+        <p className="text-[12px] text-muted-foreground">
+          Keys are scoped to the agent dir; the app stores its own under the
+          app data dir.
+        </p>
+        {PI_CLOUD_PROVIDERS.map((p) => (
+          <CloudKeyRow
+            key={p.id}
+            provider={p}
+            status={cloudBadge(p.id)}
+            draft={secretDrafts[p.id] ?? ""}
+            setDraft={(v) =>
+              setSecretDrafts((d) => ({ ...d, [p.id]: v }))
+            }
+            onSave={() => void saveSecret(p.id)}
+            onClear={() => void clearSecret(p.id)}
+          />
+        ))}
+        {cloudKeysNote ? (
+          <span className="text-[12px] text-destructive">{cloudKeysNote}</span>
+        ) : null}
+      </div>
+
       <div className="flex flex-col gap-2">
         <GroupTitle>Providers</GroupTitle>
         <div className="flex items-center gap-2">
@@ -634,6 +743,9 @@ export function PiSection() {
                     row={p}
                     status={status}
                     isOAuth={isOAuth}
+                    warning={
+                      p.id === "anthropic" ? PI_ANTHROPIC_OAUTH_WARNING : undefined
+                    }
                     keyInputActive={keyInputFor === p.id}
                     keyDraft={keyDraft}
                     setKeyDraft={setKeyDraft}
@@ -785,6 +897,8 @@ type ProviderRowProps = {
   row: PiProviderRow;
   status: PiAuthStatus;
   isOAuth: boolean;
+  /** Warning text (pi's own wording) shown next to the sign-in button. */
+  warning?: string;
   keyInputActive: boolean;
   keyDraft: string;
   setKeyDraft: (v: string) => void;
@@ -798,6 +912,7 @@ function ProviderRow({
   row,
   status,
   isOAuth,
+  warning,
   keyInputActive,
   keyDraft,
   setKeyDraft,
@@ -823,7 +938,8 @@ function ProviderRow({
           {piAuthStatusLabel(status)}
         </td>
         <td className="px-3 py-1.5">
-          <div className="flex items-center gap-1">
+          <div className="flex flex-col items-start gap-1">
+            <div className="flex items-center gap-1">
             {row.authEnv.length > 0 ? (
               <Button
                 variant="ghost"
@@ -853,6 +969,12 @@ function ProviderRow({
               >
                 Sign in
               </Button>
+            ) : null}
+            </div>
+            {warning ? (
+              <p className="max-w-xl text-[11px] leading-snug text-muted-foreground">
+                {warning}
+              </p>
             ) : null}
           </div>
         </td>
@@ -889,5 +1011,68 @@ function ProviderRow({
         </tr>
       ) : null}
     </>
+  );
+}
+
+type CloudKeyRowProps = {
+  provider: PiCloudProvider;
+  status: PiCloudKeyStatus;
+  draft: string;
+  setDraft: (v: string) => void;
+  onSave: () => void;
+  onClear: () => void;
+};
+
+/** One cloud provider row: badge, masked key input, Save and Clear. */
+function CloudKeyRow({
+  provider,
+  status,
+  draft,
+  setDraft,
+  onSave,
+  onClear,
+}: CloudKeyRowProps) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-card/60 px-3 py-2">
+      <span className="w-24 shrink-0 font-mono text-[12px]">{provider.id}</span>
+      <span
+        className={cn(
+          "w-32 shrink-0 text-[12px]",
+          status === "none" && "text-muted-foreground",
+        )}
+      >
+        {cloudKeyStatusLabel(status)}
+      </span>
+      <Input
+        type="password"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onSave();
+        }}
+        placeholder={provider.envVars.join(" / ")}
+        className="h-7 w-64 font-mono text-[12px]"
+      />
+      <Button
+        size="sm"
+        className="h-7 text-[12px]"
+        disabled={!draft.trim()}
+        onClick={onSave}
+      >
+        Save
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-7 text-[12px]"
+        disabled={status !== "stored"}
+        onClick={onClear}
+      >
+        Clear
+      </Button>
+      <span className="text-[11px] text-muted-foreground">
+        {provider.envVars.join(", ")}
+      </span>
+    </div>
   );
 }

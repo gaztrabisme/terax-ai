@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 // The section must mount on a fresh install where only pi_paths answers and
@@ -133,4 +140,184 @@ it("names the runtime agent dir and disables endpoints before the first seed", a
   ).toBeTruthy();
   expect(screen.getByText("Save endpoints")).toHaveProperty("disabled", true);
   expect(screen.getByText("Add endpoint")).toHaveProperty("disabled", true);
+});
+
+const LAB_PATHS = {
+  pi: {
+    path: "/lab/efficient-pi/bin/pi",
+    source: "pref",
+    candidates: ["/lab/efficient-pi/bin/pi"],
+  },
+  agent: {
+    path: "/harness/target/release/agent",
+    source: "pref",
+    candidates: ["/harness/target/release/agent"],
+  },
+  agentDir: {
+    path: "/lab/efficient-pi/pi-home/agent",
+    source: "pref",
+    candidates: ["/lab/efficient-pi/pi-home/agent"],
+  },
+  runtimeAgentDir: {
+    path: "/lab/efficient-pi/pi-home/agent",
+    source: "pref",
+    seeded: true,
+  },
+};
+
+const PROVIDERS_TABLE = [
+  "provider  name       aliases   auth env                        api",
+  "--------  ---------  --------  -------------------------------  -------------------",
+  "anthropic Anthropic            ANTHROPIC_API_KEY                anthropic-messages",
+  "openai    OpenAI               OPENAI_API_KEY                   openai-responses",
+  "google    Google     gemini    GEMINI_API_KEY, GOOGLE_API_KEY   google-generative-ai",
+].join("\n");
+
+function mockCloudCommands(overrides: {
+  secrets?: Record<string, string>;
+  envs?: Record<string, boolean>;
+  providers?: boolean;
+}): void {
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "pi_paths") return Promise.resolve(LAB_PATHS);
+    if (cmd === "pi_secret_set" || cmd === "pi_secret_clear") {
+      return Promise.resolve(undefined);
+    }
+    if (cmd === "pi_secret_status") {
+      return Promise.resolve(
+        overrides.secrets ?? {
+          anthropic: "unset",
+          openai: "unset",
+          google: "unset",
+          openrouter: "unset",
+        },
+      );
+    }
+    if (cmd === "pi_secret_env_status") {
+      return Promise.resolve(
+        overrides.envs ?? {
+          anthropic: false,
+          openai: false,
+          google: false,
+          openrouter: false,
+        },
+      );
+    }
+    if (overrides.providers && cmd === "shell_run_command") {
+      return Promise.resolve({
+        stdout: PROVIDERS_TABLE,
+        stderr: "",
+        exit_code: 0,
+        timed_out: false,
+        truncated: false,
+      });
+    }
+    return Promise.reject(new Error(`${cmd} unavailable in test`));
+  });
+}
+
+it("shows the cloud key badge, the scoping note and a masked input per provider", async () => {
+  mockCloudCommands({
+    secrets: {
+      anthropic: "set",
+      openai: "unset",
+      google: "unset",
+      openrouter: "unset",
+    },
+    envs: {
+      anthropic: false,
+      openai: true,
+      google: false,
+      openrouter: false,
+    },
+  });
+
+  render(<PiSection />);
+
+  // anthropic holds the app's own key, openai's env var is present in the
+  // app process, google and openrouter fall through to not set.
+  expect(await screen.findByText("stored key")).toBeTruthy();
+  expect(screen.getByText("env var present")).toBeTruthy();
+  expect(screen.getAllByText("not set").length).toBeGreaterThanOrEqual(2);
+  expect(
+    screen.getByText(
+      "Keys are scoped to the agent dir; the app stores its own under the app data dir.",
+    ),
+  ).toBeTruthy();
+  // The inputs stay masked and name the env var pi reads.
+  const input = screen.getByPlaceholderText(
+    "GEMINI_API_KEY / GOOGLE_API_KEY",
+  ) as HTMLInputElement;
+  expect(input.type).toBe("password");
+  // Clear only applies to the app's own stored key.
+  const storedRow = screen
+    .getByPlaceholderText("ANTHROPIC_API_KEY")
+    .closest("div") as HTMLElement;
+  expect(within(storedRow).getByText("Clear")).toHaveProperty("disabled", false);
+  const unsetRow = input.closest("div") as HTMLElement;
+  expect(within(unsetRow).getByText("Clear")).toHaveProperty("disabled", true);
+});
+
+it("saves a cloud key through pi_secret_set", async () => {
+  mockCloudCommands({});
+  render(<PiSection />);
+
+  const input = (await screen.findByPlaceholderText(
+    "ANTHROPIC_API_KEY",
+  )) as HTMLInputElement;
+  const row = input.closest("div") as HTMLElement;
+  fireEvent.change(input, { target: { value: "sk-test-123" } });
+  fireEvent.click(within(row).getByText("Save"));
+  await waitFor(() => {
+    expect(invoke).toHaveBeenCalledWith("pi_secret_set", {
+      provider: "anthropic",
+      key: "sk-test-123",
+    });
+  });
+  // The draft clears after the save; the key never renders as text.
+  await waitFor(() => {
+    expect(input.value).toBe("");
+  });
+});
+
+it("clears a stored cloud key through pi_secret_clear", async () => {
+  mockCloudCommands({
+    secrets: {
+      anthropic: "set",
+      openai: "unset",
+      google: "unset",
+      openrouter: "unset",
+    },
+  });
+  render(<PiSection />);
+
+  const input = (await screen.findByPlaceholderText(
+    "ANTHROPIC_API_KEY",
+  )) as HTMLInputElement;
+  const row = input.closest("div") as HTMLElement;
+  expect(await within(row).findByText("stored key")).toBeTruthy();
+  fireEvent.click(within(row).getByText("Clear"));
+  await waitFor(() => {
+    expect(invoke).toHaveBeenCalledWith("pi_secret_clear", {
+      provider: "anthropic",
+    });
+  });
+});
+
+it("shows pi's Anthropic OAuth warning next to the sign-in button", async () => {
+  mockCloudCommands({ providers: true });
+  render(<PiSection />);
+
+  // "anthropic" also labels the cloud key row; the table cell is the one
+  // inside a tr, and it only exists once the provider table has loaded.
+  const tableRow = await waitFor(() => {
+    const cells = screen.getAllByText("anthropic");
+    const tr = cells.map((c) => c.closest("tr")).find((t) => t !== null);
+    if (!tr) throw new Error("provider table not loaded yet");
+    return tr;
+  });
+  expect(
+    within(tableRow).getByText(/may violate Anthropic's consumer Terms of Service/),
+  ).toBeTruthy();
+  expect(within(tableRow).getByText("Sign in")).toBeTruthy();
 });
