@@ -134,7 +134,7 @@ function defaultPiBin(triple) {
 }
 
 function sourcePath(value, envName, fallback) {
-  const raw = value || process.env[envName] || fallback;
+  const raw = value || process.env[envName] || (typeof fallback === "function" ? fallback() : fallback);
   if (!raw) fail(`missing ${envName.replace(/_BIN|_SRC/, "").toLowerCase()} source; pass it or set ${envName}`);
   const resolved = expandHome(raw);
   if (!existsSync(resolved)) {
@@ -202,7 +202,7 @@ function main() {
     return;
   }
 
-  const piSrc = sourcePath(opts.pi, "PI_BIN", defaultPiBin(triple));
+  const piSrc = sourcePath(opts.pi, "PI_BIN", () => defaultPiBin(triple));
   const agentSrc = sourcePath(opts.agent, "HARNESS_AGENT_BIN", DEFAULT_AGENT_BIN);
   const agentDirSrc = sourcePath(opts.agentDir, "PI_AGENT_DIR_SRC", DEFAULT_AGENT_DIR);
 
