@@ -93,13 +93,20 @@ pub async fn pi_open(
             e
         })?;
     let mut env = launch::expand_env_homes(&env.unwrap_or_default());
+    // Cloud keys (Settings > Pi) ride into the spawn env on both spawn paths:
+    // stored values fill any spawn env var the caller left unset, the oMLX
+    // key among them, so the models.json render below sees the store too. The
+    // caller's own env wins, and the values never reach launcher.log: it
+    // records step outcomes only.
+    let app_data_dir = app.path().app_data_dir().unwrap_or_default();
+    secrets::inject_secret_env(&mut env, &app_data_dir);
     // Roles ride in the spawn env today (EFFICIENT_PI_* via piSpawnEnv); the
     // direct path renders them through prepare_session, whose report env
-    // replaces these values at spawn. The oMLX key falls back to the bash
-    // launcher's own default (~/.omlx/settings.json) so a checkout-less
-    // machine renders models.json; the bppc host keeps render_step's LAN
-    // fallback. EFFICIENT_PI_OMLX_KEY / EFFICIENT_PI_BPPC_HOST override when
-    // a caller sets them.
+    // replaces these values at spawn. The EFFICIENT_PI_BPPC_HOST the frontend
+    // passes carries the piBppcHost pref; a blank one keeps render_step's LAN
+    // fallback. The oMLX key resolves caller env, then the secrets store
+    // (injected above), then the bash launcher's own default
+    // (~/.omlx/settings.json) so a checkout-less machine renders models.json.
     let env_var = |key: &str| env.get(key).cloned().unwrap_or_default();
     let mut omlx_key = env_var("EFFICIENT_PI_OMLX_KEY");
     if omlx_key.trim().is_empty() {
@@ -126,15 +133,8 @@ pub async fn pi_open(
         exe_dir,
         resource_dir: app.path().resource_dir().unwrap_or_default(),
     };
-    let app_data_dir = app.path().app_data_dir().unwrap_or_default();
     let app_version = app.package_info().version.to_string();
     let home = launch::home_dir();
-    // Cloud keys (Settings > Pi) ride into the spawn env on both spawn paths:
-    // stored values fill any cloud env var the caller left unset, so a cloud
-    // orchestrator works the same under the checkout launcher and the direct
-    // spawn without touching either agent dir. The caller's own env wins, and
-    // the values never reach launcher.log: it records step outcomes only.
-    secrets::inject_secret_env(&mut env, &app_data_dir);
     let prefs = launch::PiPrefs {
         launcher_dir: launcher_dir.clone(),
         ..launch::PiPrefs::default()
@@ -326,13 +326,27 @@ pub fn pi_prepare(
         .map(|dir| dir.join("pi-home").join("agent"))
         .unwrap_or_default();
     let app_data_dir = app.path().app_data_dir().unwrap_or_default();
+    // The render resolves the oMLX key the way a spawn does: a caller-supplied
+    // key wins, a blank one fills from the secrets store (the frontend never
+    // sees stored keys, so it cannot pass one), then the bash launcher's own
+    // ~/.omlx/settings.json default; render_step reports the gap when no
+    // source has one.
+    let mut endpoints = input.endpoints;
+    if endpoints.omlx_key.trim().is_empty() {
+        endpoints.omlx_key =
+            secrets::stored_key(&app_data_dir, "omlx").unwrap_or_default();
+        if endpoints.omlx_key.trim().is_empty() {
+            endpoints.omlx_key = launcher::omlx_key_default(launch::home_dir().as_deref())
+                .unwrap_or_default();
+        }
+    }
     let input = launcher::PrepareInput {
         app_version: app.package_info().version.to_string(),
         template_dir,
         app_data_dir,
         cwd,
         roles: input.roles,
-        endpoints: input.endpoints,
+        endpoints,
         allow_any_dir: input.allow_any_dir,
     };
     let report = launcher::prepare_session(input);

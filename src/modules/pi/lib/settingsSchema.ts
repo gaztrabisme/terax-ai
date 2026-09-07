@@ -33,6 +33,8 @@ export const piModulePrefsSchema = z.object({
   thinking: piThinkingSchema.default(DEFAULT_PREFERENCES.piThinking),
   /** Subagent model as provider/model with an optional :thinking suffix. */
   smol: z.string().default(DEFAULT_PREFERENCES.piSmol),
+  /** bppc endpoint host; empty keeps the render's 127.0.0.1 fallback. */
+  bppcHost: z.string().default(DEFAULT_PREFERENCES.piBppcHost),
 });
 
 export type PiSettingsSection = z.infer<typeof piModulePrefsSchema>;

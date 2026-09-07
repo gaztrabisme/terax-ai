@@ -181,6 +181,7 @@ export function PiFirstRun({
   const piModel = usePreferencesStore((s) => s.piModel);
   const piThinking = usePreferencesStore((s) => s.piThinking);
   const piSmol = usePreferencesStore((s) => s.piSmol);
+  const piBppcHost = usePreferencesStore((s) => s.piBppcHost);
 
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<CheckRow[]>([]);
@@ -235,6 +236,7 @@ export function PiFirstRun({
         model: piModel,
         thinking: piThinking,
         smol: piSmol,
+        bppcHost: piBppcHost,
       };
       const overrides = await loadWorkspaceOverrides(selectedCwd);
       const roles: PiRoles = effectiveRoles(globalPrefs, overrides);
@@ -254,7 +256,7 @@ export function PiFirstRun({
         ]);
       const probes: Probe[] = chosenLocalEndpoints(roles).map((id) => ({
         id,
-        url: probeUrlFor(endpoints, id),
+        url: probeUrlFor(endpoints, id, piBppcHost),
       }));
       const results = await Promise.all(probes.map(invokeHealth));
       const health: PiHealthMap = {};
@@ -281,6 +283,7 @@ export function PiFirstRun({
   }, [
     piAgentBin,
     piAgentDir,
+    piBppcHost,
     piBoardBin,
     piLauncherDir,
     piModel,

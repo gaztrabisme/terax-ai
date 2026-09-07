@@ -4,6 +4,9 @@ import {
   cloudKeyStatus,
   cloudKeyStatusLabel,
   cloudProviderEnvVars,
+  omlxKeyStatus,
+  omlxKeyStatusLabel,
+  omlxSettingsFallback,
   secretEnvMap,
 } from "./secrets";
 
@@ -18,6 +21,13 @@ describe("cloudProviderEnvVars", () => {
     expect(cloudProviderEnvVars("google")).toEqual([
       "GEMINI_API_KEY",
       "GOOGLE_API_KEY",
+    ]);
+  });
+
+  it("maps omlx onto OMLX_API_KEY and EFFICIENT_PI_OMLX_KEY", () => {
+    expect(cloudProviderEnvVars("omlx")).toEqual([
+      "OMLX_API_KEY",
+      "EFFICIENT_PI_OMLX_KEY",
     ]);
   });
 
@@ -41,6 +51,13 @@ describe("secretEnvMap", () => {
     expect(secretEnvMap({ google: "sk-g" })).toEqual({
       GEMINI_API_KEY: "sk-g",
       GOOGLE_API_KEY: "sk-g",
+    });
+  });
+
+  it("puts one omlx key on the pi var and the render override", () => {
+    expect(secretEnvMap({ omlx: "sk-omlx" })).toEqual({
+      OMLX_API_KEY: "sk-omlx",
+      EFFICIENT_PI_OMLX_KEY: "sk-omlx",
     });
   });
 
@@ -81,6 +98,46 @@ describe("cloudKeyStatus", () => {
 
   it("never reports a status for a non-cloud provider", () => {
     expect(cloudKeyStatus("bppc", true, true, "key")).toBe("none");
+  });
+
+  it("treats omlx like the other stored providers", () => {
+    expect(cloudKeyStatus("omlx", true, false, "none")).toBe("stored");
+    expect(cloudKeyStatus("omlx", false, true, "none")).toBe("env");
+    expect(cloudKeyStatus("omlx", false, false, "none")).toBe("none");
+  });
+});
+
+describe("omlxKeyStatus and omlxKeyStatusLabel", () => {
+  it("ranks the stored key over the settings.json fallback", () => {
+    expect(omlxKeyStatus(true, true)).toBe("stored");
+    expect(omlxKeyStatus(true, false)).toBe("stored");
+    expect(omlxKeyStatus(false, true)).toBe("fallback");
+    expect(omlxKeyStatus(false, false)).toBe("none");
+  });
+
+  it("uses the exact badge wording", () => {
+    expect(omlxKeyStatusLabel("stored")).toBe("stored");
+    expect(omlxKeyStatusLabel("fallback")).toBe(
+      "settings.json fallback available",
+    );
+    expect(omlxKeyStatusLabel("none")).toBe("not set");
+  });
+});
+
+describe("omlxSettingsFallback", () => {
+  it("answers true only for a non-empty auth.api_key", () => {
+    expect(
+      omlxSettingsFallback({ auth: { api_key: "  sk-omlx  " } }),
+    ).toBe(true);
+    expect(omlxSettingsFallback({ auth: { api_key: "sk" } })).toBe(true);
+  });
+
+  it("answers false for blank keys, bad shapes and junk", () => {
+    expect(omlxSettingsFallback({ auth: { api_key: "   " } })).toBe(false);
+    expect(omlxSettingsFallback({ auth: {} })).toBe(false);
+    expect(omlxSettingsFallback({})).toBe(false);
+    expect(omlxSettingsFallback("junk")).toBe(false);
+    expect(omlxSettingsFallback(null)).toBe(false);
   });
 });
 

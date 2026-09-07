@@ -46,9 +46,15 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => {}),
 }));
 
+const { storeWrites } = vi.hoisted(() => ({
+  storeWrites: [] as [string, unknown][],
+}));
+
 vi.mock("@tauri-apps/plugin-store", () => ({
   LazyStore: class {
-    async set() {}
+    async set(key: string, value: unknown) {
+      storeWrites.push([key, value]);
+    }
     async save() {}
     async entries() {
       return [] as [string, unknown][];
@@ -73,10 +79,12 @@ const FRESH_PI_PREFS = {
   piModel: PI_PREF_DEFAULTS.model,
   piThinking: PI_PREF_DEFAULTS.thinking,
   piSmol: PI_PREF_DEFAULTS.smol,
+  piBppcHost: PI_PREF_DEFAULTS.bppcHost,
 };
 
 beforeEach(() => {
   usePreferencesStore.setState(FRESH_PI_PREFS);
+  storeWrites.length = 0;
 });
 
 afterEach(() => {
@@ -177,8 +185,10 @@ function mockCloudCommands(overrides: {
   secrets?: Record<string, string>;
   envs?: Record<string, boolean>;
   providers?: boolean;
+  /** Body served for $HOME/.omlx/settings.json; absent means unreadable. */
+  omlxSettings?: string;
 }): void {
-  vi.mocked(invoke).mockImplementation((cmd: string) => {
+  vi.mocked(invoke).mockImplementation((cmd: string, ...rest: unknown[]) => {
     if (cmd === "pi_paths") return Promise.resolve(LAB_PATHS);
     if (cmd === "pi_secret_set" || cmd === "pi_secret_clear") {
       return Promise.resolve(undefined);
@@ -190,6 +200,7 @@ function mockCloudCommands(overrides: {
           openai: "unset",
           google: "unset",
           openrouter: "unset",
+          omlx: "unset",
         },
       );
     }
@@ -200,8 +211,19 @@ function mockCloudCommands(overrides: {
           openai: false,
           google: false,
           openrouter: false,
+          omlx: false,
         },
       );
+    }
+    if (overrides.omlxSettings !== undefined && cmd === "fs_read_file") {
+      const args = rest[0] as { path?: string } | undefined;
+      if ((args?.path ?? "").endsWith(".omlx/settings.json")) {
+        return Promise.resolve({
+          kind: "text",
+          content: overrides.omlxSettings,
+          size: overrides.omlxSettings.length,
+        });
+      }
     }
     if (overrides.providers && cmd === "shell_run_command") {
       return Promise.resolve({
@@ -320,4 +342,68 @@ it("shows pi's Anthropic OAuth warning next to the sign-in button", async () => 
     within(tableRow).getByText(/may violate Anthropic's consumer Terms of Service/),
   ).toBeTruthy();
   expect(within(tableRow).getByText("Sign in")).toBeTruthy();
+});
+
+it("commits the bppc host pref and saves the oMLX key under provider omlx", async () => {
+  mockCloudCommands({});
+  render(<PiSection />);
+
+  // The bppc host field names the render's 127.0.0.1 fallback in its
+  // placeholder and commits on blur like every other pref input.
+  const hostInput = (await screen.findByPlaceholderText(
+    "127.0.0.1",
+  )) as HTMLInputElement;
+  expect(hostInput.value).toBe("");
+  fireEvent.change(hostInput, { target: { value: "100.100.100.100" } });
+  fireEvent.blur(hostInput);
+  await waitFor(() => {
+    expect(storeWrites).toContainEqual(["piBppcHost", "100.100.100.100"]);
+  });
+
+  // The oMLX key field stays masked and stores through pi_secret_set with
+  // the provider id the spawn env injection reads; the draft clears after.
+  const desc = screen.getByText(
+    "Stored under the app data dir; the spawn carries OMLX_API_KEY and EFFICIENT_PI_OMLX_KEY.",
+  );
+  const row = desc.closest("div")!.parentElement as HTMLElement;
+  const keyInput = within(row).getByPlaceholderText(
+    "OMLX_API_KEY / EFFICIENT_PI_OMLX_KEY",
+  ) as HTMLInputElement;
+  expect(keyInput.type).toBe("password");
+  fireEvent.change(keyInput, { target: { value: "sk-omlx-test" } });
+  fireEvent.click(within(row).getByText("Save"));
+  await waitFor(() => {
+    expect(invoke).toHaveBeenCalledWith("pi_secret_set", {
+      provider: "omlx",
+      key: "sk-omlx-test",
+    });
+  });
+  await waitFor(() => {
+    expect(keyInput.value).toBe("");
+  });
+});
+
+it("reports the launcher settings.json fallback when no oMLX key is stored", async () => {
+  mockCloudCommands({ omlxSettings: '{"auth":{"api_key":"sk-fallback"}}' });
+  render(<PiSection />);
+
+  expect(
+    await screen.findByText("settings.json fallback available"),
+  ).toBeTruthy();
+});
+
+it("shows the stored oMLX badge and clears through pi_secret_clear", async () => {
+  mockCloudCommands({ secrets: { omlx: "set" } });
+  render(<PiSection />);
+
+  // The endpoints badge reads "stored" (the cloud row spells "stored key").
+  const badge = await screen.findByText("stored");
+  const row = badge.closest("div") as HTMLElement;
+  expect(within(row).getByText("Clear")).toHaveProperty("disabled", false);
+  fireEvent.click(within(row).getByText("Clear"));
+  await waitFor(() => {
+    expect(invoke).toHaveBeenCalledWith("pi_secret_clear", {
+      provider: "omlx",
+    });
+  });
 });

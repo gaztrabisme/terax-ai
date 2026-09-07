@@ -247,9 +247,24 @@ describe("providerRows", () => {
   });
 
   it("treats unlisted providers as needing no auth.json entry", () => {
-    const rows = providerRows({ provider: "bppc", smol: "omlx/m" }, null, []);
+    const rows = providerRows({ provider: "bppc", smol: "local/m" }, null, []);
     expect(rows.map((r) => r.status)).toEqual(["ok", "ok"]);
     expect(rows[0].detail).toBe("bppc: no key required");
+  });
+
+  it("reports an omlx role through the stored-key path", () => {
+    const rows = providerRows({ provider: "bppc", smol: "omlx/m" }, null, []);
+    expect(rows[1].status).toBe("missing");
+    expect(rows[1].detail).toBe("omlx: not set (add one under Cloud keys)");
+    const stored = providerRows(
+      { provider: "bppc", smol: "omlx/m" },
+      null,
+      [],
+      "global",
+      { stored: { omlx: true } },
+    );
+    expect(stored[1].status).toBe("ok");
+    expect(stored[1].detail).toBe("omlx: stored key");
   });
 
   it("labels the role rows global by default and with the passed scope", () => {
@@ -344,6 +359,34 @@ describe("chosenLocalEndpoints and probeUrlFor", () => {
     expect(probeUrlFor(null, "omlx")).toBe("http://127.0.0.1:8000/api/status");
     expect(probeUrlFor(null, "bppc")).toBe("http://127.0.0.1:8080/health");
   });
+
+  it("fills the bppc __BPPC_HOST__ placeholder the way a render would", () => {
+    const tmpl = [
+      {
+        id: "bppc",
+        baseUrl: "http://__BPPC_HOST__:8080/v1",
+        apiKey: "__OMLX_KEY__",
+        modelId: "m",
+        name: "",
+        contextWindow: 0,
+        maxTokens: 0,
+      },
+    ];
+    expect(probeUrlFor(tmpl, "bppc", "100.100.100.100")).toBe(
+      "http://100.100.100.100:8080/v1/health",
+    );
+    // Blank or unset pref keeps the render's 127.0.0.1 fallback.
+    expect(probeUrlFor(tmpl, "bppc", "  ")).toBe(
+      "http://127.0.0.1:8080/v1/health",
+    );
+    expect(probeUrlFor(tmpl, "bppc")).toBe(
+      "http://127.0.0.1:8080/v1/health",
+    );
+    // The placeholder substitution never touches an explicit host.
+    expect(probeUrlFor(endpoints, "bppc", "100.100.100.100")).toBe(
+      "http://10.0.0.9:8080/v1/health",
+    );
+  });
 });
 
 describe("endpointRows", () => {
@@ -395,6 +438,8 @@ describe("summarize", () => {
         bppc: { ok: true, status: 200, ms: 5, error: null },
         omlx: { ok: true, status: 200, ms: 7, error: null },
       },
+      // The omlx subagent role is managed like the cloud keys now.
+      cloudKeys: { stored: { omlx: true } },
     });
     const summary = summarize(all);
     expect(summary).toMatchObject({

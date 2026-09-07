@@ -96,6 +96,17 @@ describe("resolvePiPrefs", () => {
     const resolved = resolvePiPrefs({ launcherDir: "" }, {});
     expect(resolved.launcherDir).toBe("");
   });
+
+  it("carries the bppc host from global prefs and workspace overrides", () => {
+    expect(PI_PREF_DEFAULTS.bppcHost).toBe("");
+    const resolved = resolvePiPrefs(
+      { bppcHost: "100.100.100.100" },
+      { piBppcHost: "10.0.0.9" },
+    );
+    expect(resolved.bppcHost).toBe("10.0.0.9");
+    // A workspace value of the wrong type is ignored like every other key.
+    expect(resolvePiPrefs({}, { piBppcHost: 42 }).bppcHost).toBe("");
+  });
 });
 
 describe("piSpawnEnv", () => {
@@ -141,6 +152,25 @@ describe("piSpawnEnv", () => {
       EFFICIENT_PI_BPPC_HOST: "10.0.0.9",
       EFFICIENT_PI_OMLX_KEY: "sk-omlx",
     });
+  });
+
+  it("exports the pref bppc host only when it is set", () => {
+    const blank = resolvePiPrefs({}, null);
+    // The blank pref is omitted so the render's 127.0.0.1 fallback survives.
+    expect(
+      piSpawnEnv(blank, null, { bppcHost: blank.bppcHost })
+        .EFFICIENT_PI_BPPC_HOST,
+    ).toBeUndefined();
+    const hosted = resolvePiPrefs({}, { piBppcHost: "100.100.100.100" });
+    expect(
+      piSpawnEnv(hosted, null, { bppcHost: hosted.bppcHost })
+        .EFFICIENT_PI_BPPC_HOST,
+    ).toBe("100.100.100.100");
+    // The oMLX key stays backend-side: the caller never passes one.
+    expect(
+      piSpawnEnv(hosted, null, { bppcHost: hosted.bppcHost, omlxKey: null })
+        .EFFICIENT_PI_OMLX_KEY,
+    ).toBeUndefined();
   });
 
   it("sets PI_CODING_AGENT_DIR only for a custom agent dir", () => {

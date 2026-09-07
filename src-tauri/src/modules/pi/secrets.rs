@@ -13,14 +13,17 @@ use std::path::{Path, PathBuf};
 
 use tauri::Manager;
 
-/// Provider id -> the env vars pi reads for it (Rust twin of
+/// Provider id -> the env vars the spawn carries for it (Rust twin of
 /// PI_CLOUD_PROVIDERS in src/modules/pi/lib/providers.ts). google holds two:
-/// pi's provider metadata lists GEMINI_API_KEY and GOOGLE_API_KEY.
+/// pi's provider metadata lists GEMINI_API_KEY and GOOGLE_API_KEY. omlx holds
+/// OMLX_API_KEY for pi plus EFFICIENT_PI_OMLX_KEY, which both spawn paths and
+/// the models.json render read.
 const PROVIDER_ENVS: &[(&str, &[&str])] = &[
     ("anthropic", &["ANTHROPIC_API_KEY"]),
     ("openai", &["OPENAI_API_KEY"]),
     ("google", &["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
     ("openrouter", &["OPENROUTER_API_KEY"]),
+    ("omlx", &["OMLX_API_KEY", "EFFICIENT_PI_OMLX_KEY"]),
 ];
 
 fn envs_for(provider: &str) -> Option<&'static [&'static str]> {
@@ -177,6 +180,14 @@ pub fn inject_secret_env(env: &mut HashMap<String, String>, app_data_dir: &Path)
     }
 }
 
+/// One stored key by provider id, for backend callers that must render with
+/// it (pi_prepare fills a blank oMLX key from here). The key stays in the
+/// process: it is never logged and never returned to the frontend.
+pub fn stored_key(app_data_dir: &Path, provider: &str) -> Option<String> {
+    envs_for(provider.trim())?;
+    read_secrets(app_data_dir).remove(provider.trim())
+}
+
 #[tauri::command]
 pub fn pi_secret_set(app: tauri::AppHandle, provider: String, key: String) -> Result<(), String> {
     let dir = app
@@ -310,6 +321,43 @@ mod tests {
             env.get("GOOGLE_API_KEY").map(String::as_str),
             Some("sk-g")
         );
+    }
+
+    #[test]
+    fn a_stored_omlx_key_fills_both_env_vars_and_stored_key_answers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_secret(dir.path(), "omlx", " sk-omlx ").expect("set omlx");
+        let mut env = HashMap::new();
+        inject_secret_env(&mut env, dir.path());
+        // One stored key lands on both vars the spawn and the render read.
+        assert_eq!(env.get("OMLX_API_KEY").map(String::as_str), Some("sk-omlx"));
+        assert_eq!(
+            env.get("EFFICIENT_PI_OMLX_KEY").map(String::as_str),
+            Some("sk-omlx")
+        );
+        // The caller's own EFFICIENT_PI_OMLX_KEY is never replaced.
+        let mut env = HashMap::new();
+        env.insert(
+            "EFFICIENT_PI_OMLX_KEY".to_string(),
+            "caller-host-key".to_string(),
+        );
+        inject_secret_env(&mut env, dir.path());
+        assert_eq!(
+            env.get("EFFICIENT_PI_OMLX_KEY").map(String::as_str),
+            Some("caller-host-key")
+        );
+        assert_eq!(
+            env.get("OMLX_API_KEY").map(String::as_str),
+            Some("sk-omlx")
+        );
+        // stored_key answers pi_prepare's blank-key fill and trims like the
+        // store write; unknown providers stay None.
+        assert_eq!(
+            stored_key(dir.path(), "omlx").as_deref(),
+            Some("sk-omlx")
+        );
+        assert_eq!(stored_key(dir.path(), "bppc"), None);
+        assert_eq!(stored_key(dir.path(), "  "), None);
     }
 
     #[test]

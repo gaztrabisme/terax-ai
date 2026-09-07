@@ -296,20 +296,25 @@ export function chosenLocalEndpoints(roles: PiRoles): string[] {
 /**
  * Probe URL for one local endpoint: `<base>/health` for the bppc proxy and
  * `/api/status` for oMLX. The base comes from the endpoints settings entry;
- * the fallbacks match the bundled models.json.tmpl defaults.
+ * the fallbacks match the bundled models.json.tmpl defaults. A bppc base
+ * carries the __BPPC_HOST__ placeholder, which the piBppcHost pref fills the
+ * way a render would; a blank pref keeps the render's 127.0.0.1 fallback, so
+ * the row probes what a session would actually reach.
  */
 export function probeUrlFor(
   endpoints: PiEndpointView[] | null,
   id: string,
+  bppcHost?: string | null,
 ): string {
   const path = id === "bppc" ? "/health" : "/api/status";
   const fallback =
     id === "bppc" ? "http://127.0.0.1:8080" : "http://127.0.0.1:8000";
-  const base = endpoints
-    ?.find((ep) => ep.id === id)
-    ?.baseUrl.trim()
-    .replace(/\/+$/, "");
-  return `${base && base.length > 0 ? base : fallback}${path}`;
+  const host = bppcHost?.trim() || "127.0.0.1";
+  const base = (
+    endpoints?.find((ep) => ep.id === id)?.baseUrl.trim().replace(/\/+$/, "") ??
+    ""
+  ).replace(/__BPPC_HOST__/g, host);
+  return `${base.length > 0 ? base : fallback}${path}`;
 }
 
 /**

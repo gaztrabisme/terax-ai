@@ -59,6 +59,7 @@ export type Preferences = {
   piModel: string;
   piThinking: PiThinkingLevel;
   piSmol: string;
+  piBppcHost: string;
   vimMode: boolean;
   showHidden: boolean;
   terminalWebglEnabled: boolean;
@@ -92,6 +93,7 @@ const KEY_PI_PROVIDER = "piProvider";
 const KEY_PI_MODEL = "piModel";
 const KEY_PI_THINKING = "piThinking";
 const KEY_PI_SMOL = "piSmol";
+const KEY_PI_BPPC_HOST = "piBppcHost";
 const KEY_VIM_MODE = "vimMode";
 const KEY_SHOW_HIDDEN = "showHidden";
 const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
@@ -140,6 +142,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   piModel: PI_PREF_DEFAULTS.model,
   piThinking: PI_PREF_DEFAULTS.thinking,
   piSmol: PI_PREF_DEFAULTS.smol,
+  piBppcHost: PI_PREF_DEFAULTS.bppcHost,
   vimMode: false,
   showHidden: false,
   terminalWebglEnabled: true,
@@ -213,6 +216,8 @@ export async function loadPreferences(): Promise<Preferences> {
         : DEFAULT_PREFERENCES.piThinking;
     })(),
     piSmol: get<string>(KEY_PI_SMOL) ?? DEFAULT_PREFERENCES.piSmol,
+    piBppcHost:
+      get<string>(KEY_PI_BPPC_HOST) ?? DEFAULT_PREFERENCES.piBppcHost,
     vimMode: get<boolean>(KEY_VIM_MODE) ?? DEFAULT_PREFERENCES.vimMode,
     showHidden:
       get<boolean>(KEY_SHOW_HIDDEN) ??
@@ -323,6 +328,10 @@ export async function setPiThinking(value: PiThinkingLevel): Promise<void> {
 
 export async function setPiSmol(value: string): Promise<void> {
   await writePref(KEY_PI_SMOL, value);
+}
+
+export async function setPiBppcHost(value: string): Promise<void> {
+  await writePref(KEY_PI_BPPC_HOST, value);
 }
 
 export async function setEditorTheme(value: EditorThemeId): Promise<void> {
@@ -439,6 +448,7 @@ export async function onPreferencesChange(
     [KEY_PI_MODEL]: "piModel",
     [KEY_PI_THINKING]: "piThinking",
     [KEY_PI_SMOL]: "piSmol",
+    [KEY_PI_BPPC_HOST]: "piBppcHost",
     [KEY_VIM_MODE]: "vimMode",
     [KEY_SHOW_HIDDEN]: "showHidden",
     [KEY_TERMINAL_WEBGL_ENABLED]: "terminalWebglEnabled",

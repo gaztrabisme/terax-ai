@@ -65,3 +65,49 @@ export function cloudKeyStatusLabel(status: PiCloudKeyStatus): string {
       return "not set";
   }
 }
+
+/// ---------------------------------------------------------------------------
+/// oMLX key (Settings > Pi endpoints group; stored as provider id "omlx")
+/// ---------------------------------------------------------------------------
+
+/**
+ * The badge states of the endpoints-group oMLX key field, best source first:
+ * the app's stored key, else the launcher's own ~/.omlx/settings.json
+ * fallback, else nothing. Unlike the cloud badge there is no env or auth.json
+ * stop: the render falls back to settings.json directly.
+ */
+export type PiOmlxKeyStatus = "stored" | "fallback" | "none";
+
+export function omlxKeyStatus(
+  stored: boolean,
+  settingsFallback: boolean,
+): PiOmlxKeyStatus {
+  if (stored) return "stored";
+  if (settingsFallback) return "fallback";
+  return "none";
+}
+
+/** Human label for an oMLX badge state; the wording the UI must show. */
+export function omlxKeyStatusLabel(status: PiOmlxKeyStatus): string {
+  switch (status) {
+    case "stored":
+      return "stored";
+    case "fallback":
+      return "settings.json fallback available";
+    case "none":
+      return "not set";
+  }
+}
+
+/**
+ * True when a parsed ~/.omlx/settings.json carries a non-empty
+ * auth.api_key, the launcher's own fallback, without exposing the value.
+ * Anything malformed resolves to false so the badge reports "not set".
+ */
+export function omlxSettingsFallback(parsed: unknown): boolean {
+  if (typeof parsed !== "object" || parsed === null) return false;
+  const auth = (parsed as Record<string, unknown>).auth;
+  if (typeof auth !== "object" || auth === null) return false;
+  const key = (auth as Record<string, unknown>).api_key;
+  return typeof key === "string" && key.trim().length > 0;
+}

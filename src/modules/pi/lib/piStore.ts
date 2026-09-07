@@ -86,6 +86,7 @@ function globalPiPrefs(): Partial<PiRuntimePrefs> {
     model: p.piModel,
     thinking: p.piThinking,
     smol: p.piSmol,
+    bppcHost: p.piBppcHost,
   };
 }
 
@@ -143,7 +144,13 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         ...opts,
         launcherDir,
         env: {
-          ...piSpawnEnv(resolved, resolved.agentDir),
+          // Both spawn paths (checkout launcher, direct pi) inherit this env:
+          // the bppc host rides from the pref (workspace override included),
+          // and Rust injects the stored oMLX key caller-wins, so the
+          // models.json render and pi itself see the same values.
+          ...piSpawnEnv(resolved, resolved.agentDir, {
+            bppcHost: resolved.bppcHost,
+          }),
           ...opts.env,
         },
         onEvent: (line) =>

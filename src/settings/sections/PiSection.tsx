@@ -15,6 +15,7 @@ import {
   setPiAgentBin,
   setPiAgentDir,
   setPiBoardBin,
+  setPiBppcHost,
   setPiLauncherDir,
   setPiModel,
   setPiProvider,
@@ -24,6 +25,7 @@ import {
 import {
   authStatus,
   blankEndpoint,
+  cloudProvider,
   expandHomePath,
   modelsForProvider,
   parseModelsJsonTmpl,
@@ -50,6 +52,9 @@ import {
 import {
   cloudKeyStatus,
   cloudKeyStatusLabel,
+  omlxKeyStatus,
+  omlxKeyStatusLabel,
+  omlxSettingsFallback,
   type PiCloudKeyStatus,
 } from "@/modules/pi/lib/secrets";
 import { invoke } from "@tauri-apps/api/core";
@@ -80,6 +85,7 @@ function CommitInput({
   listId,
   className,
   type,
+  placeholder,
   disabled,
 }: {
   value: string;
@@ -87,6 +93,7 @@ function CommitInput({
   listId?: string;
   className?: string;
   type?: string;
+  placeholder?: string;
   disabled?: boolean;
 }) {
   const [draft, setDraft] = useState(value);
@@ -99,6 +106,7 @@ function CommitInput({
       value={draft}
       type={type}
       list={listId}
+      placeholder={placeholder}
       disabled={disabled}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
@@ -130,6 +138,7 @@ export function PiSection() {
   const piModel = usePreferencesStore((s) => s.piModel);
   const piThinking = usePreferencesStore((s) => s.piThinking);
   const piSmol = usePreferencesStore((s) => s.piSmol);
+  const piBppcHost = usePreferencesStore((s) => s.piBppcHost);
 
   const [home, setHome] = useState<string | null>(null);
   const [paths, setPaths] = useState<PiResolvedPaths | null>(null);
@@ -157,6 +166,9 @@ export function PiSection() {
   );
   const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
   const [cloudKeysNote, setCloudKeysNote] = useState<string | null>(null);
+  // Whether ~/.omlx/settings.json carries an auth.api_key the launcher would
+  // fall back to when no key is stored here; presence only, never the value.
+  const [omlxFallback, setOmlxFallback] = useState(false);
   const tmplDocRef = useRef<Record<string, unknown>>({});
 
   const launcherDirPath = expandHomePath(piLauncherDir, home);
@@ -208,6 +220,29 @@ export function PiSection() {
     void loadSecretStatus();
     void loadEnvStatus();
   }, [loadSecretStatus, loadEnvStatus]);
+
+  // The launcher's own oMLX key fallback decides the endpoints-group badge
+  // when no key is stored here; a failed read means the fallback is absent.
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res: ReadResult = await native.readFile(
+          expandHomePath("$HOME/.omlx/settings.json", home),
+        );
+        if (!alive) return;
+        setOmlxFallback(
+          res.kind === "text" && omlxSettingsFallback(JSON.parse(res.content)),
+        );
+      } catch {
+        if (alive) setOmlxFallback(false);
+      }
+    };
+    void load();
+    return () => {
+      alive = false;
+    };
+  }, [home]);
 
   useEffect(() => {
     let alive = true;
@@ -400,6 +435,14 @@ export function PiSection() {
       envStatus?.[providerId] === true,
       authStatus(authEntries, providerId),
     );
+
+  // The endpoints-group oMLX badge: the app's stored key wins, then the
+  // launcher's own ~/.omlx/settings.json fallback, else not set.
+  const omlxStatus = omlxKeyStatus(
+    secretStatus?.omlx === "set",
+    omlxFallback,
+  );
+  const omlxDraft = secretDrafts.omlx ?? "";
 
   const saveSecret = async (providerId: string) => {
     const key = (secretDrafts[providerId] ?? "").trim();
@@ -781,6 +824,61 @@ export function PiSection() {
           Custom OpenAI-compatible providers. Placeholders like __BPPC_HOST__
           and __OMLX_KEY__ are preserved.
         </p>
+        <SettingRow
+          title="bppc host"
+          description="LAN address or tailnet name of the llama-server box; empty renders 127.0.0.1."
+        >
+          <CommitInput
+            value={piBppcHost}
+            onCommit={setPiBppcHost}
+            placeholder="127.0.0.1"
+            className="w-56"
+          />
+        </SettingRow>
+        <SettingRow
+          title="oMLX key"
+          description="Stored under the app data dir; the spawn carries OMLX_API_KEY and EFFICIENT_PI_OMLX_KEY."
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={cn(
+                "w-44 shrink-0 text-[12px]",
+                omlxStatus === "none" && "text-muted-foreground",
+              )}
+            >
+              {omlxKeyStatusLabel(omlxStatus)}
+            </span>
+            <Input
+              type="password"
+              value={omlxDraft}
+              onChange={(e) =>
+                setSecretDrafts((d) => ({ ...d, omlx: e.target.value }))
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void saveSecret("omlx");
+              }}
+              placeholder={(cloudProvider("omlx")?.envVars ?? []).join(" / ")}
+              className="h-7 w-64 font-mono text-[12px]"
+            />
+            <Button
+              size="sm"
+              className="h-7 text-[12px]"
+              disabled={!omlxDraft.trim()}
+              onClick={() => void saveSecret("omlx")}
+            >
+              Save
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-[12px]"
+              disabled={omlxStatus !== "stored"}
+              onClick={() => void clearSecret("omlx")}
+            >
+              Clear
+            </Button>
+          </div>
+        </SettingRow>
         {unseededBundled ? (
           <p className="text-[12px] text-muted-foreground">
             seeded on the first session

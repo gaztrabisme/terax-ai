@@ -27,6 +27,9 @@ export type PiRuntimePrefs = {
   thinking: PiThinkingLevel;
   /** Subagent model as provider/model with an optional :thinking suffix. */
   smol: string;
+  /** bppc endpoint host (LAN address or tailnet name of the llama-server
+   *  box); empty keeps the render's 127.0.0.1 fallback. */
+  bppcHost: string;
 };
 
 // Every path pref starts empty: a machine-specific path must never be a code
@@ -44,6 +47,9 @@ export const PI_PREF_DEFAULTS: PiRuntimePrefs = {
   model: "",
   thinking: "xhigh",
   smol: "",
+  // Hosts are machine-specific, so like every path pref the empty default
+  // keeps the launcher's own fallback in charge (philosophy 8).
+  bppcHost: "",
 };
 
 /** Providers that authenticate through pi's interactive /login flow. */
@@ -117,6 +123,7 @@ const WORKSPACE_KEYS = {
   model: "piModel",
   thinking: "piThinking",
   smol: "piSmol",
+  bppcHost: "piBppcHost",
 } as const;
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -170,10 +177,11 @@ export function resolvePiPrefs(
  * reads, plus PI_CODING_AGENT_DIR only when the user set a custom agent dir.
  * Empty values are omitted rather than exported, because an empty export
  * would override the checkout launcher's own defaults for unset variables.
- * endpoints carries the models.json.tmpl render overrides (bppc host, oMLX
- * key); no pref stores either today, so the caller passes what it has and
- * the launcher falls back for the rest. A leading $HOME in agentDir is
- * expanded Rust-side before spawn.
+ * endpoints carries the models.json.tmpl render overrides: the bppc host
+ * comes from the piBppcHost pref (the store resolves it per workspace), and
+ * the oMLX key stays backend-side (the secrets store injects it Rust-side,
+ * caller env wins), so the frontend passes null for it. A leading $HOME in
+ * agentDir is expanded Rust-side before spawn.
  */
 export function piSpawnEnv(
   prefs: PiRuntimePrefs,
@@ -401,10 +409,11 @@ export function removeProviderAuth(
 /// ---------------------------------------------------------------------------
 
 /**
- * The four cloud providers the app stores keys for under the app data dir.
- * envVars lists every variable pi reads for the provider (google holds two:
- * pi's provider metadata lists GEMINI_API_KEY and GOOGLE_API_KEY). Rust twin:
- * PROVIDER_ENVS in src-tauri/src/modules/pi/secrets.rs.
+ * The providers the app stores keys for under the app data dir. envVars
+ * lists every variable the spawn carries for the provider (google holds two:
+ * pi's provider metadata lists GEMINI_API_KEY and GOOGLE_API_KEY; omlx holds
+ * OMLX_API_KEY for pi plus EFFICIENT_PI_OMLX_KEY for the models.json render).
+ * Rust twin: PROVIDER_ENVS in src-tauri/src/modules/pi/secrets.rs.
  */
 export type PiCloudProvider = {
   id: string;
@@ -421,6 +430,11 @@ export const PI_CLOUD_PROVIDERS: readonly PiCloudProvider[] = [
     envVars: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
   },
   { id: "openrouter", label: "OpenRouter", envVars: ["OPENROUTER_API_KEY"] },
+  {
+    id: "omlx",
+    label: "oMLX",
+    envVars: ["OMLX_API_KEY", "EFFICIENT_PI_OMLX_KEY"],
+  },
 ];
 
 /** The cloud provider table row for an id, or null when it is not cloud. */
