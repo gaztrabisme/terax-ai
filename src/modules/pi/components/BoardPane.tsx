@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 type CommandOutput = {
   stdout: string;
   stderr: string;
-  exitCode: number | null;
+  exit_code: number | null;
 };
 
 type Props = {
@@ -62,8 +62,8 @@ export function BoardPane({
     })
       .then((out) => {
         if (!alive) return;
-        if (out.exitCode !== 0 && out.stdout.trim() === "") {
-          setError(out.stderr.trim() || `board exited ${out.exitCode}`);
+        if (out.exit_code !== 0 && out.stdout.trim() === "") {
+          setError(out.stderr.trim() || `board exited ${out.exit_code}`);
           setLines([]);
           return;
         }
