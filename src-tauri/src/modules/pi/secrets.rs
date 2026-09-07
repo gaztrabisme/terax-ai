@@ -76,13 +76,14 @@ fn write_secrets(app_data_dir: &Path, secrets: &HashMap<String, String>) -> Resu
         .map_err(|e| format!("cannot create the app data dir: {e}"))?;
     let body = serde_json::to_string_pretty(secrets).map_err(|e| e.to_string())?;
     let path = secrets_path(app_data_dir);
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
         .open(&path)
         .map_err(|e| format!("cannot write the pi secrets file: {e}"))?;
     file.write_all(body.as_bytes())
