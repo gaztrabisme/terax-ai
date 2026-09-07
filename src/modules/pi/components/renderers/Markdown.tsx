@@ -2,7 +2,7 @@ import { Markdown as TiptapMarkdown } from "@tiptap/markdown";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 // One extension set for the composer and the read-only renderers: content
 // round-trips through the exact same schema in both directions.
@@ -22,6 +22,13 @@ export function MarkdownRenderer({ content }: { content: string }) {
     editable: false,
     autofocus: false,
   });
+  // useEditor only reads `content` at creation; streamed assistant text grows
+  // after mount, so push every change into the existing editor.
+  useEffect(() => {
+    if (!editor) return;
+    if (editor.getMarkdown() === doc) return;
+    editor.commands.setContent(doc, { contentType: "markdown" });
+  }, [editor, doc]);
   if (!editor) return null;
   return (
     <EditorContent
