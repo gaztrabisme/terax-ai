@@ -23,6 +23,7 @@ import {
   useState,
 } from "react";
 import { Streamdown } from "streamdown";
+import { markdownImageSrc } from "@/modules/pi/components/renderers/Markdown";
 import { ChatStreamingProvider } from "./chat-code";
 import { MarkdownCode } from "./markdown-code";
 
@@ -321,7 +322,39 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown> & {
   streaming?: boolean;
 };
 
-const streamdownComponents = { code: MarkdownCode };
+type MarkdownImageProps = ComponentProps<"img"> & { node?: unknown };
+
+// Answer-side markdown images. Local absolute paths render through the same
+// asset URL rule as the pi image renderer (relative paths stay put: without a
+// session cwd here they simply fail to load into the chip fallback). http,
+// data, blob and asset URLs pass through untouched. A broken bitmap falls
+// back to a one-line chip instead of a dead image box.
+function MarkdownImage({ src, alt, title, node: _node, ...rest }: MarkdownImageProps) {
+  const [failed, setFailed] = useState(false);
+  if (!src || failed) {
+    return (
+      <span className="my-1 flex items-center gap-2 rounded border border-border/60 px-2 py-1 text-xs text-muted-foreground">
+        <span className="font-medium text-foreground">{alt || "image"}</span>
+        {src ? <span className="truncate font-mono text-xs">{src}</span> : null}
+      </span>
+    );
+  }
+  // The pi tab is this component's only consumer today; the resolution rule
+  // lives next to the composer and renderer schema that share it.
+  const resolved = markdownImageSrc(src, null);
+  return (
+    <img
+      {...rest}
+      src={resolved}
+      alt={alt ?? ""}
+      title={title}
+      onError={() => setFailed(true)}
+      className="my-1 max-h-64 max-w-full rounded border border-border/60 object-contain"
+    />
+  );
+}
+
+const streamdownComponents = { code: MarkdownCode, img: MarkdownImage };
 
 export const MessageResponse = memo(
   ({ className, streaming = false, ...props }: MessageResponseProps) => (

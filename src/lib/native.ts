@@ -6,6 +6,10 @@ export type ReadResult =
   | { kind: "binary"; size: number }
   | { kind: "toolarge"; size: number; limit: number };
 
+/** Raw bytes of one file from the bytes bridge: base64 payload plus the
+ *  mime type guessed from the extension and the file size. */
+export type FileBytes = { base64: string; mimeType: string; size: number };
+
 export type DirEntry = {
   name: string;
   kind: "file" | "dir" | "symlink";
@@ -132,6 +136,13 @@ export const native = {
     }),
   readFile: (path: string) =>
     invoke<ReadResult>("fs_read_file", {
+      path,
+      workspace: currentWorkspaceEnv(),
+    }),
+  // Bytes bridge for bitmaps: capped at 8 MB in the command, mime type from
+  // the file extension.
+  readFileBytes: (path: string) =>
+    invoke<FileBytes>("fs_read_file_bytes", {
       path,
       workspace: currentWorkspaceEnv(),
     }),

@@ -8,17 +8,37 @@ import {
   base64Bytes,
   composerExtensions,
   imageEncoder,
+  imagePathsOf,
   MAX_ATTACHMENTS,
   MAX_TOTAL_IMAGE_BYTES,
   type EncodedImage,
   type PendingImage,
 } from "./Composer";
 
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+const { invokeMock, dialogOpenMock, dragDropHandlers } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  dialogOpenMock: vi.fn(),
+  dragDropHandlers: [] as ((e: unknown) => void)[],
+}));
 
 // The composer's draft calls must resolve without Tauri; fs_read_file answers
 // with a seedable draft so tests can put text into the editor headlessly.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+
+// jsdom has no webview: hand the drag-drop handler to the tests instead.
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: (handler: (e: unknown) => void) => {
+      dragDropHandlers.push(handler);
+      return Promise.resolve(() => {
+        const at = dragDropHandlers.indexOf(handler);
+        if (at !== -1) dragDropHandlers.splice(at, 1);
+      });
+    },
+  }),
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialogOpenMock }));
 
 import { Composer } from "./Composer";
 
@@ -105,6 +125,8 @@ beforeEach(() => {
   // ProseMirror's own drop/paste handlers probe coordinates; jsdom has no
   // layout, so the probe reports "no element" and the handler bails.
   document.elementFromPoint = () => null;
+  dragDropHandlers.length = 0;
+  dialogOpenMock.mockReset();
   invokeMock.mockReset();
   invokeMock.mockImplementation(async () => ({ kind: "text", content: "" }));
   // jsdom has no canvas: stand in for the downscale and re-encode.
@@ -269,6 +291,40 @@ describe("composer send with images", () => {
       expect(container.querySelectorAll("img")).toHaveLength(0);
     });
   });
+
+  it("sends an image-only prompt when the text is empty", async () => {
+    const { container, onSubmit } = renderComposer();
+    pasteFiles(container.querySelector("[aria-label='pi composer']")!, [
+      imageFile("only.png"),
+    ]);
+    await waitFor(() => {
+      expect(container.querySelector("img[alt='only.png']")).toBeTruthy();
+    });
+
+    fireEvent.click(
+      Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "Send",
+      )!,
+    );
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith("", [
+      { mediaType: "image/png", data: btoa("encoded-only.png") },
+    ]);
+    await waitFor(() => {
+      expect(container.querySelectorAll("img")).toHaveLength(0);
+    });
+  });
+
+  it("sends nothing when the composer is empty", () => {
+    const { onSubmit } = renderComposer();
+    fireEvent.click(
+      Array.from(document.querySelectorAll("button")).find(
+        (b) => b.textContent === "Send",
+      )!,
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
 });
 
 describe("appendPendingImage caps", () => {
@@ -318,5 +374,115 @@ describe("base64Bytes", () => {
     expect(base64Bytes("QQ")).toBe(1);
     expect(base64Bytes("AAAA")).toBe(3);
     expect(base64Bytes("")).toBe(0);
+  });
+});
+
+describe("imagePathsOf", () => {
+  it("keeps only paths with an image extension", () => {
+    expect(
+      imagePathsOf(["/a/shot.PNG", "/a/notes.txt", "/b/face.jpeg", "/c/.png"]),
+    ).toEqual(["/a/shot.PNG", "/b/face.jpeg"]);
+  });
+});
+
+describe("composer attach dialog", () => {
+  it("reads picked paths through the bytes bridge into chips", async () => {
+    dialogOpenMock.mockResolvedValue(["/tmp/art/one.png", "/tmp/art/two.jpg"]);
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "fs_read_file_bytes"
+        ? { base64: btoa("rawbytes"), mimeType: "image/png", size: 8 }
+        : { kind: "text", content: "" },
+    );
+    const { container } = renderComposer();
+    fireEvent.click(
+      container.querySelector("button[aria-label='Attach images']")!,
+    );
+    await waitFor(() => {
+      expect(container.querySelector("img[alt='one.png']")).toBeTruthy();
+    });
+    expect(container.querySelector("img[alt='two.jpg']")).toBeTruthy();
+  });
+
+  it("falls back to the hidden input when the dialog is unavailable", async () => {
+    dialogOpenMock.mockRejectedValue(new Error("dialog plugin missing"));
+    const { container } = renderComposer();
+    const input = container.querySelector(
+      "input[type='file']",
+    ) as HTMLInputElement;
+    const clickSpy = vi.spyOn(input, "click");
+    fireEvent.click(
+      container.querySelector("button[aria-label='Attach images']")!,
+    );
+    await waitFor(() => {
+      expect(clickSpy).toHaveBeenCalled();
+    });
+    expect(container.querySelectorAll("img")).toHaveLength(0);
+  });
+
+  it("does nothing when the dialog is cancelled", async () => {
+    dialogOpenMock.mockResolvedValue(null);
+    const { container } = renderComposer();
+    const input = container.querySelector(
+      "input[type='file']",
+    ) as HTMLInputElement;
+    const clickSpy = vi.spyOn(input, "click");
+    fireEvent.click(
+      container.querySelector("button[aria-label='Attach images']")!,
+    );
+    await waitFor(() => {
+      expect(dialogOpenMock).toHaveBeenCalled();
+    });
+    expect(clickSpy).not.toHaveBeenCalled();
+    expect(container.querySelectorAll("img")).toHaveLength(0);
+  });
+});
+
+describe("composer OS drag and drop", () => {
+  function dropAt(
+    container: HTMLElement,
+    paths: string[],
+    inside: boolean,
+  ): void {
+    const composer = container.querySelector("[aria-label='pi composer']");
+    const anchor = composer?.parentElement ?? document.body;
+    document.elementFromPoint = inside
+      ? () => anchor
+      : () => document.body.parentElement; // outside the composer root
+    const handler = dragDropHandlers[dragDropHandlers.length - 1];
+    expect(handler).toBeTruthy();
+    handler!({
+      payload: { type: "drop", paths, position: { x: 6, y: 6 } },
+    });
+  }
+
+  it("turns drops inside the composer into chips via the bridge", async () => {
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "fs_read_file_bytes"
+        ? { base64: btoa("rawbytes"), mimeType: "image/png", size: 8 }
+        : { kind: "text", content: "" },
+    );
+    const { container } = renderComposer();
+    await waitFor(() => {
+      expect(dragDropHandlers.length).toBeGreaterThan(0);
+    });
+    dropAt(container, ["/tmp/dropped.png", "/tmp/skip.txt"], true);
+    await waitFor(() => {
+      expect(container.querySelector("img[alt='dropped.png']")).toBeTruthy();
+    });
+    expect(container.querySelector("img[alt='skip.txt']")).toBeNull();
+  });
+
+  it("ignores drops outside the composer so the terminal handler keeps them", async () => {
+    const { container } = renderComposer();
+    await waitFor(() => {
+      expect(dragDropHandlers.length).toBeGreaterThan(0);
+    });
+    dropAt(container, ["/tmp/dropped.png"], false);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(container.querySelectorAll("img")).toHaveLength(0);
+    expect(invokeMock).not.toHaveBeenCalledWith("fs_read_file_bytes", {
+      path: "/tmp/dropped.png",
+      workspace: expect.anything(),
+    });
   });
 });

@@ -82,6 +82,70 @@ pub fn fs_read_file(path: String, workspace: Option<WorkspaceEnv>) -> Result<Rea
     }
 }
 
+/// The bytes bridge for bitmaps: base64 payload, mime type guessed from the
+/// extension, and the file size. Same workspace path resolution as
+/// fs_read_file, with a tighter 8 MB cap.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBytes {
+    pub base64: String,
+    pub mime_type: String,
+    pub size: u64,
+}
+
+#[tauri::command]
+pub fn fs_read_file_bytes(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<FileBytes, String> {
+    let workspace = WorkspaceEnv::from_option(workspace);
+    let p = resolve_path(&path, &workspace);
+    let meta = std::fs::metadata(&p).map_err(|e| {
+        log::debug!("fs_read_file_bytes stat({}) failed: {e}", p.display());
+        e.to_string()
+    })?;
+
+    let size = meta.len();
+    if size > MAX_FILE_BYTES {
+        return Err(format!(
+            "file is {} bytes, over the {} MB byte-read cap",
+            size,
+            MAX_FILE_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let bytes = std::fs::read(&p).map_err(|e| {
+        log::debug!("fs_read_file_bytes read({}) failed: {e}", p.display());
+        e.to_string()
+    })?;
+    Ok(FileBytes {
+        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        mime_type: mime_for_extension(&p).to_string(),
+        size,
+    })
+}
+
+/// Media type from the file extension, for image types the composer and pi
+/// accept. Anything else (and extension-less names) is generic binary.
+fn mime_for_extension(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("avif") => "image/avif",
+        _ => "application/octet-stream",
+    }
+}
+
 #[derive(Serialize, Clone)]
 struct FileWrittenEvent {
     path: String,
@@ -233,5 +297,87 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"payload");
         // The pre-staged symlink target must not have been written through.
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+    }
+
+    #[test]
+    fn read_file_bytes_returns_base64_and_mime() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("shot.png");
+        std::fs::write(&f, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]).unwrap();
+        let bytes = fs_read_file_bytes(f.to_string_lossy().into_owned(), None).unwrap();
+        assert_eq!(bytes.mime_type, "image/png");
+        assert_eq!(bytes.size, 6);
+        use base64::Engine as _;
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&bytes.base64)
+                .unwrap(),
+            [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]
+        );
+    }
+
+    #[test]
+    fn read_file_bytes_rejects_oversize_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("big.png");
+        let big = std::fs::File::create(&f).unwrap();
+        // Sparse-style write: one byte past the cap is enough to trip it.
+        big.set_len(8 * 1024 * 1024 + 1).unwrap();
+        let err = fs_read_file_bytes(f.to_string_lossy().into_owned(), None)
+            .expect_err("oversize read must fail");
+        assert!(err.contains("8 MB"), "got: {err}");
+    }
+
+    #[test]
+    fn read_file_bytes_allows_file_at_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("edge.png");
+        let file = std::fs::File::create(&f).unwrap();
+        file.set_len(8 * 1024 * 1024).unwrap();
+        let bytes = fs_read_file_bytes(f.to_string_lossy().into_owned(), None).unwrap();
+        assert_eq!(bytes.size, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn read_file_bytes_reports_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("nope.png");
+        assert!(fs_read_file_bytes(f.to_string_lossy().into_owned(), None).is_err());
+    }
+
+    #[test]
+    fn read_file_bytes_takes_the_same_workspace_env_as_fs_read_file() {
+        // The bridge shares fs_read_file's resolution seam: an explicit
+        // workspace env rides the same resolve_path mapping before any IO.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.gif");
+        std::fs::write(&f, b"GIF89a").unwrap();
+        let bytes = fs_read_file_bytes(
+            f.to_string_lossy().into_owned(),
+            Some(crate::modules::workspace::WorkspaceEnv::Local),
+        )
+        .unwrap();
+        assert_eq!(bytes.mime_type, "image/gif");
+        assert_eq!(bytes.size, 6);
+    }
+
+    #[test]
+    fn mime_for_extension_covers_common_image_types() {
+        assert_eq!(mime_for_extension(Path::new("a.PNG")), "image/png");
+        assert_eq!(mime_for_extension(Path::new("a.jpg")), "image/jpeg");
+        assert_eq!(mime_for_extension(Path::new("a.jpeg")), "image/jpeg");
+        assert_eq!(mime_for_extension(Path::new("a.webp")), "image/webp");
+        assert_eq!(mime_for_extension(Path::new("a.svg")), "image/svg+xml");
+        assert_eq!(mime_for_extension(Path::new("a.ico")), "image/x-icon");
+        assert_eq!(mime_for_extension(Path::new("a.avif")), "image/avif");
+        assert_eq!(mime_for_extension(Path::new("a.bmp")), "image/bmp");
+        assert_eq!(
+            mime_for_extension(Path::new("a.txt")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            mime_for_extension(Path::new("noext")),
+            "application/octet-stream"
+        );
     }
 }

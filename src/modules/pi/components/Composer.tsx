@@ -2,8 +2,11 @@ import { Extension, EditorContent, useEditor } from "@tiptap/react";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Cancel01Icon, ImageAdd01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { native } from "@/lib/native";
 import { clearDraft, loadDraft, saveDraft } from "@/modules/pi/lib/drafts";
 import type { PiImageAttachment } from "@/modules/pi/lib/parse";
 import { piEditorExtensions } from "./renderers/Markdown";
@@ -155,6 +158,41 @@ export function imageFilesOf(dt: DataTransfer | null): File[] {
   );
 }
 
+/** Extensions the bytes bridge accepts from dialogs and OS drops. */
+export const IMAGE_EXTENSIONS = [
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "svg",
+  "avif",
+  "ico",
+] as const;
+
+/** Dropped or picked paths that name an image type, in order. */
+export function imagePathsOf(paths: string[]): string[] {
+  const exts = new Set(IMAGE_EXTENSIONS);
+  return paths.filter((p) => {
+    // lastIndexOf over split: a dotfile like ".png" or "/dir/.png" has no
+    // extension, because the last dot directly follows a separator.
+    const dot = p.lastIndexOf(".");
+    if (dot <= 0 || dot === p.length - 1) return false;
+    if (p[dot - 1] === "/" || p[dot - 1] === "\\") return false;
+    const ext = p.slice(dot + 1).toLowerCase();
+    return exts.has(ext as (typeof IMAGE_EXTENSIONS)[number]);
+  });
+}
+
+/** Decode base64 (the bytes bridge payload) into an image Blob. */
+export function bytesToBlob(base64: string, mimeType: string): Blob {
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mimeType });
+}
+
 type Props = {
   tabId: number;
   cwd?: string;
@@ -220,6 +258,7 @@ export function Composer({
   const [notice, setNotice] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const setChips = (next: PendingImage[]) => {
     imagesRef.current = next;
@@ -254,6 +293,89 @@ export function Composer({
       if (result.notice) setNotice(result.notice);
     }
   };
+
+  // File-path input paths (attach dialog, OS drag and drop): read bytes
+  // through the bridge, then run the same encode/cap pipeline as paste.
+  const addImagePaths = async (paths: string[]) => {
+    if (disabledRef.current) return;
+    setNotice(null);
+    for (const p of paths) {
+      const name = p.split(/[\\/]/).pop() || p;
+      try {
+        const bytes = await native.readFileBytes(p);
+        const encoded = await imageEncoder.encode(
+          bytesToBlob(bytes.base64, bytes.mimeType),
+        );
+        const result = appendPendingImage(imagesRef.current, encoded, name);
+        setChips(result.images);
+        if (result.notice) setNotice(result.notice);
+      } catch {
+        setNotice(`Could not read ${name}`);
+      }
+    }
+  };
+  const addImagePathsRef = useRef(addImagePaths);
+  addImagePathsRef.current = addImagePaths;
+
+  // Attach button: the Tauri file dialog (image filter, multiple) plus the
+  // bytes bridge. The hidden input stays as the fallback when the dialog is
+  // unavailable; a cancelled dialog does nothing.
+  const pickImages = async () => {
+    let picked: string | string[] | null;
+    try {
+      picked = await open({
+        multiple: true,
+        filters: [{ name: "Images", extensions: [...IMAGE_EXTENSIONS] }],
+      });
+    } catch {
+      fileInputRef.current?.click();
+      return;
+    }
+    if (picked == null) return;
+    const paths = Array.isArray(picked) ? picked : [picked];
+    if (paths.length > 0) await addImagePaths(paths);
+  };
+
+  // The window keeps dragDropEnabled (the terminal pane's handler depends on
+  // it), so OS drops only surface through Tauri's drag-drop event. While this
+  // composer is mounted, a drop landing inside it becomes attachment chips;
+  // drops anywhere else are ignored here so the terminal keeps its handler.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type !== "drop" || p.paths.length === 0) return;
+        const root = rootRef.current;
+        if (!root) return;
+        let x = p.position.x;
+        let y = p.position.y;
+        // Tauri reports physical pixels on some platforms; same guard as the
+        // terminal pane's handler.
+        if (x > window.innerWidth || y > window.innerHeight) {
+          const dpr = window.devicePixelRatio || 1;
+          x /= dpr;
+          y /= dpr;
+        }
+        const el = document.elementFromPoint(x, y);
+        if (!el || !root.contains(el)) return;
+        const paths = imagePathsOf(p.paths);
+        if (paths.length > 0) void addImagePathsRef.current(paths);
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {
+        // No Tauri runtime (tests, plain browser): the HTML drop handlers
+        // below stay as the fallback.
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   // Assigned after the editor exists; the Enter shortcut closes over the ref.
   const performSubmitRef = useRef<() => boolean>(() => false);
@@ -293,14 +415,15 @@ export function Composer({
 
   // Send clears the editor, the chips and any cap notice; attachments live
   // only in this component state, so the draft file never carries images.
+  // An empty message with attached images still sends (image-only prompt).
   const performSubmit = (): boolean => {
     if (!editor || disabledRef.current) return false;
     const md = editor.getMarkdown().trim();
-    if (!md) return true;
     const attachments: PiImageAttachment[] = imagesRef.current.map((img) => ({
       mediaType: img.mediaType,
       data: img.data,
     }));
+    if (!md && attachments.length === 0) return true;
     submitRef.current(md, attachments);
     editor.commands.clearContent();
     setChips([]);
@@ -347,6 +470,7 @@ export function Composer({
 
   return (
     <div
+      ref={rootRef}
       className={cn(
         "shrink-0 border-t border-border/60 p-2",
         dragActive && "rounded-md ring-1 ring-ring",
@@ -433,7 +557,7 @@ export function Composer({
           aria-label="Attach images"
           title="Attach images"
           disabled={disabled}
-          onClick={() => fileInputRef.current?.click()}
+          onClick={() => void pickImages()}
           className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border/60 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
         >
           <HugeiconsIcon icon={ImageAdd01Icon} size={14} strokeWidth={1.75} />
