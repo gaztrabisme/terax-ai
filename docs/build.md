@@ -40,7 +40,7 @@ node scripts/fetch-sidecars.mjs
 
 This downloads the `pi` binary from the
 `Dicklesworthstone/pi_agent_rust` release tagged `v0.3.0` and the `agent`
-binary from the `gaztrabisme/harness` release tagged `v0.1.0`, matching the
+binary from the `gaztrabisme/harness` release tagged `v0.2.0`, matching the
 host triple, and verifies both against each release's `SHA256SUMS`. A failed
 download is retried once; a checksum mismatch exits with code 3.
 
