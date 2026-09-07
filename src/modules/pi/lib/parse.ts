@@ -4,7 +4,22 @@ export type PiUsage = {
   cacheRead: number;
   cacheWrite: number;
   totalTokens: number;
+  /** usage.cost.total in dollars, priced from pi's embedded catalog; 0 when
+   *  absent (local providers and zero-priced catalog rows cost nothing). */
+  costTotal: number;
 };
+
+/** Retry in flight between auto_retry_start and auto_retry_end. */
+export type PiRetryPending = {
+  attempt: number;
+  max: number;
+  delayMs: number;
+};
+
+/** Header label for a pending retry, e.g. "retrying 2/3 in 4 s". */
+export function retryPendingLabel(retry: PiRetryPending): string {
+  return `retrying ${retry.attempt}/${retry.max} in ${Math.max(1, Math.round(retry.delayMs / 1000))} s`;
+}
 
 export type PiContentPart =
   | { type: "text"; text: string }
@@ -68,17 +83,36 @@ export type PiErrorBlock = {
   at: number;
 };
 
+export type PiRetryBlock = {
+  kind: "retry";
+  /** start = auto_retry_start; end = auto_retry_end. */
+  phase: "start" | "end";
+  attempt: number;
+  /** maxAttempts; carried by auto_retry_start only. */
+  max: number | null;
+  /** Backoff before the next attempt; auto_retry_start only. */
+  delayMs: number | null;
+  /** auto_retry_end only: whether the retried request succeeded. */
+  success: boolean | null;
+  /** errorMessage on start, finalError on end. */
+  errorText: string | null;
+  /** Creation epoch ms; applyEvent pins it from its optional `now` argument. */
+  at: number;
+};
+
 export type PiBlock = PiMessageBlock | PiToolBlock | PiAskBlock;
 
-/** The transcript feed: turn-model blocks plus error cards. Errors live
- *  outside PiBlock so the turn model (turns.ts) keeps its exhaustive
- *  message/tool/ask shape; renderers attach error cards to the turn that
- *  failed instead. */
-export type PiFeedItem = PiBlock | PiErrorBlock;
+/** The transcript feed: turn-model blocks plus error and retry cards. Cards
+ *  live outside PiBlock so the turn model (turns.ts) keeps its exhaustive
+ *  message/tool/ask shape; renderers attach them to the turn they belong
+ *  to instead. */
+export type PiFeedItem = PiBlock | PiErrorBlock | PiRetryBlock;
 
-/** Drops error cards so the turn model only sees message/tool/ask blocks. */
+/** Drops the cards so the turn model only sees message/tool/ask blocks. */
 export function messageBlocks(feed: PiFeedItem[]): PiBlock[] {
-  return feed.filter((item): item is PiBlock => item.kind !== "error");
+  return feed.filter(
+    (item): item is PiBlock => item.kind !== "error" && item.kind !== "retry",
+  );
 }
 
 export type PiStatus =
@@ -104,6 +138,12 @@ export type PiSessionState = {
   lastMs: number | null;
   /** Sum of turn_end usage.totalTokens across turns. */
   turnTokens: number;
+  /** Sum of turn_end usage.cost.total across turns: the session bill. */
+  sessionCost: number;
+  /** Latest turn_end usage: the per-turn tokens and cost. */
+  turnUsage: PiUsage | null;
+  /** Retry in flight, from auto_retry_start until auto_retry_end. */
+  retry: PiRetryPending | null;
   /** Text of the error already on the feed; agent_end retries repeat it. */
   lastErrorText: string | null;
 };
@@ -121,6 +161,9 @@ export function initialPiSessionState(): PiSessionState {
     startedMs: null,
     lastMs: null,
     turnTokens: 0,
+    sessionCost: 0,
+    turnUsage: null,
+    retry: null,
     lastErrorText: null,
   };
 }
@@ -135,12 +178,16 @@ function asString(value: unknown): string | null {
 
 function asUsage(value: unknown): PiUsage | null {
   if (!isRecord(value) || typeof value.totalTokens !== "number") return null;
+  // usage.cost.total comes from pi's pricing catalog; a missing cost object
+  // (or a zero-priced row, local providers included) means no bill.
+  const cost = isRecord(value.cost) ? value.cost : null;
   return {
     input: typeof value.input === "number" ? value.input : 0,
     output: typeof value.output === "number" ? value.output : 0,
     cacheRead: typeof value.cacheRead === "number" ? value.cacheRead : 0,
     cacheWrite: typeof value.cacheWrite === "number" ? value.cacheWrite : 0,
     totalTokens: value.totalTokens,
+    costTotal: cost && typeof cost.total === "number" ? cost.total : 0,
   };
 }
 
@@ -273,13 +320,26 @@ export function applyEvent(
       return {
         ...state,
         tokens: usage,
+        turnUsage: usage,
         turnTokens: state.turnTokens + usage.totalTokens,
+        sessionCost: state.sessionCost + usage.costTotal,
       };
     }
+    case "auto_retry_start":
+      return applyRetryStart(state, event, now);
+    case "auto_retry_end":
+      return applyRetryEnd(state, event, now);
     case "agent_end": {
       const error = asString(event.error);
       if (error === null) {
-        return { ...state, status: "done", lastErrorText: null };
+        // The retry lifecycle always closes before agent_end, but clear the
+        // pending state here too so nothing outlives the run.
+        return {
+          ...state,
+          status: "done",
+          lastErrorText: null,
+          retry: null,
+        };
       }
       // Failed model request: pi ends every auto-retry attempt with the same
       // top-level error string, so only the first occurrence becomes a
@@ -333,10 +393,69 @@ function applyMessageStart(
     ...state,
     seq: state.seq + 1,
     status: role === "assistant" ? "thinking" : state.status,
-    // A new user message opens a fresh turn: its failure gets its own card.
-    ...(role === "user" && { lastErrorText: null }),
+    // A new user message opens a fresh turn: its failure gets its own card
+    // and the turn's usage and retry state start empty.
+    ...(role === "user" && {
+      lastErrorText: null,
+      turnUsage: null,
+      retry: null,
+    }),
     blocks: [...state.blocks, block],
     openMessageId: role === "assistant" ? block.id : state.openMessageId,
+  };
+}
+
+function applyRetryStart(
+  state: PiSessionState,
+  event: Record<string, unknown>,
+  now: number,
+): PiSessionState {
+  const attempt = typeof event.attempt === "number" ? event.attempt : null;
+  const max = typeof event.maxAttempts === "number" ? event.maxAttempts : null;
+  const delayMs = typeof event.delayMs === "number" ? event.delayMs : null;
+  if (attempt === null || max === null || delayMs === null) return state;
+  const block: PiRetryBlock = {
+    kind: "retry",
+    phase: "start",
+    attempt,
+    max,
+    delayMs,
+    success: null,
+    errorText: asString(event.errorMessage),
+    at: now,
+  };
+  return {
+    ...state,
+    // The engine is working again: the header shows the retry label on top
+    // of the running state instead of the failure.
+    status: "thinking",
+    retry: { attempt, max, delayMs },
+    blocks: [...state.blocks, block],
+  };
+}
+
+function applyRetryEnd(
+  state: PiSessionState,
+  event: Record<string, unknown>,
+  now: number,
+): PiSessionState {
+  const attempt = typeof event.attempt === "number" ? event.attempt : null;
+  const success = event.success === true;
+  if (attempt === null) return state;
+  const block: PiRetryBlock = {
+    kind: "retry",
+    phase: "end",
+    attempt,
+    max: null,
+    delayMs: null,
+    success,
+    errorText: asString(event.finalError),
+    at: now,
+  };
+  return {
+    ...state,
+    retry: null,
+    blocks: [...state.blocks, block],
   };
 }
 

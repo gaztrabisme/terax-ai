@@ -181,11 +181,19 @@ pub fn spawn_plan(
     }
     // No launcher: resolve the pi binary through the shared precedence chain,
     // with the checkout rooted at launcherDir (or the workspace when unset).
+    // The runtime agent dir needs the app data dir, which a spawn decision
+    // never reads; an empty dir degrades it instead of guessing.
     let effective = PiPrefs {
         launcher_dir: Some(root.to_string_lossy().into_owned()),
         ..prefs.clone()
     };
-    let resolved = resolve_paths_with(&effective, bundled, home, std::env::consts::EXE_SUFFIX);
+    let resolved = resolve_paths_with(
+        &effective,
+        bundled,
+        home,
+        std::env::consts::EXE_SUFFIX,
+        Path::new(""),
+    );
     match (&resolved.pi.path, resolved.pi.source) {
         (Some(program), source @ (PathSource::Pref | PathSource::Bundled | PathSource::Checkout)) => {
             Ok(SpawnPlan::Direct {
@@ -275,9 +283,10 @@ pub struct BundledPaths {
 const PI_SIDECAR: &str = "pi";
 const AGENT_SIDECAR: &str = "agent";
 
-/// Checkout fallback for the harness agent, the same path the board code
-/// spawns; kept in `$HOME/...` form so it expands like a settings value.
-const AGENT_CHECKOUT_BIN: &str = "$HOME/Documents/Work/harness/target/release/agent";
+/// Seed stamp written by launcher::seed_agent_dir (SEED_STAMP_FILE there is
+/// private; the name must stay in sync). Its presence marks the runtime
+/// agent dir as seeded.
+const SEED_STAMP_FILE: &str = ".terax-seed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -304,6 +313,48 @@ pub struct ResolvedPaths {
     pub pi: ResolvedPath,
     pub agent: ResolvedPath,
     pub agent_dir: ResolvedPath,
+    pub runtime_agent_dir: RuntimeAgentDir,
+}
+
+/// The agent dir a session actually runs from. When the resolved agent dir is
+/// the bundled template (read-only inside the app bundle), pi runs from the
+/// seeded per-user copy in the app data dir; for a pref or checkout source
+/// the runtime dir is the resolved dir itself.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAgentDir {
+    /// The runtime dir, or None when the source is Missing (or the app data
+    /// dir is unknown, so no seeded copy can be named).
+    pub path: Option<String>,
+    pub source: PathSource,
+    /// True when the `.terax-seed` stamp exists in the runtime dir.
+    pub seeded: bool,
+}
+
+/// Derives the runtime agent dir from the resolved agent dir and the app
+/// data dir, reusing the same helper pi_prepare seeds through.
+fn runtime_agent_dir(agent_dir: &ResolvedPath, app_data_dir: &Path) -> RuntimeAgentDir {
+    if agent_dir.source == PathSource::Bundled {
+        if app_data_dir.as_os_str().is_empty() {
+            return RuntimeAgentDir {
+                path: None,
+                source: PathSource::Bundled,
+                seeded: false,
+            };
+        }
+        let path = super::launcher::user_agent_dir(app_data_dir);
+        let seeded = path.join(SEED_STAMP_FILE).is_file();
+        return RuntimeAgentDir {
+            path: Some(path.to_string_lossy().into_owned()),
+            source: PathSource::Bundled,
+            seeded,
+        };
+    }
+    RuntimeAgentDir {
+        path: agent_dir.path.clone(),
+        source: agent_dir.source,
+        seeded: false,
+    }
 }
 
 /// Sidecar file name for a target: `pi` or `pi.exe`. The suffix is a parameter
@@ -313,9 +364,15 @@ fn sidecar_name(base: &str, exe_suffix: &str) -> String {
 }
 
 /// Resolution precedence: a pref that exists wins, then the bundled file, then
-/// the efficient-pi checkout, else Missing with the candidate list.
-pub fn resolve_paths(prefs: &PiPrefs, bundled: &BundledPaths, home: Option<&str>) -> ResolvedPaths {
-    resolve_paths_with(prefs, bundled, home, std::env::consts::EXE_SUFFIX)
+/// the efficient-pi checkout, else Missing with the candidate list. The
+/// runtime agent dir is derived from the agent dir result and `app_data_dir`.
+pub fn resolve_paths(
+    prefs: &PiPrefs,
+    bundled: &BundledPaths,
+    home: Option<&str>,
+    app_data_dir: &Path,
+) -> ResolvedPaths {
+    resolve_paths_with(prefs, bundled, home, std::env::consts::EXE_SUFFIX, app_data_dir)
 }
 
 fn resolve_paths_with(
@@ -323,6 +380,7 @@ fn resolve_paths_with(
     bundled: &BundledPaths,
     home: Option<&str>,
     exe_suffix: &str,
+    app_data_dir: &Path,
 ) -> ResolvedPaths {
     let launcher_root = pref_path(prefs.launcher_dir.as_deref(), home);
 
@@ -337,6 +395,10 @@ fn resolve_paths_with(
         pi.push((root.join("bin").join(PI_SIDECAR), PathSource::Checkout));
     }
 
+    // No checkout candidate for the agent binary: the harness binary is not
+    // inside the efficient-pi checkout, and guessing a sibling path would
+    // only work on one machine's layout. A pref or the bundled sidecar must
+    // answer.
     let mut agent = Vec::new();
     if let Some(p) = pref_path(prefs.agent_bin.as_deref(), home) {
         agent.push((p, PathSource::Pref));
@@ -344,10 +406,6 @@ fn resolve_paths_with(
     if let Some(p) = sidecar_path(&bundled.exe_dir, AGENT_SIDECAR, exe_suffix) {
         agent.push((p, PathSource::Bundled));
     }
-    agent.push((
-        expand_home(AGENT_CHECKOUT_BIN, home).into(),
-        PathSource::Checkout,
-    ));
 
     let mut agent_dir = Vec::new();
     if let Some(p) = pref_path(prefs.agent_dir.as_deref(), home) {
@@ -363,10 +421,12 @@ fn resolve_paths_with(
         agent_dir.push((root.join("pi-home").join("agent"), PathSource::Checkout));
     }
 
+    let agent_dir = pick(agent_dir, true);
     ResolvedPaths {
         pi: pick(pi, false),
         agent: pick(agent, false),
-        agent_dir: pick(agent_dir, true),
+        runtime_agent_dir: runtime_agent_dir(&agent_dir, app_data_dir),
+        agent_dir,
     }
 }
 
@@ -827,6 +887,7 @@ mod resolve_paths_tests {
         let exe = tempfile::tempdir().expect("tempdir");
         let res = tempfile::tempdir().expect("tempdir");
         let checkout = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
         // Every lower-precedence candidate exists too; the prefs must win.
         write_file(&exe.path().join("pi"));
         write_file(&exe.path().join("agent"));
@@ -843,7 +904,13 @@ mod resolve_paths_tests {
             Some("$HOME/custom/agent-dir"),
             Some(checkout.path().to_str().expect("utf8")),
         );
-        let resolved = resolve_paths_with(&p, &bundled(exe.path(), res.path()), Some(home_str), "");
+        let resolved = resolve_paths_with(
+            &p,
+            &bundled(exe.path(), res.path()),
+            Some(home_str),
+            "",
+            data.path(),
+        );
         let pi = resolved.pi;
         assert_eq!(pi.source, PathSource::Pref);
         assert_eq!(pi.path.as_deref(), Some(format!("{home_str}/custom/pi")).as_deref());
@@ -859,6 +926,13 @@ mod resolve_paths_tests {
             agent_dir.path.as_deref(),
             Some(format!("{home_str}/custom/agent-dir")).as_deref()
         );
+        // A pref agent dir is its own runtime dir.
+        assert_eq!(resolved.runtime_agent_dir.source, PathSource::Pref);
+        assert_eq!(
+            resolved.runtime_agent_dir.path.as_deref(),
+            Some(format!("{home_str}/custom/agent-dir")).as_deref()
+        );
+        assert!(!resolved.runtime_agent_dir.seeded);
     }
 
     #[test]
@@ -867,12 +941,12 @@ mod resolve_paths_tests {
         let res = tempfile::tempdir().expect("tempdir");
         let checkout = tempfile::tempdir().expect("tempdir");
         let home = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
         write_file(&exe.path().join("pi"));
         write_file(&exe.path().join("agent"));
         make_dir(&res.path().join("pi-home").join("agent"));
         write_file(&checkout.path().join("bin").join("pi"));
         make_dir(&checkout.path().join("pi-home").join("agent"));
-        make_dir(&home.path().join("Documents/Work/harness/target/release"));
         let p = prefs(
             None,
             None,
@@ -884,6 +958,7 @@ mod resolve_paths_tests {
             &bundled(exe.path(), res.path()),
             Some(home.path().to_str().expect("utf8")),
             "",
+            data.path(),
         );
         assert_eq!(resolved.pi.source, PathSource::Bundled);
         assert_eq!(
@@ -906,33 +981,88 @@ mod resolve_paths_tests {
                     .expect("utf8")
             )
         );
+        // The runtime agent dir is the seeded copy in the app data dir, not
+        // the bundled template; nothing has seeded it yet.
+        assert_eq!(resolved.runtime_agent_dir.source, PathSource::Bundled);
+        assert_eq!(
+            resolved.runtime_agent_dir.path.as_deref(),
+            Some(
+                data.path()
+                    .join("pi-home")
+                    .join("agent")
+                    .to_str()
+                    .expect("utf8")
+            )
+        );
+        assert!(!resolved.runtime_agent_dir.seeded);
+    }
+
+    #[test]
+    fn runtime_agent_dir_is_seeded_once_the_stamp_exists() {
+        let exe = tempfile::tempdir().expect("tempdir");
+        let res = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
+        write_file(&exe.path().join("pi"));
+        make_dir(&res.path().join("pi-home").join("agent"));
+        let p = prefs(None, None, None, None);
+        let resolved = resolve_paths_with(
+            &p,
+            &bundled(exe.path(), res.path()),
+            None,
+            "",
+            data.path(),
+        );
+        assert_eq!(resolved.runtime_agent_dir.source, PathSource::Bundled);
+        assert!(!resolved.runtime_agent_dir.seeded);
+        // The same stamp launcher::seed_agent_dir writes last.
+        make_dir(&data.path().join("pi-home").join("agent"));
+        write_file(&data.path().join("pi-home").join("agent").join(".terax-seed"));
+        let resolved = resolve_paths_with(
+            &p,
+            &bundled(exe.path(), res.path()),
+            None,
+            "",
+            data.path(),
+        );
+        assert!(resolved.runtime_agent_dir.seeded);
     }
 
     #[test]
     fn checkout_fallbacks_kick_in_without_bundled_dirs() {
         let checkout = tempfile::tempdir().expect("tempdir");
         let home = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
         write_file(&checkout.path().join("bin").join("pi"));
         make_dir(&checkout.path().join("pi-home").join("agent"));
-        write_file(&home.path().join("Documents/Work/harness/target/release/agent"));
         let checkout_str = checkout.path().to_str().expect("utf8");
-        let home_str = home.path().to_str().expect("utf8");
         let p = prefs(None, None, None, Some(checkout_str));
-        let resolved = resolve_paths_with(&p, &BundledPaths::default(), Some(home_str), "");
+        let resolved = resolve_paths_with(
+            &p,
+            &BundledPaths::default(),
+            Some(home.path().to_str().expect("utf8")),
+            "",
+            data.path(),
+        );
         assert_eq!(resolved.pi.source, PathSource::Checkout);
         assert_eq!(
             resolved.pi.path.as_deref(),
             Some(format!("{checkout_str}/bin/pi")).as_deref()
         );
-        // The agent checkout path is the same one the board code spawns.
-        assert_eq!(resolved.agent.source, PathSource::Checkout);
-        assert_eq!(
-            resolved.agent.path.as_deref(),
-            Some(format!("{home_str}/Documents/Work/harness/target/release/agent")).as_deref()
-        );
+        // No checkout candidate exists for the agent binary: the harness
+        // binary is not inside the efficient-pi checkout and a sibling path
+        // must not be guessed.
+        assert_eq!(resolved.agent.source, PathSource::Missing);
+        assert_eq!(resolved.agent.path, None);
+        assert_eq!(resolved.agent.candidates, Vec::<String>::new());
+        // A checkout agent dir is its own runtime dir.
         assert_eq!(resolved.agent_dir.source, PathSource::Checkout);
         assert_eq!(
             resolved.agent_dir.path.as_deref(),
+            Some(format!("{checkout_str}/pi-home/agent")).as_deref()
+        );
+        assert_eq!(resolved.runtime_agent_dir.source, PathSource::Checkout);
+        assert_eq!(
+            resolved.runtime_agent_dir.path.as_deref(),
             Some(format!("{checkout_str}/pi-home/agent")).as_deref()
         );
     }
@@ -941,14 +1071,19 @@ mod resolve_paths_tests {
     fn missing_reports_missing_with_ordered_candidates() {
         let checkout = tempfile::tempdir().expect("tempdir");
         let home = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
         let checkout_str = checkout.path().to_str().expect("utf8");
-        let home_str = home.path().to_str().expect("utf8");
         let p = prefs(None, None, None, Some(checkout_str));
-        let resolved = resolve_paths_with(&p, &BundledPaths::default(), Some(home_str), "");
+        let resolved = resolve_paths_with(
+            &p,
+            &BundledPaths::default(),
+            Some(home.path().to_str().expect("utf8")),
+            "",
+            data.path(),
+        );
         for entry in [&resolved.pi, &resolved.agent, &resolved.agent_dir] {
             assert_eq!(entry.source, PathSource::Missing);
             assert_eq!(entry.path, None);
-            assert!(!entry.candidates.is_empty(), "candidates must be listed");
         }
         // Candidates follow precedence order: bundled first (skipped here
         // because the dirs are empty), then checkout.
@@ -956,20 +1091,24 @@ mod resolve_paths_tests {
             resolved.pi.candidates,
             vec![format!("{checkout_str}/bin/pi")]
         );
-        assert_eq!(
-            resolved.agent.candidates,
-            vec![format!("{home_str}/Documents/Work/harness/target/release/agent")]
-        );
+        // The agent binary has no checkout candidate, so nothing can be
+        // listed; pi_paths callers must handle the empty list.
+        assert_eq!(resolved.agent.candidates, Vec::<String>::new());
         assert_eq!(
             resolved.agent_dir.candidates,
             vec![format!("{checkout_str}/pi-home/agent")]
         );
+        // A missing agent dir has no runtime dir to name.
+        assert_eq!(resolved.runtime_agent_dir.source, PathSource::Missing);
+        assert_eq!(resolved.runtime_agent_dir.path, None);
+        assert!(!resolved.runtime_agent_dir.seeded);
     }
 
     #[test]
     fn blank_pref_values_count_as_unset() {
+        let data = tempfile::tempdir().expect("tempdir");
         let p = prefs(Some("   "), Some(""), Some("  "), Some(""));
-        let resolved = resolve_paths_with(&p, &BundledPaths::default(), None, "");
+        let resolved = resolve_paths_with(&p, &BundledPaths::default(), None, "", data.path());
         // No candidate leaks the blank string into the listing.
         for entry in [&resolved.pi, &resolved.agent, &resolved.agent_dir] {
             assert!(!entry.candidates.iter().any(|c| c.trim().is_empty()));
@@ -981,15 +1120,28 @@ mod resolve_paths_tests {
         assert_eq!(sidecar_name("pi", ".exe"), "pi.exe");
         assert_eq!(sidecar_name("agent", ""), "agent");
         let exe = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
         let p = prefs(None, None, None, None);
         // With the plain suffix the .exe sidecars are invisible.
         write_file(&exe.path().join("pi.exe"));
         write_file(&exe.path().join("agent.exe"));
-        let plain = resolve_paths_with(&p, &bundled(exe.path(), Path::new("")), None, "");
+        let plain = resolve_paths_with(
+            &p,
+            &bundled(exe.path(), Path::new("")),
+            None,
+            "",
+            data.path(),
+        );
         assert_eq!(plain.pi.source, PathSource::Missing);
         assert_eq!(plain.agent.source, PathSource::Missing);
         // With the Windows suffix they resolve as bundled.
-        let windows = resolve_paths_with(&p, &bundled(exe.path(), Path::new("")), None, ".exe");
+        let windows = resolve_paths_with(
+            &p,
+            &bundled(exe.path(), Path::new("")),
+            None,
+            ".exe",
+            data.path(),
+        );
         assert_eq!(windows.pi.source, PathSource::Bundled);
         assert_eq!(
             windows.pi.path.as_deref(),

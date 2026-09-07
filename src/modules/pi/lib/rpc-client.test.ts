@@ -49,9 +49,7 @@ describe("pi_open spawn spec", () => {
     await session.kill();
   });
 
-  it("defaults launcherDir to the Lab efficient-pi checkout", () => {
-    expect(PI_MODULE_PREFS_DEFAULTS.launcherDir).toBe(
-      "$HOME/Documents/Work/Lab/efficient-pi",
-    );
+  it("defaults launcherDir to empty so the resolver decides", () => {
+    expect(PI_MODULE_PREFS_DEFAULTS.launcherDir).toBe("");
   });
 });

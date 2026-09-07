@@ -7,9 +7,13 @@ import {
   authStatus,
   piAuthStatusLabel,
   PI_OAUTH_PROVIDERS,
+  resolvePiPrefs,
   type PiEndpointView,
   type PiProviderRow,
+  type PiResolvedPath,
   type PiResolvedPaths,
+  type PiRuntimeAgentDir,
+  type PiRuntimePrefs,
 } from "@/modules/pi/lib/providers";
 
 export type CheckStatus = "ok" | "warn" | "missing";
@@ -43,41 +47,106 @@ export type PiHealthResult = {
 /** Health probe outcomes keyed by endpoint id (bppc, omlx). */
 export type PiHealthMap = Record<string, PiHealthResult>;
 
-const PATH_ROWS: Array<{ key: keyof PiResolvedPaths; label: string }> = [
+const PATH_ROWS: Array<{ key: "pi" | "agent"; label: string }> = [
   { key: "pi", label: "pi binary" },
   { key: "agent", label: "agent binary" },
-  { key: "agentDir", label: "agent dir" },
 ];
 
+/** Human label for the source a resolved path came from. */
+function sourceLabel(source: PiResolvedPath["source"]): string {
+  switch (source) {
+    case "pref":
+      return "preference";
+    case "bundled":
+      return "bundled";
+    case "checkout":
+      return "efficient-pi checkout";
+    case "missing":
+      return "missing";
+  }
+}
+
+function binaryRow(key: "pi" | "agent", label: string, entry: PiResolvedPath): CheckRow {
+  const id = `path-${key}`;
+  if (entry.source === "missing") {
+    return {
+      id,
+      label,
+      status: "missing",
+      detail: entry.candidates.slice(0, 2).join(" or "),
+      action: { label: "Open paths", kind: "focus-paths" },
+    };
+  }
+  if (entry.source === "checkout") {
+    return {
+      id,
+      label,
+      status: "warn",
+      detail: `using the efficient-pi checkout at ${entry.path ?? ""}`,
+      action: { label: "Open paths", kind: "focus-paths" },
+    };
+  }
+  return {
+    id,
+    label,
+    status: "ok",
+    detail: `${entry.path ?? ""} (${sourceLabel(entry.source)})`,
+  };
+}
+
 /**
- * One row per resolved path. Bundled and pref wins are green, the checkout
- * fallback warns (it breaks on a fresh machine), and missing lists the first
- * two candidates so the reader knows what to create.
+ * The agent dir row reports the runtime dir pi actually runs from: the seeded
+ * per-user copy when the source is bundled, else the resolved dir itself. An
+ * unseeded runtime dir warns that the first session will create it.
+ */
+function agentDirRow(runtime: PiRuntimeAgentDir, fallbackCandidates: string[]): CheckRow {
+  const id = "path-agentDir";
+  if (runtime.source === "missing" || !runtime.path) {
+    return {
+      id,
+      label: "agent dir",
+      status: "missing",
+      detail: fallbackCandidates.slice(0, 2).join(" or ") || "no agent dir resolved",
+      action: { label: "Open paths", kind: "focus-paths" },
+    };
+  }
+  if (runtime.source === "checkout") {
+    return {
+      id,
+      label: "agent dir",
+      status: "warn",
+      detail: `using the efficient-pi checkout at ${runtime.path}`,
+      action: { label: "Open paths", kind: "focus-paths" },
+    };
+  }
+  if (runtime.source === "bundled" && !runtime.seeded) {
+    return {
+      id,
+      label: "agent dir",
+      status: "warn",
+      detail: `${runtime.path} (seeded on the first session)`,
+    };
+  }
+  const label = runtime.source === "bundled" ? "seeded copy" : "preference";
+  return {
+    id,
+    label: "agent dir",
+    status: "ok",
+    detail: `${runtime.path} (${label})`,
+  };
+}
+
+/**
+ * One row per resolved path, plus the runtime agent dir row. Bundled and pref
+ * wins are green, the checkout fallback warns (it breaks on a fresh machine),
+ * and missing lists the first two candidates so the reader knows what to
+ * create. Every win names its source.
  */
 export function pathRows(paths: PiResolvedPaths): CheckRow[] {
-  return PATH_ROWS.map(({ key, label }) => {
-    const id = `path-${key}`;
-    const entry = paths[key];
-    if (entry.source === "missing") {
-      return {
-        id,
-        label,
-        status: "missing",
-        detail: entry.candidates.slice(0, 2).join(" or "),
-        action: { label: "Open paths", kind: "focus-paths" },
-      };
-    }
-    if (entry.source === "checkout") {
-      return {
-        id,
-        label,
-        status: "warn",
-        detail: `using the efficient-pi checkout at ${entry.path ?? ""}`,
-        action: { label: "Open paths", kind: "focus-paths" },
-      };
-    }
-    return { id, label, status: "ok", detail: entry.path ?? "" };
-  });
+  return [
+    ...PATH_ROWS.map(({ key, label }) => binaryRow(key, label, paths[key])),
+    agentDirRow(paths.runtimeAgentDir, paths.agentDir.candidates),
+  ];
 }
 
 /** Subagent role value is provider/model; the endpoint matters, not the model. */
@@ -86,24 +155,48 @@ function smolProvider(smol: string): string {
 }
 
 /**
- * One row per role (orchestrator, subagent). A provider is green when it
- * holds a key or OAuth token, or needs no auth.json entry at all: endpoint
- * providers like bppc and omlx carry their key in models.json.tmpl.
+ * The roles the check panel reports: the global prefs merged with the chosen
+ * project's `<cwd>/.pi/terax.json` overrides through the shared merge in
+ * providers.ts, so the panel shows what a session in that project would use.
+ */
+export function effectiveRoles(
+  global: Partial<PiRuntimePrefs>,
+  workspaceJson: unknown,
+): PiRoles {
+  const resolved = resolvePiPrefs(global, workspaceJson);
+  return { provider: resolved.provider, smol: resolved.smol };
+}
+
+/** Group label for the roles rows: the project a session would run in, or
+ *  "global" when no pi tab is open. */
+export function rolesScopeLabel(cwd: string | null): string {
+  if (!cwd) return "global";
+  const normalized = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  const base = normalized.slice(normalized.lastIndexOf("/") + 1);
+  return base ? `for ${base}` : "global";
+}
+
+/**
+ * One row per role (orchestrator, subagent), each labeled with the scope the
+ * roles were resolved for. A provider is green when it holds a key or OAuth
+ * token, or needs no auth.json entry at all: endpoint providers like bppc and
+ * omlx carry their key in models.json.tmpl.
  */
 export function providerRows(
   roles: PiRoles,
   authEntries: unknown,
   providerList: PiProviderRow[],
+  scope = "global",
 ): CheckRow[] {
   const roleList = [
     {
       id: "provider-orchestrator",
-      label: "Orchestrator provider",
+      label: `Orchestrator provider (${scope})`,
       provider: roles.provider.trim(),
     },
     {
       id: "provider-smol",
-      label: "Subagent provider",
+      label: `Subagent provider (${scope})`,
       provider: smolProvider(roles.smol),
     },
   ];
@@ -221,10 +314,16 @@ export function buildRows(input: {
   providerList: PiProviderRow[];
   endpoints: PiEndpointView[] | null;
   health: PiHealthMap;
+  rolesScope?: string;
 }): CheckRow[] {
   return [
     ...pathRows(input.paths),
-    ...providerRows(input.roles, input.authEntries, input.providerList),
+    ...providerRows(
+      input.roles,
+      input.authEntries,
+      input.providerList,
+      input.rolesScope,
+    ),
     ...endpointRows(input.roles, input.endpoints, input.health),
   ];
 }

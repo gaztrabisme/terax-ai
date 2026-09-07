@@ -23,6 +23,11 @@ vi.mock("@tauri-apps/api/core", () => ({
           source: "pref",
           candidates: ["/lab/efficient-pi/pi-home/agent"],
         },
+        runtimeAgentDir: {
+          path: "/lab/efficient-pi/pi-home/agent",
+          source: "pref",
+          seeded: false,
+        },
       });
     }
     return Promise.reject(new Error(`${cmd} unavailable in test`));
@@ -47,6 +52,7 @@ vi.mock("@tauri-apps/plugin-store", () => ({
   },
 }));
 
+import { invoke } from "@tauri-apps/api/core";
 import { PI_PREF_DEFAULTS } from "@/modules/pi/lib/providers";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { PiSection } from "./PiSection";
@@ -68,6 +74,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.mocked(invoke).mockClear();
 });
 
 it("renders the first-run check and the provider placeholder on a fresh install", async () => {
@@ -79,8 +86,51 @@ it("renders the first-run check and the provider placeholder on a fresh install"
 
   // The check resolves despite every command rejecting and keeps every row.
   await screen.findByText("pi binary");
-  // The row label and the Roles setting title share this text.
-  expect((await screen.findAllByText("Orchestrator provider")).length).toBe(2);
+  // The check row label carries the roles scope suffix ("global"), the Roles
+  // setting title does not; substring matching catches both.
+  expect(
+    (await screen.findAllByText("Orchestrator provider", { exact: false }))
+      .length,
+  ).toBe(2);
   expect(screen.getByText("3 ok, 0 warn, 2 missing")).toBeTruthy();
   expect(screen.getByText("Choose a provider")).toBeTruthy();
+});
+
+it("names the runtime agent dir and disables endpoints before the first seed", async () => {
+  // The resolved agent dir is the bundled template and the seeded copy does
+  // not exist yet: the section shows when the seed lands and blocks edits.
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "pi_paths") {
+      return Promise.resolve({
+        pi: { path: "/app/exe/pi", source: "bundled", candidates: ["/app/exe/pi"] },
+        agent: {
+          path: "/app/exe/agent",
+          source: "bundled",
+          candidates: ["/app/exe/agent"],
+        },
+        agentDir: {
+          path: "/app/res/pi-home/agent",
+          source: "bundled",
+          candidates: ["/app/res/pi-home/agent"],
+        },
+        runtimeAgentDir: {
+          path: "/app/data/pi-home/agent",
+          source: "bundled",
+          seeded: false,
+        },
+      });
+    }
+    return Promise.reject(new Error(`${cmd} unavailable in test`));
+  });
+
+  render(<PiSection />);
+
+  expect(
+    await screen.findByText("seeded on the first session"),
+  ).toBeTruthy();
+  expect(
+    screen.getByText("/app/data/pi-home/agent/models.json.tmpl"),
+  ).toBeTruthy();
+  expect(screen.getByText("Save endpoints")).toHaveProperty("disabled", true);
+  expect(screen.getByText("Add endpoint")).toHaveProperty("disabled", true);
 });

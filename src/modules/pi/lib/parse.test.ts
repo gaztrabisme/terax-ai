@@ -11,8 +11,10 @@ import {
   initialPiSessionState,
   promptLine,
   resetAsk,
+  retryPendingLabel,
   type PiBlock,
   type PiErrorBlock,
+  type PiRetryBlock,
   type PiSessionState,
 } from "./parse";
 
@@ -231,6 +233,121 @@ describe("q7-rpc-model-error: failed model request", () => {
       (b): b is PiErrorBlock => b.kind === "error",
     );
     expect(errors).toHaveLength(2);
+  });
+});
+
+describe("q8-rpc-retry-success: retry lifecycle and per-turn usage", () => {
+  const final = replay("q8-rpc-retry-success.jsonl");
+  const errorText = "Provider rate limited (429)";
+
+  it("holds the pending retry between auto_retry_start and auto_retry_end", () => {
+    const pending = replayUpTo("q8-rpc-retry-success.jsonl", (raw) =>
+      raw.includes('"type":"auto_retry_start"'),
+    );
+    expect(pending.retry).toEqual({ attempt: 1, max: 3, delayMs: 4000 });
+    expect(pending.status).toBe("thinking");
+    expect(retryPendingLabel(pending.retry!)).toBe("retrying 1/3 in 4 s");
+  });
+
+  it("records retry start and end as feed cards on the turn", () => {
+    const retries = final.blocks.filter(
+      (b): b is PiRetryBlock => b.kind === "retry",
+    );
+    expect(retries).toHaveLength(2);
+    expect(retries[0]).toMatchObject({
+      kind: "retry",
+      phase: "start",
+      attempt: 1,
+      max: 3,
+      delayMs: 4000,
+      errorText,
+    });
+    expect(retries[1]).toMatchObject({
+      kind: "retry",
+      phase: "end",
+      attempt: 1,
+      success: true,
+      errorText: null,
+    });
+  });
+
+  it("clears the retry state once auto_retry_end lands", () => {
+    expect(final.retry).toBeNull();
+    expect(final.status).toBe("done");
+  });
+
+  it("captures turn_end usage with the priced cost total", () => {
+    expect(final.turnUsage).toEqual({
+      input: 1204,
+      output: 312,
+      cacheRead: 9700,
+      cacheWrite: 0,
+      totalTokens: 11216,
+      costTotal: 0.0031,
+    });
+    expect(final.tokens?.totalTokens).toBe(11216);
+  });
+
+  it("accumulates session tokens and cost across turn_end events only", () => {
+    // The failed first attempt ends with zero usage; the retried one bills.
+    expect(final.turnTokens).toBe(11216);
+    expect(final.sessionCost).toBeCloseTo(0.0031, 6);
+    const oneMore = applyEvent(
+      final,
+      '{"type":"turn_end","message":{"role":"assistant","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15,"cost":{"input":0.0,"output":0.0002,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0002}}}}',
+    );
+    expect(oneMore.turnTokens).toBe(11231);
+    expect(oneMore.sessionCost).toBeCloseTo(0.0033, 6);
+  });
+
+  it("a user message_start re-arms the turn: usage and retry state reset", () => {
+    const rearmed = applyEvent(
+      final,
+      '{"type":"message_start","message":{"role":"user","content":"next"}}',
+    );
+    expect(rearmed.turnUsage).toBeNull();
+    expect(rearmed.retry).toBeNull();
+  });
+});
+
+describe("retry events: malformed and failure shapes", () => {
+  it("ignores auto_retry_start with missing numeric fields", () => {
+    const state = initialPiSessionState();
+    const next = applyEvent(
+      state,
+      '{"type":"auto_retry_start","attempt":1,"errorMessage":"x"}',
+    );
+    expect(next).toBe(state);
+  });
+
+  it("keeps the q7 failure path: retry cards plus the deduped error card", () => {
+    const final = replay("q7-rpc-model-error.jsonl");
+    const retries = final.blocks.filter(
+      (b): b is PiRetryBlock => b.kind === "retry",
+    );
+    // Three starts and one terminal failure end; the pending state is gone.
+    expect(retries.filter((b) => b.phase === "start")).toHaveLength(3);
+    expect(retries.filter((b) => b.phase === "end")).toHaveLength(1);
+    expect(retries[3]).toMatchObject({ success: false, attempt: 3 });
+    expect(final.retry).toBeNull();
+    const errors = final.blocks.filter(
+      (b): b is PiErrorBlock => b.kind === "error",
+    );
+    expect(errors).toHaveLength(1);
+  });
+
+  it("reads cost.total when present and defaults to 0 when absent", () => {
+    let state = initialPiSessionState();
+    state = applyEvent(
+      state,
+      '{"type":"turn_end","message":{"role":"assistant","usage":{"input":100,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":110,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}}}}',
+    );
+    expect(state.turnUsage?.costTotal).toBe(0);
+    state = applyEvent(
+      state,
+      '{"type":"turn_end","message":{"role":"assistant","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}}}',
+    );
+    expect(state.turnUsage?.costTotal).toBe(0);
   });
 });
 

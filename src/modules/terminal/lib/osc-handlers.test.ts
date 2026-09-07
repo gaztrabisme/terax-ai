@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { Terminal } from "@xterm/xterm";
 import {
   createShellIntegrationState,
+  parseOsc133CommandText,
+  parseOsc133ExitCode,
   registerCwdHandler,
   registerPromptTracker,
+  type PromptEvent,
 } from "./osc-handlers";
 
 /**
@@ -94,5 +97,80 @@ describe("OSC 7 cwd handler — gated by OSC 133 in-command state", () => {
 
     handlers.get(7)?.("file:///C:/Users/me/project");
     expect(onCwd).toHaveBeenCalledWith("C:/Users/me/project");
+  });
+});
+
+describe("OSC 133 prompt tracker block events", () => {
+  it("emits A, C with command text, and D with the exit code", () => {
+    const { term, handlers } = makeFakeTerm();
+    const events: PromptEvent[] = [];
+    registerPromptTracker(term, createShellIntegrationState(), (e) =>
+      events.push(e),
+    );
+
+    handlers.get(133)?.("A");
+    handlers.get(133)?.("C;git status --short");
+    handlers.get(133)?.("D;0");
+
+    expect(events).toEqual([
+      { type: "A" },
+      { type: "C", command: "git status --short" },
+      { type: "D", exitCode: 0 },
+    ]);
+  });
+
+  it("keeps the in-command flag transitions alongside the events", () => {
+    const { term, handlers } = makeFakeTerm();
+    const state = createShellIntegrationState();
+    registerPromptTracker(term, state, () => {});
+
+    handlers.get(133)?.("A");
+    expect(state.inCommand).toBe(false);
+    handlers.get(133)?.("C;ls");
+    expect(state.inCommand).toBe(true);
+    handlers.get(133)?.("B");
+    expect(state.inCommand).toBe(true);
+    handlers.get(133)?.("D;1");
+    expect(state.inCommand).toBe(false);
+  });
+
+  it("reports a bare C as no command text and a bare D as exit code 0", () => {
+    const { term, handlers } = makeFakeTerm();
+    const events: PromptEvent[] = [];
+    registerPromptTracker(term, undefined, (e) => events.push(e));
+
+    handlers.get(133)?.("C"); // bash PS0 and fish preexec send no text
+    handlers.get(133)?.("D");
+
+    expect(events).toEqual([
+      { type: "C", command: null },
+      { type: "D", exitCode: 0 },
+    ]);
+  });
+
+  it("treats everything after the first semicolon as command text", () => {
+    expect(parseOsc133CommandText("C;echo a;b")).toBe("echo a;b");
+    expect(parseOsc133CommandText("C;")).toBeNull();
+    expect(parseOsc133CommandText("C")).toBeNull();
+  });
+
+  it("parses negative and multi-digit exit codes", () => {
+    expect(parseOsc133ExitCode("D;127")).toBe(127);
+    expect(parseOsc133ExitCode("D;-1")).toBe(-1);
+    expect(parseOsc133ExitCode("D")).toBe(0);
+    expect(parseOsc133ExitCode("D;x")).toBe(0);
+  });
+
+  it("works without a listener (legacy callers see no change)", () => {
+    const { term, handlers } = makeFakeTerm();
+    const tracker = registerPromptTracker(term);
+
+    handlers.get(133)?.("A");
+    handlers.get(133)?.("C;ls");
+    handlers.get(133)?.("D;0");
+
+    expect(tracker.getMarker()).not.toBeNull();
+    tracker.dispose();
+    expect(tracker.getMarker()).toBeNull();
   });
 });

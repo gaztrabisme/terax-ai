@@ -29,10 +29,14 @@ export type PiRuntimePrefs = {
   smol: string;
 };
 
+// Every path pref starts empty: a machine-specific path must never be a code
+// default (philosophy 8). Empty means "let the resolver decide": the launcher
+// falls back to the workspace-local bin/, the pi and agent binaries to the
+// bundled sidecars, and the agent dir to the seeded per-user copy.
 export const PI_PREF_DEFAULTS: PiRuntimePrefs = {
-  launcherDir: "$HOME/Documents/Work/Lab/efficient-pi",
-  boardBin: "$HOME/Documents/Work/Lab/efficient-pi/bin/board",
-  agentBin: "$HOME/Documents/Work/harness/target/release/agent",
+  launcherDir: "",
+  boardBin: "",
+  agentBin: "",
   agentDir: "",
   // Roles start empty so a fresh install has no provider until the user picks
   // one; piSpawnEnv omits empty values so the launcher defaults stay in charge.
@@ -56,6 +60,15 @@ export const PI_OAUTH_PROVIDERS = [
 /** Layout listens for this and opens a terminal running `command` in `cwd`. */
 export const PI_OPEN_TERMINAL_EVENT = "pi:open-terminal";
 
+/**
+ * The main window broadcasts the cwd of every open pi tab, most recently
+ * active first, so the settings check panel can report the effective roles
+ * for the project a session actually runs in. The settings window pulls the
+ * current list with the query event (a fresh window missed earlier emits).
+ */
+export const PI_OPEN_CWDS_EVENT = "pi:open-cwds";
+export const PI_OPEN_CWDS_QUERY_EVENT = "pi:open-cwds-query";
+
 export type PiSignInPayload = {
   cwd: string;
   command: string;
@@ -73,7 +86,18 @@ export function piSignInPayload(launcherDir: string): PiSignInPayload {
 
 /** Interactive pi command for /login; paths are quoted, $HOME survives quoting. */
 export function piSignInCommand(launcherDir: string): string {
-  return `PI_CODING_AGENT_DIR="${launcherDir}/pi-home/agent" "${launcherDir}/bin/pi"`;
+  return piSignInCommandResolved(
+    `${launcherDir}/bin/pi`,
+    `${launcherDir}/pi-home/agent`,
+  );
+}
+
+/** Same command shape for an already-resolved pi binary and agent dir. */
+export function piSignInCommandResolved(
+  piBin: string,
+  agentDir: string,
+): string {
+  return `PI_CODING_AGENT_DIR="${agentDir}" "${piBin}"`;
 }
 
 const WORKSPACE_KEYS = {
@@ -177,10 +201,24 @@ export type PiResolvedPath = {
   candidates: string[];
 };
 
+/**
+ * The agent dir a session actually runs from. When the resolved agent dir is
+ * the bundled template (read-only inside the app bundle), pi runs from the
+ * seeded per-user copy instead, so the two only match for pref and checkout
+ * sources. Rust twin: launch.rs RuntimeAgentDir.
+ */
+export type PiRuntimeAgentDir = {
+  path: string | null;
+  source: PiPathSource;
+  /** True when the `.terax-seed` stamp exists in the runtime dir. */
+  seeded: boolean;
+};
+
 export type PiResolvedPaths = {
   pi: PiResolvedPath;
   agent: PiResolvedPath;
   agentDir: PiResolvedPath;
+  runtimeAgentDir: PiRuntimeAgentDir;
 };
 
 /// ---------------------------------------------------------------------------

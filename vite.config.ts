@@ -12,6 +12,10 @@ export default defineConfig(async ({ mode }) => ({
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+    // pnpm has two @codemirror/state copies (6.6.0, 6.7.2) and two
+    // @codemirror/view copies (6.41.1, 6.43.11) from diverging ranges in the
+    // tree; two state instances break instanceof checks inside EditorState.
+    dedupe: ["@codemirror/state", "@codemirror/view"],
   },
   esbuild: {
     drop: mode === "production" ? (["debugger"] as ["debugger"]) : [],

@@ -34,6 +34,16 @@ export function registerCwdHandler(
   return () => d.dispose();
 }
 
+/**
+ * Block-oriented events distilled from OSC 133, consumed by the per-session
+ * BlockStore (see blocks.ts). C carries the command text the shell embeds in
+ * the payload (first 256 chars for zsh); D carries the exit code.
+ */
+export type PromptEvent =
+  | { type: "A" }
+  | { type: "C"; command: string | null }
+  | { type: "D"; exitCode: number };
+
 export type PromptTracker = {
   getMarker: () => IMarker | null;
   dispose: () => void;
@@ -42,6 +52,7 @@ export type PromptTracker = {
 export function registerPromptTracker(
   term: Terminal,
   state?: ShellIntegrationState,
+  onEvent?: (event: PromptEvent) => void,
 ): PromptTracker {
   let marker: IMarker | null = null;
   const d = term.parser.registerOscHandler(133, (data) => {
@@ -50,6 +61,7 @@ export function registerPromptTracker(
       if (state) state.inCommand = false;
       marker?.dispose();
       marker = term.registerMarker(0);
+      onEvent?.({ type: "A" });
     } else if (data.startsWith("B")) {
       // OSC 133 B — command begins. From here on, treat all output as
       // untrusted until we see D (command exit) or the next A (new prompt).
@@ -57,9 +69,11 @@ export function registerPromptTracker(
     } else if (data.startsWith("C")) {
       // OSC 133 C — command pre-execution marker; still inside command.
       if (state) state.inCommand = true;
+      onEvent?.({ type: "C", command: parseOsc133CommandText(data) });
     } else if (data.startsWith("D")) {
       // OSC 133 D — command ends.
       if (state) state.inCommand = false;
+      onEvent?.({ type: "D", exitCode: parseOsc133ExitCode(data) });
     }
     return true;
   });
@@ -83,4 +97,23 @@ function parseOsc7(data: string): string | null {
   // /C:/Users/foo -> C:/Users/foo so it's a valid Windows path.
   if (/^\/[A-Za-z]:/.test(path)) path = path.slice(1);
   return path;
+}
+
+/**
+ * Command text from an OSC 133 C payload: "C" or "C;<text>". The payload is
+ * the first 256 chars of the command line (zshrc.zsh), so it may itself
+ * contain semicolons; everything after the first one is command text. A bare
+ * C (bash PS0, fish preexec without text) or an empty payload means no text.
+ */
+export function parseOsc133CommandText(data: string): string | null {
+  const rest = data.slice(1);
+  if (!rest.startsWith(";")) return null;
+  const text = rest.slice(1);
+  return text.length > 0 ? text : null;
+}
+
+/** Exit code from an OSC 133 D payload: "D" or "D;<code>". Missing means 0. */
+export function parseOsc133ExitCode(data: string): number {
+  const m = data.match(/^D;(-?\d+)/);
+  return m ? Number.parseInt(m[1], 10) : 0;
 }

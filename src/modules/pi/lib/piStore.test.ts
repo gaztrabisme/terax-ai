@@ -1,8 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sent: string[] = [];
-vi.mock("./rpc-client", () => ({
-  openPiSession: vi.fn(async (opts: { onEvent: (l: string) => void; onExit?: (c: number) => void }) => {
+const { openPiSessionMock } = vi.hoisted(() => ({
+  openPiSessionMock: vi.fn(),
+}));
+
+vi.mock("./rpc-client", () => ({ openPiSession: openPiSessionMock }));
+
+openPiSessionMock.mockImplementation(
+  async (opts: {
+    onEvent: (l: string) => void;
+    onExit?: (c: number) => void;
+  }) => {
     queueMicrotask(() =>
       opts.onEvent(
         JSON.stringify({ type: "agent_start", sessionId: "abcd1234-test" }),
@@ -17,8 +26,8 @@ vi.mock("./rpc-client", () => ({
         opts.onExit?.(0);
       },
     };
-  }),
-}));
+  },
+);
 
 import { usePiStore } from "./piStore";
 
@@ -36,7 +45,9 @@ describe("piStore", () => {
     const entry = usePiStore.getState().tabs[3];
     expect(entry?.session?.id).toBe(7);
     expect(entry?.exited).toBe(false);
-    expect((usePiStore.getState() as unknown as Record<string, unknown>)["3"]).toBeUndefined();
+    expect(
+      (usePiStore.getState() as unknown as Record<string, unknown>)["3"],
+    ).toBeUndefined();
   });
 
   it("sends prompts through the live session and records exit", async () => {
@@ -70,5 +81,46 @@ describe("piStore", () => {
         },
       ],
     });
+  });
+
+  it("accumulates session totals per tab and resets them on New session", async () => {
+    await usePiStore.getState().openSession(6, { cwd: "/tmp/p" });
+    // The mocked session's onEvent is the store's reduction entry point.
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent(
+      '{"type":"turn_end","message":{"role":"assistant","usage":{"input":1204,"output":312,"cacheRead":9700,"cacheWrite":0,"totalTokens":11216,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0031}}}}',
+    );
+    onEvent(
+      '{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":4000,"errorMessage":"429"}',
+    );
+    let entry = usePiStore.getState().tabs[6];
+    expect(entry?.state.turnTokens).toBe(11216);
+    expect(entry?.state.sessionCost).toBeCloseTo(0.0031, 6);
+    expect(entry?.state.retry).toEqual({ attempt: 1, max: 3, delayMs: 4000 });
+
+    // New session: close then open. The fresh entry starts from zero.
+    await usePiStore.getState().kill(6);
+    await usePiStore.getState().openSession(6, { cwd: "/tmp/p" });
+    entry = usePiStore.getState().tabs[6];
+    expect(entry?.state.turnTokens).toBe(0);
+    expect(entry?.state.sessionCost).toBe(0);
+    expect(entry?.state.retry).toBeNull();
+  });
+
+  it("keeps tabs isolated: totals stay per entry", async () => {
+    await usePiStore.getState().openSession(7, { cwd: "/tmp/p" });
+    await usePiStore.getState().openSession(8, { cwd: "/tmp/q" });
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent(
+      '{"type":"turn_end","message":{"role":"assistant","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"total":0.5}}}}',
+    );
+    expect(usePiStore.getState().tabs[7]?.state.turnTokens).toBe(0);
+    expect(usePiStore.getState().tabs[8]?.state.turnTokens).toBe(2);
+    expect(usePiStore.getState().tabs[8]?.state.sessionCost).toBeCloseTo(
+      0.5,
+      6,
+    );
   });
 });

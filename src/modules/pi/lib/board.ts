@@ -1,8 +1,51 @@
+import { invoke } from "@tauri-apps/api/core";
 import { quoteShellArg } from "@/lib/shellQuote";
+import type { PiResolvedPaths } from "@/modules/pi/lib/providers";
 
-/** Harness agent binary used for human keystone actions (align/land/close/rework). */
-export const DEFAULT_AGENT_BIN =
-  "$HOME/Documents/Work/harness/target/release/agent";
+/**
+ * Harness agent binary used for human keystone actions
+ * (align/land/close/rework). Empty by default: a machine-specific path must
+ * never be a code default, so a blank agentBin pref falls back to the path
+ * pi_paths resolves (pref, then the bundled sidecar).
+ */
+export const DEFAULT_AGENT_BIN = "";
+
+// One pi_paths read per webview load; board actions are rare and manual. A
+// failed read leaves null and the action command surfaces the empty binary
+// through the shell error instead of hiding it.
+let resolvedAgentBin: string | null = null;
+
+/**
+ * Resolves the agent binary through pi_paths and caches it for
+ * effectiveAgentBin. Exported so tests (and callers) can re-run it after the
+ * resolution inputs change.
+ */
+export function loadResolvedAgentBin(): Promise<string | null> {
+  // Promise.resolve absorbs a failed or stubbed invoke so the module-level
+  // call below can never reject into the console.
+  return Promise.resolve(
+    invoke<PiResolvedPaths>("pi_paths", {
+      prefs: { piBin: "", agentBin: "", agentDir: "", launcherDir: "" },
+    }),
+  )
+    .then((paths) => {
+      resolvedAgentBin = paths?.agent?.path ?? null;
+      return resolvedAgentBin;
+    })
+    .catch(() => {
+      resolvedAgentBin = null;
+      return null;
+    });
+}
+
+void loadResolvedAgentBin();
+
+/** The binary a board action runs: the pref when set, else the pi_paths win. */
+export function effectiveAgentBin(agentBin: string): string {
+  const pref = agentBin.trim();
+  if (pref) return pref;
+  return resolvedAgentBin ?? "";
+}
 
 export type BoardVerb = "align" | "land" | "close" | "rework";
 
@@ -101,6 +144,7 @@ export function boardShowCommand(
 }
 
 // Human keystone actions run the harness binary directly against the board DB.
+// A blank binary falls back to the pi_paths resolution cached at load.
 export function boardActionCommand(
   agentBin: string,
   root: string,
@@ -108,7 +152,7 @@ export function boardActionCommand(
   ticketId: string,
 ): string {
   const db = `${root}/.pi/board.db`;
-  return `HARNESS_DB=${quoteShellArg(db)} ${quoteBin(agentBin)} ${verb} ${quoteShellArg(ticketId)}`;
+  return `HARNESS_DB=${quoteShellArg(db)} ${quoteBin(effectiveAgentBin(agentBin))} ${verb} ${quoteShellArg(ticketId)}`;
 }
 
 // Latest gate per gate name: gates arrive in chronological order, so the last

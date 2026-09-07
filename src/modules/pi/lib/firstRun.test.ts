@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   buildRows,
   chosenLocalEndpoints,
+  effectiveRoles,
   endpointRows,
   pathRows,
   probeUrlFor,
   providerRows,
+  rolesScopeLabel,
   summarize,
   type PiHealthMap,
   type PiRoles,
@@ -24,12 +26,17 @@ const bundledPaths: PiResolvedPaths = {
     source: "bundled",
     candidates: ["/app/res/pi-home/agent"],
   },
+  runtimeAgentDir: {
+    path: "/app/data/pi-home/agent",
+    source: "bundled",
+    seeded: true,
+  },
 };
 
 const roles: PiRoles = { provider: "bppc", smol: "omlx/Qwen3.6-35B" };
 
 describe("pathRows", () => {
-  it("reports bundled and pref wins as ok with the winning path", () => {
+  it("reports bundled and pref wins as ok with the winning path and source", () => {
     const rows = pathRows({
       ...bundledPaths,
       pi: {
@@ -39,7 +46,10 @@ describe("pathRows", () => {
       },
     });
     expect(rows.map((r) => r.status)).toEqual(["ok", "ok", "ok"]);
-    expect(rows[0].detail).toBe("/custom/pi");
+    expect(rows[0].detail).toBe("/custom/pi (preference)");
+    expect(rows[1].detail).toBe("/app/exe/agent (bundled)");
+    // The agent dir row shows the runtime dir pi runs from, not the template.
+    expect(rows[2].detail).toBe("/app/data/pi-home/agent (seeded copy)");
     expect(rows.map((r) => r.id)).toEqual([
       "path-pi",
       "path-agent",
@@ -56,6 +66,11 @@ describe("pathRows", () => {
         source: "checkout",
         candidates: ["/app/exe/pi", "/checkout/bin/pi"],
       },
+      runtimeAgentDir: {
+        path: "/checkout/pi-home/agent",
+        source: "checkout",
+        seeded: false,
+      },
     });
     expect(rows[0].status).toBe("warn");
     expect(rows[0].detail).toBe(
@@ -65,6 +80,39 @@ describe("pathRows", () => {
       label: "Open paths",
       kind: "focus-paths",
     });
+    expect(rows[2].status).toBe("warn");
+    expect(rows[2].detail).toBe(
+      "using the efficient-pi checkout at /checkout/pi-home/agent",
+    );
+  });
+
+  it("marks a bundled but unseeded runtime agent dir as seeded later", () => {
+    const rows = pathRows({
+      ...bundledPaths,
+      runtimeAgentDir: {
+        path: "/app/data/pi-home/agent",
+        source: "bundled",
+        seeded: false,
+      },
+    });
+    expect(rows[2].status).toBe("warn");
+    expect(rows[2].detail).toBe(
+      "/app/data/pi-home/agent (seeded on the first session)",
+    );
+  });
+
+  it("a pref agent dir is its own runtime dir with the preference label", () => {
+    const prefRows = pathRows({
+      ...bundledPaths,
+      agentDir: {
+        path: "/custom/agent-dir",
+        source: "pref",
+        candidates: ["/custom/agent-dir"],
+      },
+      runtimeAgentDir: { path: "/custom/agent-dir", source: "pref", seeded: false },
+    });
+    expect(prefRows[2].status).toBe("ok");
+    expect(prefRows[2].detail).toBe("/custom/agent-dir (preference)");
   });
 
   it("reports missing with the first two candidates", () => {
@@ -75,6 +123,7 @@ describe("pathRows", () => {
         source: "missing",
         candidates: ["/first", "/second", "/third"],
       },
+      runtimeAgentDir: { path: null, source: "missing", seeded: false },
     });
     expect(rows[2].status).toBe("missing");
     expect(rows[2].detail).toBe("/first or /second");
@@ -168,6 +217,61 @@ describe("providerRows", () => {
     const rows = providerRows({ provider: "bppc", smol: "omlx/m" }, null, []);
     expect(rows.map((r) => r.status)).toEqual(["ok", "ok"]);
     expect(rows[0].detail).toBe("bppc: no key required");
+  });
+
+  it("labels the role rows global by default and with the passed scope", () => {
+    const rows = providerRows({ provider: "bppc", smol: "omlx/m" }, null, []);
+    expect(rows[0].label).toBe("Orchestrator provider (global)");
+    expect(rows[1].label).toBe("Subagent provider (global)");
+    const scoped = providerRows(
+      { provider: "bppc", smol: "omlx/m" },
+      null,
+      [],
+      "for demo",
+    );
+    expect(scoped[0].label).toBe("Orchestrator provider (for demo)");
+    expect(scoped[1].label).toBe("Subagent provider (for demo)");
+  });
+});
+
+describe("effectiveRoles and rolesScopeLabel", () => {
+  const globalPrefs = {
+    provider: "bppc",
+    model: "qwen3.8-27b",
+    thinking: "xhigh" as const,
+    smol: "omlx/Qwen3.6-35B",
+  };
+
+  it("merges the project override file over the global prefs", () => {
+    const roles = effectiveRoles(globalPrefs, {
+      piProvider: "anthropic",
+      piSmol: "openai/gpt-4o-mini",
+    });
+    expect(roles).toEqual({ provider: "anthropic", smol: "openai/gpt-4o-mini" });
+  });
+
+  it("keeps the global roles when the override file omits or is unreadable", () => {
+    expect(effectiveRoles(globalPrefs, null)).toEqual({
+      provider: "bppc",
+      smol: "omlx/Qwen3.6-35B",
+    });
+    expect(effectiveRoles(globalPrefs, "not json")).toEqual({
+      provider: "bppc",
+      smol: "omlx/Qwen3.6-35B",
+    });
+    // Wrong-typed keys are ignored rather than blanking the session.
+    expect(effectiveRoles(globalPrefs, { piProvider: 7 })).toEqual({
+      provider: "bppc",
+      smol: "omlx/Qwen3.6-35B",
+    });
+  });
+
+  it("labels the scope for the cwd basename and global without one", () => {
+    expect(rolesScopeLabel("/home/me/work/demo")).toBe("for demo");
+    expect(rolesScopeLabel("C:\\repo\\terax")).toBe("for terax");
+    expect(rolesScopeLabel("/proj/")).toBe("for proj");
+    expect(rolesScopeLabel(null)).toBe("global");
+    expect(rolesScopeLabel("")).toBe("global");
   });
 });
 
@@ -283,6 +387,7 @@ describe("summarize", () => {
       ...pathRows({
         ...bundledPaths,
         agentDir: { path: null, source: "missing", candidates: [] },
+        runtimeAgentDir: { path: null, source: "missing", seeded: false },
       }),
       ...providerRows({ provider: "", smol: "" }, null, []),
     ]);

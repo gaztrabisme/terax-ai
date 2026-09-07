@@ -9,6 +9,7 @@ import {
   CircuitBoardIcon,
   CopyIcon,
   FileEditIcon,
+  Refresh01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -22,11 +23,14 @@ import {
 import { Fragment, useCallback, useMemo, useState } from "react";
 import {
   messageBlocks,
+  retryPendingLabel,
   type PiAskAnswer,
   type PiErrorBlock,
   type PiFeedItem,
   type PiImageAttachment,
+  type PiRetryBlock,
   type PiToolBlock,
+  type PiUsage,
 } from "@/modules/pi/lib/parse";
 import {
   boardOp,
@@ -116,15 +120,18 @@ function streamingLabel(turn: Turn): string {
 }
 
 /**
- * Groups error blocks by the turn they belong to: the turn index mirrors
- * groupBlocks (a user message opens the next group, leading blocks share
- * group 0), so the card renders attached to the turn that failed.
+ * Groups the card items (errors and retries) by the turn they belong to: the
+ * turn index mirrors groupBlocks (a user message opens the next group,
+ * leading blocks share group 0), so each card renders attached to the turn
+ * it happened in, in feed order.
  */
-function errorsByTurn(blocks: PiFeedItem[]): Map<number, PiErrorBlock[]> {
-  const map = new Map<number, PiErrorBlock[]>();
+function cardsByTurn(
+  blocks: PiFeedItem[],
+): Map<number, (PiErrorBlock | PiRetryBlock)[]> {
+  const map = new Map<number, (PiErrorBlock | PiRetryBlock)[]>();
   let userCount = 0;
   for (const block of blocks) {
-    if (block.kind === "error") {
+    if (block.kind === "error" || block.kind === "retry") {
       const turn = userCount > 0 ? userCount - 1 : 0;
       const list = map.get(turn);
       if (list) list.push(block);
@@ -134,6 +141,58 @@ function errorsByTurn(blocks: PiFeedItem[]): Map<number, PiErrorBlock[]> {
     if (block.kind === "message" && block.role === "user") userCount += 1;
   }
   return map;
+}
+
+function addUsage(a: PiUsage, b: PiUsage): PiUsage {
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheWrite: a.cacheWrite + b.cacheWrite,
+    totalTokens: a.totalTokens + b.totalTokens,
+    costTotal: a.costTotal + b.costTotal,
+  };
+}
+
+/**
+ * Per-turn usage, summed over the turn's assistant messages (a turn with
+ * tool calls makes several model requests; pi closes each with its own
+ * usage, the last one also riding turn_end). Turn indices mirror
+ * groupBlocks so footer i reads usage.get(i).
+ */
+export function usageByTurn(blocks: PiFeedItem[]): Map<number, PiUsage> {
+  const map = new Map<number, PiUsage>();
+  let userCount = 0;
+  for (const block of blocks) {
+    if (block.kind === "message" && block.role === "user") {
+      userCount += 1;
+      continue;
+    }
+    if (block.kind !== "message" || block.role !== "assistant") continue;
+    if (!block.usage) continue;
+    const turn = userCount > 0 ? userCount - 1 : 0;
+    const acc = map.get(turn);
+    map.set(turn, acc ? addUsage(acc, block.usage) : block.usage);
+  }
+  return map;
+}
+
+/** "1,204 in, 312 out, 89% cached"; cached share over input plus cacheRead. */
+export function usageLabel(usage: PiUsage): string {
+  const parts = [
+    `${usage.input.toLocaleString()} in`,
+    `${usage.output.toLocaleString()} out`,
+  ];
+  const prompt = usage.input + usage.cacheRead;
+  if (prompt > 0) {
+    parts.push(`${Math.round((usage.cacheRead / prompt) * 100)}% cached`);
+  }
+  return parts.join(", ");
+}
+
+/** "$0.0031" for the small per-turn sums, "$0.92" once a run adds up. */
+export function formatCost(cost: number): string {
+  return cost >= 0.01 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(4)}`;
 }
 
 function ErrorCard({ block }: { block: PiErrorBlock }) {
@@ -152,13 +211,47 @@ function ErrorCard({ block }: { block: PiErrorBlock }) {
   );
 }
 
-function workedLabel(turn: Turn): string {
+function RetryCard({ block }: { block: PiRetryBlock }) {
+  const text =
+    block.phase === "start"
+      ? retryPendingLabel({
+          attempt: block.attempt,
+          max: block.max ?? block.attempt,
+          delayMs: block.delayMs ?? 0,
+        })
+      : block.success === true
+        ? `retry ${block.attempt} succeeded`
+        : block.success === false
+          ? `retry ${block.attempt} failed`
+          : `retry ${block.attempt}`;
+  return (
+    <div className="flex max-w-[72ch] items-start gap-2 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-[13px] text-muted-foreground">
+      <HugeiconsIcon
+        icon={Refresh01Icon}
+        size={14}
+        strokeWidth={1.75}
+        className="mt-0.5 shrink-0"
+      />
+      <span className="select-text whitespace-pre-wrap wrap-break-word">
+        {text}
+      </span>
+    </div>
+  );
+}
+
+export function workedLabel(turn: Turn, usage: PiUsage | null): string {
   const parts: string[] = [];
   if (turn.durationMs !== null) {
     parts.push(`Worked ${Math.max(1, Math.round(turn.durationMs / 1000))} s`);
   }
   if (turn.counts.tools > 0) parts.push(`${turn.counts.tools} tools`);
   if (turn.counts.children > 0) parts.push(`${turn.counts.children} children`);
+  // Zero-usage turns (failed requests) show no numbers and no "$0": a local
+  // provider and a zero-priced catalog row both bill nothing.
+  if (usage && (usage.input > 0 || usage.output > 0 || usage.cacheRead > 0)) {
+    parts.push(usageLabel(usage));
+  }
+  if (usage && usage.costTotal > 0) parts.push(formatCost(usage.costTotal));
   return parts.join(", ") || "Worked";
 }
 
@@ -177,7 +270,9 @@ function ThinkingEntry({ text }: { text: string }) {
         {!open && trimmed.includes("\n") ? "..." : ""}
       </button>
       {open ? (
-        <div className="mt-1 whitespace-pre-wrap wrap-break-word">{trimmed}</div>
+        <div className="mt-1 whitespace-pre-wrap wrap-break-word">
+          {trimmed}
+        </div>
       ) : null}
     </div>
   );
@@ -234,12 +329,14 @@ function ChildCard({
 
 function ActivityFold({
   turn,
+  usage,
   open,
   onToggle,
   cwd,
   onOpenChild,
 }: {
   turn: Turn;
+  usage: PiUsage | null;
   open: boolean;
   onToggle: () => void;
   cwd?: string;
@@ -255,7 +352,7 @@ function ActivityFold({
         {turn.status === "streaming" ? (
           <Shimmer duration={1.4}>{streamingLabel(turn)}</Shimmer>
         ) : (
-          <span>{workedLabel(turn)}</span>
+          <span>{workedLabel(turn, usage)}</span>
         )}
         <HugeiconsIcon
           icon={ArrowDown01Icon}
@@ -269,7 +366,9 @@ function ActivityFold({
           {turn.activity.map((entry, i) => (
             // Activity entries are positional: a turn's feed only appends.
             <div key={i}>
-              {entry.kind === "thinking" ? <ThinkingEntry text={entry.text} /> : null}
+              {entry.kind === "thinking" ? (
+                <ThinkingEntry text={entry.text} />
+              ) : null}
               {entry.kind === "narration" ? (
                 <div className="text-[13px] text-muted-foreground whitespace-pre-wrap wrap-break-word">
                   {entry.text}
@@ -277,7 +376,11 @@ function ActivityFold({
               ) : null}
               {entry.kind === "tool" ? (
                 isSubagentTool(entry.block) ? (
-                  <ChildCard block={entry.block} cwd={cwd} onOpenChild={onOpenChild} />
+                  <ChildCard
+                    block={entry.block}
+                    cwd={cwd}
+                    onOpenChild={onOpenChild}
+                  />
                 ) : isBoardTool(entry.block) ? (
                   <BoardChip block={entry.block} />
                 ) : (
@@ -343,11 +446,19 @@ function AnswerActions({
   return (
     <div className="flex items-center gap-1">
       <button type="button" onClick={copyRendered} className={btn}>
-        <HugeiconsIcon icon={copied ? CheckmarkCircle01Icon : CopyIcon} size={12} strokeWidth={1.75} />
+        <HugeiconsIcon
+          icon={copied ? CheckmarkCircle01Icon : CopyIcon}
+          size={12}
+          strokeWidth={1.75}
+        />
         Copy
       </button>
       <button type="button" onClick={copyMarkdown} className={btn}>
-        <HugeiconsIcon icon={copied ? CheckmarkCircle01Icon : CopyIcon} size={12} strokeWidth={1.75} />
+        <HugeiconsIcon
+          icon={copied ? CheckmarkCircle01Icon : CopyIcon}
+          size={12}
+          strokeWidth={1.75}
+        />
         Copy markdown
       </button>
       {cwd ? (
@@ -356,7 +467,9 @@ function AnswerActions({
           Open in editor
         </button>
       ) : null}
-      {saved ? <span className="text-xs text-muted-foreground">saved {saved}</span> : null}
+      {saved ? (
+        <span className="text-xs text-muted-foreground">saved {saved}</span>
+      ) : null}
       {error ? <span className="text-xs text-destructive">{error}</span> : null}
     </div>
   );
@@ -364,6 +477,7 @@ function AnswerActions({
 
 function TurnView({
   turn,
+  usage,
   images,
   open,
   onToggle,
@@ -373,6 +487,7 @@ function TurnView({
   onDismiss,
 }: {
   turn: Turn;
+  usage: PiUsage | null;
   images?: PiImageAttachment[];
   open: boolean;
   onToggle: () => void;
@@ -405,6 +520,7 @@ function TurnView({
       {turn.activity.length > 0 || turn.asks.length > 0 ? (
         <ActivityFold
           turn={turn}
+          usage={usage}
           open={open}
           onToggle={onToggle}
           cwd={cwd}
@@ -449,17 +565,18 @@ export function Transcript({
   onOpenChild,
   turnImages,
 }: Props) {
-  // Error blocks render as their own cards attached to the turn that failed,
-  // so the turn model never sees them.
+  // Error and retry blocks render as their own cards attached to the turn
+  // they belong to, so the turn model never sees them.
   const turns = useMemo(() => groupTurns(messageBlocks(blocks)), [blocks]);
-  const errors = useMemo(() => errorsByTurn(blocks), [blocks]);
+  const cards = useMemo(() => cardsByTurn(blocks), [blocks]);
+  const usage = useMemo(() => usageByTurn(blocks), [blocks]);
   // Fold state is remembered per turn for as long as this tab lives.
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({});
   const toggle = useCallback((key: string) => {
     setOpenTurns((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
 
-  if (turns.length === 0 && errors.size === 0) {
+  if (turns.length === 0 && cards.size === 0) {
     return (
       <div className="min-h-0 flex-1 select-text overflow-y-auto">
         <ConversationEmptyState
@@ -479,6 +596,7 @@ export function Transcript({
               <TurnView
                 key={turn.key}
                 turn={turn}
+                usage={usage.get(i) ?? null}
                 images={turnImages?.[turn.key]}
                 open={openTurns[turn.key] ?? false}
                 onToggle={() => toggle(turn.key)}
@@ -487,15 +605,23 @@ export function Transcript({
                 onAnswer={onAnswer}
                 onDismiss={onDismiss}
               />
-              {(errors.get(i) ?? []).map((block, j) => (
-                <ErrorCard key={`error-${i}-${j}`} block={block} />
-              ))}
+              {(cards.get(i) ?? []).map((block, j) =>
+                block.kind === "error" ? (
+                  <ErrorCard key={`card-${i}-${j}`} block={block} />
+                ) : (
+                  <RetryCard key={`card-${i}-${j}`} block={block} />
+                ),
+              )}
             </Fragment>
           ))}
-          {/* Errors with no turn under them (failed before any message). */}
-          {(errors.get(turns.length) ?? []).map((block, j) => (
-            <ErrorCard key={`error-bare-${j}`} block={block} />
-          ))}
+          {/* Cards with no turn under them (failed before any message). */}
+          {(cards.get(turns.length) ?? []).map((block, j) =>
+            block.kind === "error" ? (
+              <ErrorCard key={`card-bare-${j}`} block={block} />
+            ) : (
+              <RetryCard key={`card-bare-${j}`} block={block} />
+            ),
+          )}
         </ConversationContent>
         <ConversationScrollButton />
       </Conversation>

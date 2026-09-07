@@ -8,7 +8,7 @@ import {
 import { POLL_MS } from "./BoardPane";
 
 // Pane-level expectations: the compact rail lists the four active states, and
-// the harness agent default matches the efficient-pi checkout layout.
+// the binary defaults stay empty so the resolver decides per machine.
 describe("BoardView rail configuration", () => {
   it("lists exactly the four active states on the rail", () => {
     expect(RAIL_STATES).toEqual(["align", "in_progress", "verify", "review"]);
@@ -21,16 +21,12 @@ describe("BoardView rail configuration", () => {
     }
   });
 
-  it("defaults the action binary to the harness checkout", () => {
-    expect(DEFAULT_AGENT_BIN).toBe(
-      "$HOME/Documents/Work/harness/target/release/agent",
-    );
+  it("defaults the action binary to empty so the resolver decides", () => {
+    expect(DEFAULT_AGENT_BIN).toBe("");
   });
 
-  it("keeps the board CLI default from module settings", () => {
-    expect(PI_MODULE_PREFS_DEFAULTS.boardBin).toBe(
-      "$HOME/Documents/Work/Lab/efficient-pi/bin/board",
-    );
+  it("keeps the board CLI default empty from module settings", () => {
+    expect(PI_MODULE_PREFS_DEFAULTS.boardBin).toBe("");
   });
 
   // Rail and full mode share BoardView, so both re-poll on the same

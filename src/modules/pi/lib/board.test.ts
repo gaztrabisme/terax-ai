@@ -1,15 +1,23 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// board.ts resolves the agent binary through pi_paths at import; the mock
+// keeps the tests in plain node and lets each case pin the resolution.
+const invoke = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+
 import {
   DEFAULT_AGENT_BIN,
   STATE_LABELS,
   boardActionCommand,
   boardListCommand,
   boardShowCommand,
+  effectiveAgentBin,
   gateDots,
   latestGateByName,
+  loadResolvedAgentBin,
   parseBoard,
   parseTicket,
   quoteBin,
@@ -170,15 +178,33 @@ describe("commands", () => {
   });
 
   it("boardActionCommand exports the DB and runs the harness agent", () => {
-    expect(boardActionCommand(DEFAULT_AGENT_BIN, "/work/proj", "land", "t2")).toBe(
-      `HARNESS_DB='/work/proj/.pi/board.db' "$HOME"/'Documents/Work/harness/target/release/agent' land 't2'`,
+    expect(boardActionCommand("$HOME/tools/harness/agent", "/work/proj", "land", "t2")).toBe(
+      `HARNESS_DB='/work/proj/.pi/board.db' "$HOME"/'tools/harness/agent' land 't2'`,
     );
   });
 
-  it("defaults the agent binary to the harness checkout", () => {
-    expect(DEFAULT_AGENT_BIN).toBe(
-      "$HOME/Documents/Work/harness/target/release/agent",
+  it("defaults the agent binary to empty so the resolver decides", () => {
+    expect(DEFAULT_AGENT_BIN).toBe("");
+  });
+
+  it("falls back to the pi_paths agent binary when the pref is blank", async () => {
+    invoke.mockResolvedValue({
+      agent: { path: "/app/exe/agent", source: "bundled", candidates: [] },
+    });
+    expect(await loadResolvedAgentBin()).toBe("/app/exe/agent");
+    expect(effectiveAgentBin("")).toBe("/app/exe/agent");
+    expect(effectiveAgentBin("   ")).toBe("/app/exe/agent");
+    expect(boardActionCommand(DEFAULT_AGENT_BIN, "/work/proj", "land", "t2")).toBe(
+      `HARNESS_DB='/work/proj/.pi/board.db' '/app/exe/agent' land 't2'`,
     );
+    // An explicit pref wins over the resolution.
+    expect(effectiveAgentBin("$HOME/bin/agent")).toBe("$HOME/bin/agent");
+  });
+
+  it("keeps the blank fallback when pi_paths fails", async () => {
+    invoke.mockRejectedValue(new Error("unavailable"));
+    expect(await loadResolvedAgentBin()).toBe(null);
+    expect(effectiveAgentBin("")).toBe("");
   });
 });
 

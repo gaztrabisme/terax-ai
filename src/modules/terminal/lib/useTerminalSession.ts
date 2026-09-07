@@ -3,11 +3,14 @@ import { ensureMonoFontsLoaded } from "@/lib/fonts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { BlockStore } from "./blocks";
 import { DormantRing } from "./dormantRing";
 import {
   createShellIntegrationState,
   registerCwdHandler,
   registerPromptTracker,
+  type PromptEvent,
+  type PromptTracker,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
 import {
@@ -30,6 +33,8 @@ type Callbacks = {
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
+  /** The per-session block store, replaced on every slot bind, nulled on unbind. */
+  onBlockStore?: (store: BlockStore | null) => void;
 };
 
 type Session = {
@@ -55,6 +60,8 @@ type Session = {
   // at the most recent release. Read once on the next bind to trigger a
   // SIGWINCH-driven repaint instead of replaying dormant bytes.
   altScreenAtRelease: boolean;
+  /** Command blocks for the bound slot; null while the leaf is dormant. */
+  blockStore: BlockStore | null;
 };
 
 const sessions = new Map<number, Session>();
@@ -183,6 +190,7 @@ function ensureSession(leafId: number, initialCwd?: string): Session {
     dormantRing: new DormantRing(),
     hasSlot: false,
     altScreenAtRelease: false,
+    blockStore: null,
   };
   sessions.set(leafId, session);
 
@@ -247,7 +255,34 @@ function bindLeafToSlot(leafId: number, s: Session): void {
       // 7 emitted by untrusted command output (remote SSH, `cat` of an
       // attacker file, etc.).
       const shellState = createShellIntegrationState();
-      const prompt = registerPromptTracker(term, shellState);
+      // Block store fed by the prompt tracker's A/C/D events; its lifetime
+      // matches this bind, so it rides the oscDisposers (marker disposal on
+      // pane eviction, decorations via the store's listeners).
+      s.blockStore?.dispose();
+      const blocks = new BlockStore({
+        createMarker: () => {
+          try {
+            return term.registerMarker(0) ?? null;
+          } catch {
+            return null;
+          }
+        },
+      });
+      s.blockStore = blocks;
+      s.callbacks.onBlockStore?.(blocks);
+      let tracker: PromptTracker | null = null;
+      const prompt = registerPromptTracker(term, shellState, (event: PromptEvent) => {
+        if (event.type === "A") {
+          blocks.onPromptStart();
+        } else if (event.type === "C") {
+          blocks.onCommandStart(event.command);
+        } else {
+          // Shells without C (bash 3.2, PowerShell) anchor their blind block
+          // at the prompt marker drawn by the previous A.
+          blocks.onCommandDone(event.exitCode, tracker?.getMarker() ?? null);
+        }
+      });
+      tracker = prompt;
       const cwd = registerCwdHandler(
         term,
         (next) => {
@@ -258,7 +293,13 @@ function bindLeafToSlot(leafId: number, s: Session): void {
         },
         shellState,
       );
-      return [prompt.dispose, cwd];
+      return [
+        prompt.dispose,
+        cwd,
+        () => {
+          blocks.dispose();
+        },
+      ];
     },
     onSearchReady: (addon) => s.callbacks.onSearchReady?.(addon),
   });
@@ -282,6 +323,8 @@ function unbindLeafFromSlot(leafId: number, s: Session): void {
     s.altScreenAtRelease = out.altScreen;
   }
   s.hasSlot = false;
+  s.blockStore = null;
+  s.callbacks.onBlockStore?.(null);
 }
 
 function attachSession(
@@ -343,6 +386,8 @@ export async function respawnSession(
     slot.term.clear();
     slot.term.reset();
   }
+  // The old shell's blocks and their markers died with the reset buffer.
+  s.blockStore?.reset();
 
   s.ptyOpening = true;
   let pty: PtySession;
@@ -403,6 +448,7 @@ type Options = {
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
+  onBlockStore?: (store: BlockStore | null) => void;
 };
 
 export function useTerminalSession({
@@ -414,9 +460,10 @@ export function useTerminalSession({
   onSearchReady,
   onExit,
   onCwd,
+  onBlockStore,
 }: Options) {
-  const cbRef = useRef({ onSearchReady, onExit, onCwd });
-  cbRef.current = { onSearchReady, onExit, onCwd };
+  const cbRef = useRef({ onSearchReady, onExit, onCwd, onBlockStore });
+  cbRef.current = { onSearchReady, onExit, onCwd, onBlockStore };
 
   useEffect(() => {
     let cancelled = false;
@@ -429,6 +476,7 @@ export function useTerminalSession({
         onSearchReady: (a) => cbRef.current.onSearchReady?.(a),
         onExit: (c) => cbRef.current.onExit?.(c),
         onCwd: (c) => cbRef.current.onCwd?.(c),
+        onBlockStore: (st) => cbRef.current.onBlockStore?.(st),
       });
       if (s.visibleNow && s.focusedNow) focusSlot(leafId);
     });

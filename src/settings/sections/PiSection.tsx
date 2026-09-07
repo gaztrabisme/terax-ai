@@ -30,6 +30,7 @@ import {
   parsePiModels,
   parsePiProviders,
   piAuthStatusLabel,
+  piSignInCommandResolved,
   piSignInPayload,
   PI_OPEN_TERMINAL_EVENT,
   PI_OAUTH_PROVIDERS,
@@ -41,6 +42,7 @@ import {
   type PiEndpointView,
   type PiModelRow,
   type PiProviderRow,
+  type PiResolvedPaths,
 } from "@/modules/pi/lib/providers";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
@@ -70,12 +72,14 @@ function CommitInput({
   listId,
   className,
   type,
+  disabled,
 }: {
   value: string;
   onCommit: (next: string) => void;
   listId?: string;
   className?: string;
   type?: string;
+  disabled?: boolean;
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
@@ -87,6 +91,7 @@ function CommitInput({
       value={draft}
       type={type}
       list={listId}
+      disabled={disabled}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {
@@ -119,6 +124,7 @@ export function PiSection() {
   const piSmol = usePreferencesStore((s) => s.piSmol);
 
   const [home, setHome] = useState<string | null>(null);
+  const [paths, setPaths] = useState<PiResolvedPaths | null>(null);
   const [providers, setProviders] = useState<PiProviderRow[] | null>(null);
   const [providersError, setProvidersError] = useState<string | null>(null);
   const [models, setModels] = useState<PiModelRow[] | null>(null);
@@ -134,21 +140,50 @@ export function PiSection() {
   const tmplDocRef = useRef<Record<string, unknown>>({});
 
   const launcherDirPath = expandHomePath(piLauncherDir, home);
-  const agentDirPath = `${launcherDirPath}/pi-home/agent`;
+  // pi runs from the runtime agent dir (the seeded per-user copy when the
+  // resolved dir is the bundled template), so the settings load and write
+  // there, not under the launcher dir.
+  const runtimeAgentDir = paths?.runtimeAgentDir ?? null;
+  const runtimeDirPath = runtimeAgentDir?.path ?? null;
+  const piBinPath = paths?.pi.path ?? null;
+  const unseededBundled =
+    runtimeAgentDir !== null &&
+    runtimeAgentDir.source === "bundled" &&
+    !runtimeAgentDir.seeded;
   // Until the home dir resolves, a $HOME-prefixed path cannot hit the fs.
-  const fsReady = !launcherDirPath.startsWith("$HOME");
+  const fsReady =
+    !!runtimeDirPath && !runtimeDirPath.startsWith("$HOME");
 
   useEffect(() => {
     void invoke<string | null>("pi_home_dir").then(setHome).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    let alive = true;
+    void invoke<PiResolvedPaths>("pi_paths", {
+      prefs: {
+        piBin: "",
+        agentBin: piAgentBin,
+        agentDir: piAgentDir,
+        launcherDir: piLauncherDir,
+      },
+    })
+      .then((resolved) => {
+        if (alive) setPaths(resolved);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [piLauncherDir, piAgentBin, piAgentDir]);
+
   const loadProviders = useMemo(
-    () => async (dir: string) => {
+    () => async (piBin: string, agentDir: string) => {
       setProvidersError(null);
       try {
         const out = await native.runCommand(
-          `PI_CODING_AGENT_DIR="${dir}/pi-home/agent" "${dir}/bin/pi" --list-providers`,
-          dir,
+          `PI_CODING_AGENT_DIR="${agentDir}" "${piBin}" --list-providers`,
+          agentDir,
           20,
         );
         if (out.exit_code !== 0) {
@@ -166,11 +201,11 @@ export function PiSection() {
   );
 
   const loadModels = useMemo(
-    () => async (dir: string) => {
+    () => async (piBin: string, agentDir: string) => {
       try {
         const out = await native.runCommand(
-          `PI_CODING_AGENT_DIR="${dir}/pi-home/agent" "${dir}/bin/pi" --list-models`,
-          dir,
+          `PI_CODING_AGENT_DIR="${agentDir}" "${piBin}" --list-models`,
+          agentDir,
           20,
         );
         if (out.exit_code === 0) setModels(parsePiModels(out.stdout));
@@ -182,9 +217,9 @@ export function PiSection() {
   );
 
   const loadAuth = useMemo(
-    () => async (dir: string) => {
+    () => async (agentDir: string) => {
       try {
-        const res = await native.readFile(`${dir}/pi-home/agent/auth.json`);
+        const res = await native.readFile(`${agentDir}/auth.json`);
         if (res.kind === "text") {
           setAuthEntries(JSON.parse(res.content) as Record<string, unknown>);
         } else {
@@ -198,10 +233,10 @@ export function PiSection() {
   );
 
   const loadEndpoints = useMemo(
-    () => async (dir: string) => {
+    () => async (agentDir: string) => {
       try {
         const res: ReadResult = await native.readFile(
-          `${dir}/pi-home/agent/models.json.tmpl`,
+          `${agentDir}/models.json.tmpl`,
         );
         if (res.kind !== "text") {
           setEndpoints(null);
@@ -219,12 +254,12 @@ export function PiSection() {
   );
 
   useEffect(() => {
-    if (!fsReady) return;
-    void loadProviders(launcherDirPath);
-    void loadModels(launcherDirPath);
-    void loadAuth(launcherDirPath);
-    void loadEndpoints(launcherDirPath);
-  }, [fsReady, launcherDirPath, loadProviders, loadModels, loadAuth, loadEndpoints]);
+    if (!fsReady || !piBinPath || !runtimeDirPath) return;
+    void loadProviders(piBinPath, runtimeDirPath);
+    void loadModels(piBinPath, runtimeDirPath);
+    void loadAuth(runtimeDirPath);
+    void loadEndpoints(runtimeDirPath);
+  }, [fsReady, piBinPath, runtimeDirPath, loadProviders, loadModels, loadAuth, loadEndpoints]);
 
   const modelOptions = useMemo(
     () => (models && piProvider ? modelsForProvider(models, piProvider) : []),
@@ -276,36 +311,48 @@ export function PiSection() {
 
   const saveKey = async (providerId: string) => {
     const key = keyDraft.trim();
-    if (!key) return;
+    if (!key || !runtimeDirPath) return;
     const next = setProviderApiKey(authEntries, providerId, key);
     try {
       await native.writeFile(
-        `${agentDirPath}/auth.json`,
+        `${runtimeDirPath}/auth.json`,
         `${JSON.stringify(next, null, 2)}\n`,
       );
       setKeyInputFor(null);
       setKeyDraft("");
-      await loadAuth(launcherDirPath);
+      await loadAuth(runtimeDirPath);
     } catch {
       setProvidersError("could not write auth.json");
     }
   };
 
   const removeAuth = async (providerId: string) => {
+    if (!runtimeDirPath) return;
     const next = removeProviderAuth(authEntries, providerId);
     try {
       await native.writeFile(
-        `${agentDirPath}/auth.json`,
+        `${runtimeDirPath}/auth.json`,
         `${JSON.stringify(next, null, 2)}\n`,
       );
-      await loadAuth(launcherDirPath);
+      await loadAuth(runtimeDirPath);
     } catch {
       setProvidersError("could not write auth.json");
     }
   };
 
   const signIn = async (providerId: string) => {
-    await emit(PI_OPEN_TERMINAL_EVENT, piSignInPayload(launcherDirPath));
+    // Sign in against the runtime agent dir when the resolved pi binary is
+    // known; the checkout payload stays for a launcher dir with no resolved
+    // binary yet.
+    const payload =
+      piBinPath && runtimeDirPath
+        ? {
+            cwd: launcherDirPath || runtimeDirPath,
+            command: piSignInCommandResolved(piBinPath, runtimeDirPath),
+            hint: "Type /login <provider> in the pi prompt",
+          }
+        : piSignInPayload(launcherDirPath);
+    await emit(PI_OPEN_TERMINAL_EVENT, payload);
     setReveal((r) => ({
       ...r,
       signIn: `terminal requested for ${providerId}`,
@@ -339,14 +386,14 @@ export function PiSection() {
   };
 
   const saveEndpoints = async () => {
-    if (!endpoints) return;
+    if (!endpoints || !runtimeDirPath) return;
     const out = serializeModelsJsonTmpl(
       { data: tmplDocRef.current, endpoints },
       endpoints,
     );
     try {
       await native.writeFile(
-        `${agentDirPath}/models.json.tmpl`,
+        `${runtimeDirPath}/models.json.tmpl`,
         out,
       );
       setEndpointsNote("saved models.json.tmpl");
@@ -449,8 +496,8 @@ export function PiSection() {
               onClick={() => {
                 const dir = piAgentDir.trim()
                   ? expandHomePath(piAgentDir, home)
-                  : agentDirPath;
-                void checkPath("agentDir", dir, true);
+                  : runtimeDirPath;
+                if (dir) void checkPath("agentDir", dir, true);
               }}
             >
               Reveal
@@ -604,17 +651,29 @@ export function PiSection() {
           </table>
         </div>
         <p className="text-[12px] text-muted-foreground">
-          Keys are written to {agentDirPath}/auth.json. OAuth providers sign in
+          Keys are written to {runtimeDirPath ?? "the runtime agent dir"}/auth.json. OAuth providers sign in
           through the pi prompt.
         </p>
       </div>
 
       <div id="pi-group-endpoints" className="flex flex-col gap-2">
-        <GroupTitle>Endpoints</GroupTitle>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <GroupTitle>Endpoints</GroupTitle>
+          <span className="font-mono text-[11px] text-muted-foreground">
+            {runtimeDirPath
+              ? `${runtimeDirPath}/models.json.tmpl`
+              : "models.json.tmpl"}
+          </span>
+        </div>
         <p className="text-[12px] text-muted-foreground">
-          Custom OpenAI-compatible providers in {agentDirPath}/models.json.tmpl.
-          Placeholders like __BPPC_HOST__ and __OMLX_KEY__ are preserved.
+          Custom OpenAI-compatible providers. Placeholders like __BPPC_HOST__
+          and __OMLX_KEY__ are preserved.
         </p>
+        {unseededBundled ? (
+          <p className="text-[12px] text-muted-foreground">
+            seeded on the first session
+          </p>
+        ) : null}
         {endpoints?.map((ep, i) => (
           <div
             key={ep.id || `new-${i}`}
@@ -625,6 +684,7 @@ export function PiSection() {
               <CommitInput
                 value={ep.id}
                 onCommit={(id) => updateEndpoint(i, { id })}
+                disabled={unseededBundled}
                 className="w-48"
               />
               <span className="text-[12px] text-muted-foreground">
@@ -636,6 +696,7 @@ export function PiSection() {
               <CommitInput
                 value={ep.baseUrl}
                 onCommit={(baseUrl) => updateEndpoint(i, { baseUrl })}
+                disabled={unseededBundled}
                 className="w-72"
               />
             </div>
@@ -644,12 +705,14 @@ export function PiSection() {
               <CommitInput
                 value={ep.modelId}
                 onCommit={(modelId) => updateEndpoint(i, { modelId })}
+                disabled={unseededBundled}
                 className="w-56"
               />
               <span className="w-16 text-[12px] text-muted-foreground">name</span>
               <CommitInput
                 value={ep.name}
                 onCommit={(name) => updateEndpoint(i, { name })}
+                disabled={unseededBundled}
                 className="w-48"
               />
             </div>
@@ -661,6 +724,7 @@ export function PiSection() {
                   updateEndpoint(i, { contextWindow: Number(v) || 0 })
                 }
                 type="number"
+                disabled={unseededBundled}
                 className="w-32"
               />
               <span className="w-16 text-[12px] text-muted-foreground">max out</span>
@@ -668,6 +732,7 @@ export function PiSection() {
                 value={String(ep.maxTokens)}
                 onCommit={(v) => updateEndpoint(i, { maxTokens: Number(v) || 0 })}
                 type="number"
+                disabled={unseededBundled}
                 className="w-32"
               />
             </div>
@@ -678,6 +743,7 @@ export function PiSection() {
             variant="outline"
             size="sm"
             className="h-7 text-[12px]"
+            disabled={unseededBundled}
             onClick={() =>
               setEndpoints((list) => [...(list ?? []), blankEndpoint()])
             }
@@ -687,6 +753,7 @@ export function PiSection() {
           <Button
             size="sm"
             className="h-7 text-[12px]"
+            disabled={unseededBundled}
             onClick={() => void saveEndpoints()}
           >
             Save endpoints

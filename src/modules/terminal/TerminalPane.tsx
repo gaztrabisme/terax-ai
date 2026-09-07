@@ -1,7 +1,10 @@
 import { useTheme } from "@/modules/theme";
 import type { SearchAddon } from "@xterm/addon-search";
-import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
-import { useTerminalSession } from "./lib/useTerminalSession";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { BlockChrome } from "./components/BlockChrome";
+import { TerminalComposer } from "./components/TerminalComposer";
+import type { BlockStore } from "./lib/blocks";
+import { useTerminalSession, writeToSession } from "./lib/useTerminalSession";
 
 export type TerminalPaneHandle = {
   write: (data: string) => void;
@@ -38,6 +41,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
     const { resolvedMode, themeId, customThemes } = useTheme();
+    // The terminalComposer preference defaults to on. The settings store is
+    // owned by another unit this slice, so until it gains the key the toggle
+    // lives on the pane and starts on for every pane.
+    const [composerEnabled, setComposerEnabled] = useState(true);
+    const [blockStore, setBlockStore] = useState<BlockStore | null>(null);
 
     const session = useTerminalSession({
       leafId,
@@ -48,6 +56,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onSearchReady: (a) => onSearchReady?.(leafId, a),
       onExit: (c) => onExit?.(leafId, c),
       onCwd: (c) => onCwd?.(leafId, c),
+      onBlockStore: setBlockStore,
     });
 
     useEffect(() => {
@@ -69,13 +78,33 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
 
     return (
       <div
-        ref={containerRef}
-        className="zoom-exempt h-full w-full"
+        className="zoom-exempt group relative flex h-full w-full flex-col"
         style={{
           visibility: visible ? "visible" : "hidden",
           pointerEvents: visible ? "auto" : "none",
         }}
-      />
+      >
+        {/* The pooled slot host is appended into this inner node. */}
+        <div ref={containerRef} className="relative min-h-0 w-full flex-1" />
+        {composerEnabled ? (
+          <TerminalComposer
+            leafId={leafId}
+            bound={blockStore !== null}
+            onWrite={(data) => writeToSession(leafId, data)}
+            onFocusEmulator={session.focus}
+          />
+        ) : null}
+        <BlockChrome leafId={leafId} store={blockStore} />
+        <button
+          type="button"
+          onClick={() => setComposerEnabled((v) => !v)}
+          aria-pressed={composerEnabled}
+          title={composerEnabled ? "Hide composer" : "Show composer"}
+          className="absolute right-2 top-1 z-20 rounded-md border border-border/60 bg-background/80 px-2 py-0.5 text-[11px] text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          {composerEnabled ? "Composer on" : "Composer off"}
+        </button>
+      </div>
     );
   },
 );

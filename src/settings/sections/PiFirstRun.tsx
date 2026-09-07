@@ -1,10 +1,19 @@
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { native } from "@/lib/native";
 import { cn } from "@/lib/utils";
 import {
   buildRows,
   chosenLocalEndpoints,
+  effectiveRoles,
   probeUrlFor,
+  rolesScopeLabel,
   summarize,
   type CheckRow,
   type CheckStatus,
@@ -13,12 +22,14 @@ import {
   type PiRoles,
 } from "@/modules/pi/lib/firstRun";
 import {
-  expandHomePath,
   parseModelsJsonTmpl,
   parsePiProviders,
+  PI_OPEN_CWDS_EVENT,
+  PI_OPEN_CWDS_QUERY_EVENT,
   type PiEndpointView,
   type PiProviderRow,
   type PiResolvedPaths,
+  type PiRuntimePrefs,
 } from "@/modules/pi/lib/providers";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
@@ -29,6 +40,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit, listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type PiFirstRunProps = {
@@ -64,10 +76,10 @@ async function invokeHealth(probe: Probe): Promise<PiHealthResult> {
 }
 
 async function loadAuthEntries(
-  agentDir: string,
+  agentDir: string | null,
   ready: boolean,
 ): Promise<Record<string, unknown> | null> {
-  if (!ready) return null;
+  if (!ready || !agentDir) return null;
   try {
     const res = await native.readFile(`${agentDir}/auth.json`);
     return res.kind === "text"
@@ -79,10 +91,10 @@ async function loadAuthEntries(
 }
 
 async function loadEndpoints(
-  agentDir: string,
+  agentDir: string | null,
   ready: boolean,
 ): Promise<PiEndpointView[] | null> {
-  if (!ready) return null;
+  if (!ready || !agentDir) return null;
   try {
     const res = await native.readFile(`${agentDir}/models.json.tmpl`);
     return res.kind === "text"
@@ -94,19 +106,32 @@ async function loadEndpoints(
 }
 
 async function loadProviderList(
-  dir: string,
+  piBin: string | null,
+  agentDir: string | null,
   ready: boolean,
 ): Promise<PiProviderRow[]> {
-  if (!ready) return [];
+  if (!ready || !piBin || !agentDir) return [];
   try {
     const out = await native.runCommand(
-      `PI_CODING_AGENT_DIR="${dir}/pi-home/agent" "${dir}/bin/pi" --list-providers`,
-      dir,
+      `PI_CODING_AGENT_DIR="${agentDir}" "${piBin}" --list-providers`,
+      agentDir,
       20,
     );
     return out.exit_code === 0 ? parsePiProviders(out.stdout) : [];
   } catch {
     return [];
+  }
+}
+
+/** The parsed `<cwd>/.pi/terax.json`; unreadable or missing resolves to null. */
+async function loadWorkspaceOverrides(cwd: string | null): Promise<unknown> {
+  if (!cwd) return null;
+  try {
+    const res = await native.readFile(`${cwd}/.pi/terax.json`);
+    if (res.kind !== "text" || !res.content) return null;
+    return JSON.parse(res.content) as unknown;
+  } catch {
+    return null;
   }
 }
 
@@ -118,21 +143,44 @@ export function PiFirstRun({
   onAddKey,
 }: PiFirstRunProps) {
   const piLauncherDir = usePreferencesStore((s) => s.piLauncherDir);
+  const piBoardBin = usePreferencesStore((s) => s.piBoardBin);
   const piAgentBin = usePreferencesStore((s) => s.piAgentBin);
   const piAgentDir = usePreferencesStore((s) => s.piAgentDir);
   const piProvider = usePreferencesStore((s) => s.piProvider);
+  const piModel = usePreferencesStore((s) => s.piModel);
+  const piThinking = usePreferencesStore((s) => s.piThinking);
   const piSmol = usePreferencesStore((s) => s.piSmol);
 
-  const [home, setHome] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<CheckRow[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const autoRan = useRef(false);
+
+  // Open pi tabs, most recently active cwd first, mirrored from the main
+  // window over the pi:open-cwds events. The roles rows report the effective
+  // prefs for the selected cwd; with no pi tab they report the globals.
+  const [openCwds, setOpenCwds] = useState<string[]>([]);
+  const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
 
   useEffect(() => {
-    void invoke<string | null>("pi_home_dir")
-      .then(setHome)
-      .catch(() => setHome(""));
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void listen<{ cwds: string[] }>(PI_OPEN_CWDS_EVENT, (e) => {
+      if (!alive) return;
+      const cwds = Array.isArray(e.payload?.cwds) ? e.payload.cwds : [];
+      setOpenCwds(cwds);
+      setSelectedCwd((cur) =>
+        cur && cwds.includes(cur) ? cur : (cwds[0] ?? null),
+      );
+    }).then((un) => {
+      if (!alive) un();
+      else unlisten = un;
+    });
+    // A fresh settings window missed the earlier broadcasts; pull the list.
+    void emit(PI_OPEN_CWDS_QUERY_EVENT, {}).catch(() => {});
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
   }, []);
 
   const runCheck = useCallback(async () => {
@@ -147,14 +195,28 @@ export function PiFirstRun({
           launcherDir: piLauncherDir,
         },
       });
-      const roles: PiRoles = { provider: piProvider, smol: piSmol };
-      const dir = expandHomePath(piLauncherDir, home);
-      const ready = !dir.startsWith("$HOME");
-      const agentDir = `${dir}/pi-home/agent`;
+      const globalPrefs: Partial<PiRuntimePrefs> = {
+        launcherDir: piLauncherDir,
+        boardBin: piBoardBin,
+        agentBin: piAgentBin,
+        agentDir: piAgentDir,
+        provider: piProvider,
+        model: piModel,
+        thinking: piThinking,
+        smol: piSmol,
+      };
+      const overrides = await loadWorkspaceOverrides(selectedCwd);
+      const roles: PiRoles = effectiveRoles(globalPrefs, overrides);
+      const scope = rolesScopeLabel(selectedCwd);
+      // pi runs from the runtime agent dir (the seeded copy when the source
+      // is bundled), so the credentials, endpoints and provider table are
+      // read there, not from the launcher dir.
+      const runtimeDir = paths.runtimeAgentDir.path;
+      const ready = !!runtimeDir && !runtimeDir.startsWith("$HOME");
       const [authEntries, endpoints, providerList] = await Promise.all([
-        loadAuthEntries(agentDir, ready),
-        loadEndpoints(agentDir, ready),
-        loadProviderList(dir, ready),
+        loadAuthEntries(runtimeDir, ready),
+        loadEndpoints(runtimeDir, ready),
+        loadProviderList(paths.pi.path, runtimeDir, ready),
       ]);
       const probes: Probe[] = chosenLocalEndpoints(roles).map((id) => ({
         id,
@@ -173,6 +235,7 @@ export function PiFirstRun({
           providerList,
           endpoints,
           health,
+          rolesScope: scope,
         }),
       );
     } catch (e) {
@@ -180,15 +243,26 @@ export function PiFirstRun({
     } finally {
       setLoading(false);
     }
-  }, [piAgentBin, piAgentDir, piLauncherDir, piProvider, piSmol, home]);
+  }, [
+    piAgentBin,
+    piAgentDir,
+    piBoardBin,
+    piLauncherDir,
+    piModel,
+    piProvider,
+    piSmol,
+    piThinking,
+    selectedCwd,
+  ]);
 
-  // First run waits for pi_home_dir so auth.json and models.json.tmpl are
-  // reachable; every later run comes from the Run check button only.
+  // Runs on mount and whenever the project selector changes, so the rows
+  // never describe a project other than the selected one; every other later
+  // run comes from the Run check button.
+  const runRef = useRef(runCheck);
+  runRef.current = runCheck;
   useEffect(() => {
-    if (home === null || autoRan.current) return;
-    autoRan.current = true;
-    void runCheck();
-  }, [home, runCheck]);
+    void runRef.current();
+  }, [selectedCwd]);
 
   const summary = summarize(rows);
 
@@ -240,6 +314,20 @@ export function PiFirstRun({
             </span>
           )}
         </div>
+        {openCwds.length > 1 ? (
+          <Select value={selectedCwd ?? ""} onValueChange={setSelectedCwd}>
+            <SelectTrigger className="h-7 w-44 shrink-0 text-[12px]">
+              <SelectValue placeholder="Project" />
+            </SelectTrigger>
+            <SelectContent>
+              {openCwds.map((cwd) => (
+                <SelectItem key={cwd} value={cwd} className="text-[12px]">
+                  {rolesScopeLabel(cwd)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : null}
         <Button
           variant="outline"
           size="sm"

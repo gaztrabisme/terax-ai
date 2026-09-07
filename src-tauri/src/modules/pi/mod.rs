@@ -119,7 +119,7 @@ pub async fn pi_open(
         ..launch::PiPrefs::default()
     };
     let board_agent_bin =
-        launch::resolve_paths(&prefs, &bundled, home.as_deref())
+        launch::resolve_paths(&prefs, &bundled, home.as_deref(), &app_data_dir)
             .agent
             .path;
     // Record the agent dir this cwd's session will spawn with before the
@@ -248,8 +248,9 @@ pub fn pi_home_dir() -> Option<String> {
 }
 
 /// Where pi, the harness agent, and the agent dir actually live, each tagged
-/// with its source (pref > bundled > checkout > missing), so the Pi settings
-/// tab can show what a launch would use. Read-only diagnostics.
+/// with its source (pref > bundled > checkout > missing), plus the runtime
+/// agent dir a session would run from, so the Pi settings tab can show the
+/// values a launch would use. Read-only diagnostics.
 #[tauri::command]
 pub fn pi_paths(app: tauri::AppHandle, prefs: launch::PiPrefs) -> launch::ResolvedPaths {
     let exe_dir = std::env::current_exe()
@@ -261,15 +262,24 @@ pub fn pi_paths(app: tauri::AppHandle, prefs: launch::PiPrefs) -> launch::Resolv
         exe_dir,
         resource_dir,
     };
-    let resolved = launch::resolve_paths(&prefs, &bundled, launch::home_dir().as_deref());
+    let app_data_dir = app.path().app_data_dir().unwrap_or_default();
+    let resolved = launch::resolve_paths(
+        &prefs,
+        &bundled,
+        launch::home_dir().as_deref(),
+        &app_data_dir,
+    );
     log::info!(
-        "pi_paths: pi={:?} ({:?}) agent={:?} ({:?}) agent_dir={:?} ({:?})",
+        "pi_paths: pi={:?} ({:?}) agent={:?} ({:?}) agent_dir={:?} ({:?}) runtime_agent_dir={:?} ({:?}, seeded={})",
         resolved.pi.path,
         resolved.pi.source,
         resolved.agent.path,
         resolved.agent.source,
         resolved.agent_dir.path,
         resolved.agent_dir.source,
+        resolved.runtime_agent_dir.path,
+        resolved.runtime_agent_dir.source,
+        resolved.runtime_agent_dir.seeded,
     );
     resolved
 }

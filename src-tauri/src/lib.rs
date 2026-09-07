@@ -26,6 +26,19 @@ fn get_launch_pi(state: State<'_, LaunchPi>) -> bool {
     std::mem::take(&mut *flag)
 }
 
+/// Drained on first read so HMR / re-mounts can't replay the launch path.
+#[derive(Default)]
+struct LaunchLauncherDir(Mutex<Option<String>>);
+
+#[tauri::command]
+fn get_launch_launcher_dir(state: State<'_, LaunchLauncherDir>) -> Option<String> {
+    state
+        .0
+        .lock()
+        .expect("LaunchLauncherDir mutex poisoned")
+        .take()
+}
+
 fn parse_launch_pi() -> bool {
     launch_pi_from_args(std::env::args().skip(1))
 }
@@ -36,6 +49,38 @@ where
     S: AsRef<str>,
 {
     args.into_iter().any(|arg| arg.as_ref() == "--pi")
+}
+
+/// Value of `--launcher-dir <path>` from the CLI args, or None. The launcher
+/// passes it next to `--pi` so the app can adopt the checkout as the
+/// launcherDir preference on first run.
+fn parse_launch_launcher_dir() -> Option<String> {
+    launch_launcher_dir_from_args(std::env::args().skip(1)).map(|dir| {
+        std::fs::canonicalize(&dir)
+            .map(|canon| crate::modules::fs::to_canon(&canon))
+            .unwrap_or(dir)
+    })
+}
+
+fn launch_launcher_dir_from_args<I, S>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut iter = args.into_iter().map(|arg| arg.as_ref().to_string());
+    while let Some(arg) = iter.next() {
+        if arg == "--launcher-dir" {
+            match iter.next() {
+                // `--launcher-dir` followed by another flag or nothing is a
+                // malformed pair; treat it as absent rather than guessing.
+                Some(path) if !path.starts_with('-') && !path.trim().is_empty() => {
+                    return Some(path)
+                }
+                _ => return None,
+            }
+        }
+    }
+    None
 }
 
 fn parse_launch_dir() -> Option<String> {
@@ -186,6 +231,7 @@ fn clamp_window_to_work_area(window: &tauri::WebviewWindow) {
 pub fn run() {
     let cli_dir = parse_launch_dir();
     let cli_pi = parse_launch_pi();
+    let cli_launcher_dir = parse_launch_launcher_dir();
     workspace::init_launch_cwd(cli_dir.as_deref());
 
     tauri::Builder::default()
@@ -249,6 +295,7 @@ pub fn run() {
         })
         .manage(LaunchDir(Mutex::new(cli_dir)))
         .manage(LaunchPi(Mutex::new(cli_pi)))
+        .manage(LaunchLauncherDir(Mutex::new(cli_launcher_dir)))
         .invoke_handler(tauri::generate_handler![
             pty::pty_open,
             pty::pty_write,
@@ -313,6 +360,7 @@ pub fn run() {
             workspace::workspace_current_dir,
             get_launch_dir,
             get_launch_pi,
+            get_launch_launcher_dir,
             open_settings_window,
             net::lm_ping,
             net::ai_http_request,
@@ -324,7 +372,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod launch_args_tests {
-    use super::launch_pi_from_args;
+    use super::{launch_launcher_dir_from_args, launch_pi_from_args};
 
     #[test]
     fn bare_flag_is_detected() {
@@ -346,5 +394,84 @@ mod launch_args_tests {
     #[test]
     fn empty_argv_is_false() {
         assert!(!launch_pi_from_args(Vec::<&str>::new()));
+    }
+
+    #[test]
+    fn launcher_dir_flag_yields_its_value() {
+        assert_eq!(
+            launch_launcher_dir_from_args([
+                "--args",
+                "/work/proj",
+                "--pi",
+                "--launcher-dir",
+                "/home/me/lab/efficient-pi",
+            ]),
+            Some("/home/me/lab/efficient-pi".to_string())
+        );
+    }
+
+    #[test]
+    fn launcher_dir_is_found_before_and_after_pi() {
+        assert_eq!(
+            launch_launcher_dir_from_args([
+                "--launcher-dir",
+                "/first/checkout",
+                "--pi",
+            ]),
+            Some("/first/checkout".to_string())
+        );
+        assert_eq!(
+            launch_launcher_dir_from_args([
+                "--pi",
+                "--launcher-dir",
+                "/second/checkout",
+            ]),
+            Some("/second/checkout".to_string())
+        );
+    }
+
+    #[test]
+    fn launcher_dir_without_a_value_is_absent() {
+        assert_eq!(launch_launcher_dir_from_args(["--pi", "--launcher-dir"]), None);
+        // A following flag is not a path; the pair is malformed, not guessed.
+        assert_eq!(
+            launch_launcher_dir_from_args(["--launcher-dir", "--pi"]),
+            None
+        );
+    }
+
+    #[test]
+    fn launcher_dir_absent_or_repeated_takes_the_first_value() {
+        assert_eq!(
+            launch_launcher_dir_from_args(["--pi", "/tmp"]),
+            None::<String>
+        );
+        assert_eq!(
+            launch_launcher_dir_from_args(Vec::<&str>::new()),
+            None::<String>
+        );
+        assert_eq!(
+            launch_launcher_dir_from_args([
+                "--launcher-dir",
+                "/one",
+                "--launcher-dir",
+                "/two",
+            ]),
+            Some("/one".to_string())
+        );
+    }
+
+    #[test]
+    fn launcher_dir_ignores_the_equals_form_and_blank_values() {
+        // The launcher passes a separated pair; "--launcher-dir=path" is an
+        // unknown flag and never matches.
+        assert_eq!(
+            launch_launcher_dir_from_args(["--launcher-dir=/x"]),
+            None::<String>
+        );
+        assert_eq!(
+            launch_launcher_dir_from_args(["--launcher-dir", "   "]),
+            None::<String>
+        );
     }
 }

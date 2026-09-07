@@ -1,9 +1,13 @@
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { PiImageAttachment, PiFeedItem } from "../lib/parse";
+import {
+  retryPendingLabel,
+  type PiImageAttachment,
+  type PiFeedItem,
+} from "../lib/parse";
 import { usePiStore } from "../lib/piStore";
 import { Composer } from "./Composer";
-import { Transcript } from "./Transcript";
+import { formatCost, Transcript } from "./Transcript";
 
 type Props = {
   tabId: number;
@@ -63,7 +67,10 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
   // A new session restarts the block feed: drop bound and queued thumbnails.
   useEffect(() => {
     if (blocks.length > 0) return;
-    if (boundUserIdsRef.current.size === 0 && pendingImagesRef.current.length === 0)
+    if (
+      boundUserIdsRef.current.size === 0 &&
+      pendingImagesRef.current.length === 0
+    )
       return;
     boundUserIdsRef.current.clear();
     pendingImagesRef.current = [];
@@ -94,6 +101,8 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
 
   const status = state?.status ?? "idle";
   const exited = entry?.exited === true;
+  // A pending auto-retry replaces the running label until it resolves.
+  const retry = state?.retry ?? null;
   // Stop only while the session is actively working; New session takes over
   // once the run is done, nothing is busy, or the process exited. The two are
   // mutually exclusive, so a done-but-alive session no longer shows both.
@@ -108,7 +117,11 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
   const model = useMemo(() => {
     for (let i = blocks.length - 1; i >= 0; i--) {
       const block = blocks[i];
-      if (block.kind === "message" && block.role === "assistant" && block.model) {
+      if (
+        block.kind === "message" &&
+        block.role === "assistant" &&
+        block.model
+      ) {
         return block.model;
       }
     }
@@ -160,14 +173,15 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
         />
         <span className="font-medium text-foreground">pi</span>
         <span>
-          {statusLabel(
-            status,
-            exited,
-            entry?.exitCode ?? null,
-          )}
+          {!exited && retry
+            ? retryPendingLabel(retry)
+            : statusLabel(status, exited, entry?.exitCode ?? null)}
         </span>
-        {state?.tokens ? (
-          <span>{state.tokens.totalTokens.toLocaleString()} tok</span>
+        {state && state.turnTokens > 0 ? (
+          <span>{state.turnTokens.toLocaleString()} tok</span>
+        ) : null}
+        {state && state.sessionCost > 0 ? (
+          <span>{formatCost(state.sessionCost)}</span>
         ) : null}
         <span className="flex-1" />
         {showStop ? (

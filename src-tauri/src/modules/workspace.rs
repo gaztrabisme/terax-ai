@@ -4,6 +4,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 // Short TTL keeps the auth-check TOCTOU window tight while still coalescing the
 // burst of canonicalize calls within a single panel refresh (~100ms).
@@ -121,8 +122,44 @@ pub fn bootstrap_registry(registry: &WorkspaceRegistry) {
     }
 }
 
+/// True for filesystem and drive roots ("/", "C:\\") and for $HOME: the asset
+/// protocol must never gain a wholesale grant over them, even though the
+/// workspace registry itself authorizes them as bootstrap defaults.
+fn never_grant_wholesale(path: &Path) -> bool {
+    if path.file_name().is_none() {
+        return true;
+    }
+    if let Some(home) = dirs::home_dir() {
+        if path == home {
+            return true;
+        }
+    }
+    false
+}
+
+/// Extends the webview's asset protocol scope with one directory, recursively,
+/// so `convertFileSrc` URLs can render bitmaps from it. Roots and $HOME are
+/// refused; everything else the app workspace-authorizes becomes renderable.
+pub fn grant_asset_scope(app: &tauri::AppHandle, path: &Path) -> bool {
+    if never_grant_wholesale(path) {
+        log::debug!("asset scope refused (root or home): {}", path.display());
+        return false;
+    }
+    match app.asset_protocol_scope().allow_directory(path, true) {
+        Ok(()) => {
+            log::debug!("asset scope granted: {}", path.display());
+            true
+        }
+        Err(e) => {
+            log::debug!("asset scope grant failed for {}: {e}", path.display());
+            false
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn workspace_authorize(
+    app: tauri::AppHandle,
     path: String,
     workspace: Option<WorkspaceEnv>,
     registry: tauri::State<'_, WorkspaceRegistry>,
@@ -130,15 +167,18 @@ pub async fn workspace_authorize(
     let workspace = WorkspaceEnv::from_option(workspace);
     let resolved = resolve_path(&path, &workspace);
     let canonical = registry.authorize(&resolved).map_err(|e| e.to_string())?;
+    grant_asset_scope(&app, &canonical);
     Ok(crate::modules::fs::to_canon(&canonical))
 }
 
 #[tauri::command]
 pub async fn workspace_current_dir(
+    app: tauri::AppHandle,
     registry: tauri::State<'_, WorkspaceRegistry>,
 ) -> Result<String, String> {
     let launch = resolve_launch_dir();
     let canonical = registry.authorize(&launch).map_err(|e| e.to_string())?;
+    grant_asset_scope(&app, &canonical);
     Ok(crate::modules::fs::to_canon(&canonical))
 }
 
@@ -771,5 +811,18 @@ mod auth_tests {
         let env = tempdir("envfb");
         let resolved = resolve_launch_cwd(Some("/no/such/terax/dir"), Some(env.clone()));
         assert_eq!(resolved, Some(env));
+    }
+
+    #[test]
+    fn never_grant_wholesale_refuses_home_and_roots() {
+        assert!(never_grant_wholesale(Path::new("/")));
+        // $HOME itself stays out of the asset scope even though the registry
+        // authorizes it as a bootstrap default.
+        if let Some(home) = dirs::home_dir() {
+            assert!(never_grant_wholesale(&home));
+        }
+        // Any named directory under a real root is grantable.
+        let dir = tempdir("grant");
+        assert!(!never_grant_wholesale(&dir));
     }
 }

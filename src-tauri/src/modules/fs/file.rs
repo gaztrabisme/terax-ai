@@ -2,6 +2,7 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 use std::{fs, io::Write};
 
+use base64::Engine;
 use serde::Serialize;
 use tauri::Emitter;
 use tempfile::NamedTempFile;
@@ -10,6 +11,9 @@ use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 
 const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+/// Cap for the bytes bridge: attachments ride the composer's own 4 MB budget,
+/// so 8 MB covers every image pi would accept while blocking huge reads.
+const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]

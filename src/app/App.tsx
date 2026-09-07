@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { homeDir } from "@tauri-apps/api/path";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { SearchAddon } from "@xterm/addon-search";
@@ -57,10 +57,17 @@ import {
   PiStack,
   RunGraphTabStack,
 } from "@/modules/pi";
+import {
+  PI_OPEN_CWDS_EVENT,
+  PI_OPEN_CWDS_QUERY_EVENT,
+} from "@/modules/pi/lib/providers";
 import { pickPiSessionFolder } from "@/modules/pi/lib/newSession";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { setThemeId as persistThemeId } from "@/modules/settings/store";
+import {
+  setPiLauncherDir,
+  setThemeId as persistThemeId,
+} from "@/modules/settings/store";
 import {
   type ShortcutHandlers,
   type ShortcutId,
@@ -384,6 +391,82 @@ export default function App() {
       alive = false;
     };
   }, [newPiTab]);
+
+  // The launcher passes --launcher-dir <checkout> next to --pi. An empty
+  // launcherDir pref adopts the passed path (one log line); a stored value
+  // wins, so a different passed path is logged and ignored.
+  useEffect(() => {
+    let alive = true;
+    void invoke<string | null>("get_launch_launcher_dir")
+      .then(async (dir) => {
+        if (!alive || !dir) return;
+        const prefs = usePreferencesStore.getState();
+        if (!prefs.hydrated) await prefs.init();
+        if (!alive) return;
+        const current = usePreferencesStore.getState().piLauncherDir;
+        if (!current.trim()) {
+          await setPiLauncherDir(dir);
+          console.log(`pi launcher dir set from --launcher-dir: ${dir}`);
+        } else if (current !== dir) {
+          console.log(
+            `pi launcher dir pref ${current} overrides --launcher-dir ${dir}`,
+          );
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Mirror the open pi tabs' cwds (most recently active first) to the other
+  // windows: the settings check panel reports the effective roles for the
+  // project the active tab runs in. Tab state lives in this window only, so
+  // a fresh settings window pulls the current list with the query event.
+  const piCwdsOrderRef = useRef<string[]>([]);
+  const piCwdsEmittedRef = useRef<string[]>([]);
+  useEffect(() => {
+    const active = tabs.find((t) => t.id === activeId);
+    if (active?.kind === "pi" && active.cwd) {
+      const rest = piCwdsOrderRef.current.filter((c) => c !== active.cwd);
+      piCwdsOrderRef.current = [active.cwd, ...rest];
+    }
+    const open = tabs.flatMap((t) =>
+      t.kind === "pi" && t.cwd ? [t.cwd] : [],
+    );
+    const openSet = new Set(open);
+    const ordered = [
+      ...piCwdsOrderRef.current.filter((c) => openSet.has(c)),
+      ...open.filter((c) => !piCwdsOrderRef.current.includes(c)),
+    ];
+    piCwdsOrderRef.current = ordered;
+    const emitted = piCwdsEmittedRef.current;
+    const changed =
+      emitted.length !== ordered.length ||
+      emitted.some((c, i) => c !== ordered[i]);
+    if (changed) {
+      piCwdsEmittedRef.current = ordered;
+      void emit(PI_OPEN_CWDS_EVENT, { cwds: ordered }).catch(() => {});
+    }
+  }, [tabs, activeId]);
+
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void listen(PI_OPEN_CWDS_QUERY_EVENT, () => {
+      if (!alive) return;
+      void emit(PI_OPEN_CWDS_EVENT, {
+        cwds: piCwdsOrderRef.current,
+      }).catch(() => {});
+    }).then((un) => {
+      if (!alive) un();
+      else unlisten = un;
+    });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, []);
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [newEditorOpen, setNewEditorOpen] = useState(false);
