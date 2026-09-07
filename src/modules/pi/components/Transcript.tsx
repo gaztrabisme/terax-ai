@@ -8,6 +8,7 @@ import {
   CheckmarkCircle01Icon,
   CircuitBoardIcon,
   CopyIcon,
+  FileCodeIcon,
   FileEditIcon,
   Refresh01Icon,
 } from "@hugeicons/core-free-icons";
@@ -42,6 +43,7 @@ import {
   subagentName,
   type Turn,
 } from "@/modules/pi/lib/turns";
+import { detectArtifacts, type Artifact } from "@/modules/pi/lib/artifacts";
 import { KeystoneCard } from "./blocks/KeystoneCard";
 import { ToolStep } from "./blocks/ToolRow";
 
@@ -58,6 +60,15 @@ type Props = {
    *  Local state from the composer: the session file may not echo the bytes. */
   turnImages?: Record<string, PiImageAttachment[]>;
 };
+
+/** Event the artifact pane listens for: select this turn's artifact and
+ *  expand the pane if it is collapsed. */
+export function openArtifactEvent(
+  turn: number,
+  n: number,
+): CustomEvent<{ turn: number; n: number }> {
+  return new CustomEvent("pi:open-artifact", { detail: { turn, n } });
+}
 
 /** Markdown stripped down to the text a reader sees, for plain Copy. */
 export function renderedText(markdown: string): string {
@@ -399,10 +410,13 @@ function AnswerActions({
   cwd,
   turn,
   markdown,
+  artifacts,
 }: {
   cwd?: string;
   turn: Turn;
   markdown: string;
+  /** Artifacts detected over this answer; one chip each. */
+  artifacts: Artifact[];
 }) {
   const [copied, setCopied] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
@@ -467,6 +481,18 @@ function AnswerActions({
           Open in editor
         </button>
       ) : null}
+      {artifacts.map((artifact, i) => (
+        <button
+          key={`${artifact.kind}-${i}`}
+          type="button"
+          title={artifact.title}
+          onClick={() => window.dispatchEvent(openArtifactEvent(turn.index, i))}
+          className={btn}
+        >
+          <HugeiconsIcon icon={FileCodeIcon} size={12} strokeWidth={1.75} />
+          {artifacts.length > 1 ? `Open artifact ${i + 1}` : "Open artifact"}
+        </button>
+      ))}
       {saved ? (
         <span className="text-xs text-muted-foreground">saved {saved}</span>
       ) : null}
@@ -496,6 +522,12 @@ function TurnView({
   onAnswer: (requestId: string, answers: PiAskAnswer[]) => void;
   onDismiss: (requestId: string) => void;
 }) {
+  // Artifacts only once the answer is final: a streaming document would
+  // redraw the pane on every chunk.
+  const artifacts = useMemo(
+    () => (turn.status === "done" ? detectArtifacts(turn.answer) : []),
+    [turn.status, turn.answer],
+  );
   return (
     <div className="flex flex-col gap-2">
       {turn.user ? (
@@ -545,7 +577,12 @@ function TurnView({
           </MessageResponse>
           {turn.status === "done" ? (
             <div className="mt-1.5">
-              <AnswerActions cwd={cwd} turn={turn} markdown={turn.answer} />
+              <AnswerActions
+                cwd={cwd}
+                turn={turn}
+                markdown={turn.answer}
+                artifacts={artifacts}
+              />
             </div>
           ) : null}
         </div>

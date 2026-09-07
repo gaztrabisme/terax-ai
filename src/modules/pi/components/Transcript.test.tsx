@@ -12,6 +12,7 @@ import {
 import { groupTurns } from "../lib/turns";
 import {
   formatCost,
+  openArtifactEvent,
   Transcript,
   usageByTurn,
   usageLabel,
@@ -132,5 +133,71 @@ describe("formatCost", () => {
     expect(formatCost(0.0099)).toBe("$0.0099");
     expect(formatCost(0.92)).toBe("$0.92");
     expect(formatCost(0)).toBe("$0.0000");
+  });
+});
+
+describe("artifact chip", () => {
+  const base = {
+    kind: "message",
+    model: null,
+    usage: null,
+    streaming: false,
+    at: 1000,
+  } as const;
+
+  const blocksWithHtml: PiFeedItem[] = [
+    {
+      ...base,
+      id: "u0",
+      role: "user",
+      parts: [{ type: "text", text: "draw a page" }],
+    },
+    {
+      ...base,
+      id: "a0",
+      role: "assistant",
+      parts: [
+        {
+          type: "text",
+          text: "Here you go.\n\n```html\n<html><head><title>P</title></head><body></body></html>\n```",
+        },
+      ],
+    },
+  ];
+
+  it("offers Open artifact on answers that carry one and stays quiet otherwise", () => {
+    const withHtml = renderToStaticMarkup(
+      <Transcript
+        blocks={blocksWithHtml}
+        onAnswer={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    expect(withHtml).toContain("Open artifact");
+
+    const plain: PiFeedItem[] = [
+      {
+        ...base,
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "just talk" }],
+      },
+      {
+        ...base,
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "```js\nx();\n``` no page here" }],
+      },
+    ];
+    const withoutHtml = renderToStaticMarkup(
+      <Transcript blocks={plain} onAnswer={() => {}} onDismiss={() => {}} />,
+    );
+    expect(withoutHtml).not.toContain("Open artifact");
+  });
+
+  it("builds the pane event with the turn and artifact index", () => {
+    const event = openArtifactEvent(3, 1);
+    expect(event.type).toBe("pi:open-artifact");
+    expect(event.detail).toEqual({ turn: 3, n: 1 });
   });
 });

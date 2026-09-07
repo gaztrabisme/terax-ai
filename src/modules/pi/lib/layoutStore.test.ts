@@ -37,9 +37,11 @@ describe("layoutStore", () => {
     expect(DEFAULT_PI_LAYOUT).toEqual({
       rail: 30,
       railCollapsed: false,
-      graph: 55,
+      graph: 40,
       boardCollapsed: false,
       graphCollapsed: false,
+      artifact: 25,
+      artifactCollapsed: false,
     });
   });
 
@@ -51,9 +53,11 @@ describe("layoutStore", () => {
     expect(roundTripped["/a/project"]).toEqual({
       rail: 42,
       railCollapsed: false,
-      graph: 55,
+      graph: 40,
       boardCollapsed: false,
       graphCollapsed: false,
+      artifact: 25,
+      artifactCollapsed: false,
     });
     expect(usePiLayoutStore.getState().layouts["/a/project"]).toEqual(
       roundTripped["/a/project"],
@@ -90,5 +94,20 @@ describe("layoutStore", () => {
     );
     expect(layouts["/ok"]).toEqual(DEFAULT_PI_LAYOUT);
     expect(layouts["/bad"]).toBeUndefined();
+  });
+
+  it("fills the artifact pane fields for layouts stored before it existed", () => {
+    const layouts = parseLayouts(
+      JSON.stringify({ "/legacy": { rail: 44, graph: 60 } }),
+    );
+    expect(layouts["/legacy"]).toEqual({
+      rail: 44,
+      railCollapsed: false,
+      graph: 60,
+      boardCollapsed: false,
+      graphCollapsed: false,
+      artifact: 25,
+      artifactCollapsed: false,
+    });
   });
 });

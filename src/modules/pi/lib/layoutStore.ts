@@ -8,18 +8,26 @@ export type PiLayout = {
   /** Rail width as a percentage of the horizontal [chat | rail] group. */
   rail: number;
   railCollapsed: boolean;
-  /** Run-graph height as a percentage of the vertical [graph | board] group. */
+  /**
+   * Run-graph height as a percentage of the vertical
+   * [graph | board | artifact] group; the board takes the remainder.
+   */
   graph: number;
   boardCollapsed: boolean;
   graphCollapsed: boolean;
+  /** Artifact pane height as a percentage of the same vertical group. */
+  artifact: number;
+  artifactCollapsed: boolean;
 };
 
 export const DEFAULT_PI_LAYOUT: PiLayout = {
   rail: 30,
   railCollapsed: false,
-  graph: 55,
+  graph: 40,
   boardCollapsed: false,
   graphCollapsed: false,
+  artifact: 25,
+  artifactCollapsed: false,
 };
 
 type StorageLike = Pick<Storage, "getItem" | "setItem">;
@@ -73,6 +81,11 @@ export function parseLayouts(raw: string | null): Record<string, PiLayout> {
       graph: num(v.graph, DEFAULT_PI_LAYOUT.graph, 0, 100),
       boardCollapsed: bool(v.boardCollapsed, DEFAULT_PI_LAYOUT.boardCollapsed),
       graphCollapsed: bool(v.graphCollapsed, DEFAULT_PI_LAYOUT.graphCollapsed),
+      artifact: num(v.artifact, DEFAULT_PI_LAYOUT.artifact, 0, 100),
+      artifactCollapsed: bool(
+        v.artifactCollapsed,
+        DEFAULT_PI_LAYOUT.artifactCollapsed,
+      ),
     };
   }
   return out;

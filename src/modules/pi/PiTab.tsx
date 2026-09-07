@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PanelImperativeHandle, PanelSize } from "react-resizable-panels";
 import {
   ResizableHandle,
@@ -7,15 +7,19 @@ import {
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import type { PiTab as PiTabData, Tab } from "@/modules/tabs";
+import { ArtifactPane } from "./components/ArtifactPane";
 import { BoardView } from "./components/BoardPane";
 import { ChatPane } from "./components/ChatPane";
 import { RailPane } from "./components/RailPane";
 import { RunGraph } from "./components/RunGraph";
 import { useChildStore } from "./lib/childStore";
+import { detectArtifacts, type ArtifactDoc } from "./lib/artifacts";
 import { usePiLayout } from "./lib/layoutStore";
+import { messageBlocks } from "./lib/parse";
 import { usePiStore } from "./lib/piStore";
 import { watchTranscripts } from "./lib/rpc-client";
 import { PI_MODULE_PREFS_DEFAULTS } from "./lib/settingsSchema";
+import { groupTurns } from "./lib/turns";
 
 type StackProps = {
   tabs: Tab[];
@@ -86,6 +90,13 @@ export function PiTab({
   const railRef = useRef<PanelImperativeHandle | null>(null);
   const graphRef = useRef<PanelImperativeHandle | null>(null);
   const boardRef = useRef<PanelImperativeHandle | null>(null);
+  const artifactRef = useRef<PanelImperativeHandle | null>(null);
+
+  // Which artifact the pane shows; null means "the latest one".
+  const [artifactSel, setArtifactSel] = useState<{
+    turn: number;
+    n: number;
+  } | null>(null);
 
   const handleRailResize = (
     size: PanelSize,
@@ -124,6 +135,20 @@ export function PiTab({
     update({ boardCollapsed: size.inPixels <= 0 });
   };
 
+  const handleArtifactResize = (
+    size: PanelSize,
+    _id: string | number | undefined,
+    prev: PanelSize | undefined,
+  ) => {
+    if (prev === undefined) return;
+    if (size.inPixels <= 0) update({ artifactCollapsed: true });
+    else
+      update({
+        artifact: Math.round(size.asPercentage * 10) / 10,
+        artifactCollapsed: false,
+      });
+  };
+
   const toggleGraph = () => {
     const panel = graphRef.current;
     if (!panel) return;
@@ -133,6 +158,13 @@ export function PiTab({
 
   const toggleBoard = () => {
     const panel = boardRef.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) panel.expand();
+    else panel.collapse();
+  };
+
+  const toggleArtifact = () => {
+    const panel = artifactRef.current;
     if (!panel) return;
     if (panel.isCollapsed()) panel.expand();
     else panel.collapse();
@@ -166,6 +198,55 @@ export function PiTab({
   }, [cwd]);
 
   const blocks = entry?.state.blocks ?? [];
+
+  // Artifact documents over the finished answers, in session order; the
+  // pane shows the latest by default, the transcript's chip picks an older
+  // one. Streaming answers wait until the turn is done.
+  const artifacts: ArtifactDoc[] = useMemo(() => {
+    const docs: ArtifactDoc[] = [];
+    for (const turn of groupTurns(messageBlocks(blocks))) {
+      if (turn.status !== "done") continue;
+      detectArtifacts(turn.answer).forEach((item, n) => {
+        docs.push({
+          kind: item.kind,
+          title: item.title,
+          source: item.source,
+          turn: turn.index,
+          n,
+        });
+      });
+    }
+    return docs;
+  }, [blocks]);
+
+  const selectedArtifact = useMemo(() => {
+    if (artifactSel) {
+      const hit = artifacts.find(
+        (doc) => doc.turn === artifactSel.turn && doc.n === artifactSel.n,
+      );
+      if (hit) return hit;
+    }
+    return artifacts[artifacts.length - 1] ?? null;
+  }, [artifacts, artifactSel]);
+
+  // The transcript's "Open artifact" chip selects in the pane and expands it
+  // (DOM CustomEvent in the same window, the same bridge as pi:open-file).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ turn?: unknown; n?: unknown }>).detail;
+      if (
+        !detail ||
+        typeof detail.turn !== "number" ||
+        typeof detail.n !== "number"
+      ) {
+        return;
+      }
+      setArtifactSel({ turn: detail.turn, n: detail.n });
+      if (artifactRef.current?.isCollapsed()) artifactRef.current.expand();
+    };
+    window.addEventListener("pi:open-artifact", handler);
+    return () => window.removeEventListener("pi:open-artifact", handler);
+  }, []);
 
   // Any board_ tool execution may have mutated the board: refresh the pane.
   useEffect(() => {
@@ -227,7 +308,11 @@ export function PiTab({
           <ResizablePanel
             id={`pi-board-${tabId}`}
             panelRef={boardRef}
-            defaultSize={layout.boardCollapsed ? 0 : `${100 - layout.graph}%`}
+            defaultSize={
+              layout.boardCollapsed
+                ? 0
+                : `${Math.max(0, 100 - layout.graph - layout.artifact)}%`
+            }
             minSize="48px"
             collapsible
             onResize={handleBoardResize}
@@ -239,6 +324,23 @@ export function PiTab({
               onExpand={onOpenBoard && cwd ? () => onOpenBoard(cwd) : undefined}
             >
               <BoardView cwd={cwd} refreshKey={boardTick} mode="rail" />
+            </RailPane>
+          </ResizablePanel>
+          <ResizableHandle withHandle className="bg-transparent" />
+          <ResizablePanel
+            id={`pi-artifact-${tabId}`}
+            panelRef={artifactRef}
+            defaultSize={layout.artifactCollapsed ? 0 : `${layout.artifact}%`}
+            minSize="48px"
+            collapsible
+            onResize={handleArtifactResize}
+          >
+            <RailPane
+              title="Artifact"
+              collapsed={layout.artifactCollapsed}
+              onToggleCollapse={toggleArtifact}
+            >
+              <ArtifactPane doc={selectedArtifact} cwd={cwd} />
             </RailPane>
           </ResizablePanel>
         </ResizablePanelGroup>
