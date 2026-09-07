@@ -5,6 +5,7 @@ import {
   type PiImageAttachment,
   type PiFeedItem,
 } from "../lib/parse";
+import { modelAcceptsImages } from "../lib/providers";
 import { usePiStore } from "../lib/piStore";
 import { Composer } from "./Composer";
 import { formatCost, Transcript } from "./Transcript";
@@ -130,6 +131,26 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
   const roles = entry?.roles;
   const chipModel = roles?.model || model;
 
+  // Vision flag for the effective provider/model, read from the cached
+  // model table (fetched once per provider through pi_list_models, which
+  // runs pi with the stored cloud keys only). Undefined keeps the composer
+  // notice on its conservative text when the table has no row for the pair.
+  const modelRows = usePiStore((s) => s.modelRows);
+  const ensureModelRows = usePiStore((s) => s.ensureModelRows);
+  useEffect(() => {
+    const provider = roles?.provider?.trim();
+    if (provider) void ensureModelRows(provider, cwd);
+  }, [roles?.provider, cwd, ensureModelRows]);
+  const tabModelAcceptsImages = useMemo(
+    () =>
+      modelAcceptsImages(
+        roles?.provider ? modelRows[roles.provider] : undefined,
+        roles?.provider,
+        chipModel,
+      ),
+    [modelRows, roles?.provider, chipModel],
+  );
+
   const submit = (markdown: string, images: PiImageAttachment[]) => {
     if (!entry?.session || entry.exited) return;
     setSendError(null);
@@ -233,6 +254,7 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
               ? "Session exited"
               : "Waiting for pi..."
         }
+        modelAcceptsImages={tabModelAcceptsImages}
         onSubmit={submit}
       />
     </div>

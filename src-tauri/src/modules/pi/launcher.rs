@@ -1,12 +1,17 @@
-//! Local steps of the bash launcher (bin/efficient-pi steps 5 and 8, plus
-//! bin/wiki-init and bin/pi-render-models) as pure functions, so a pi session
-//! can be prepared on macOS, Linux and Windows without bash. Health probes of
-//! bppc and oMLX stay out of this unit; the caller composes them separately.
+//! Session preparation by delegation: the four local launcher steps (seed the
+//! agent dir, render models.json, the project-root guard, wiki init) run in
+//! the harness agent binary (`agent pi prepare`, crates/agent/src/pi.rs) - one
+//! implementation serving every caller, the bash launcher and this module
+//! alike. The binary is resolved by the app through pi_paths (a pref or the
+//! bundled sidecar); this module builds the command line, maps the agent's
+//! JSON report onto PrepareReport so launcher.log and the frontend keep their
+//! shape, and keeps the oMLX key default the spawn paths share. Health probes
+//! of bppc and oMLX stay out of this unit; the caller composes them
+//! separately.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,271 +21,10 @@ pub fn user_agent_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("pi-home").join("agent")
 }
 
-/// Entries the app owns in the agent dir; everything else (auth.json,
-/// models.json, mcp.json, sessions/, logs/, wiki/, agent-hub/,
-/// tool-output-artifacts/) belongs to the user or the runtime and is never
-/// written by the seed.
-const MANAGED_FILES: &[&str] = &[
-    "AGENTS.md",
-    "settings.json",
-    "settings.README.md",
-    "models.json.tmpl",
-];
-const MANAGED_DIRS: &[&str] = &["agents", "extensions", "prompts", "skills"];
-const SEED_STAMP_FILE: &str = ".terax-seed";
-
-#[derive(Debug, Default, Clone)]
-pub struct SeedReport {
-    /// Managed entries that did not exist in dest and were copied.
-    pub created: Vec<String>,
-    /// Managed entries that existed but differed and were re-copied.
-    pub updated: Vec<String>,
-    /// Managed entries already identical to the template, left untouched.
-    pub kept: Vec<String>,
-}
-
-impl SeedReport {
-    fn is_empty(&self) -> bool {
-        self.created.is_empty() && self.updated.is_empty() && self.kept.is_empty()
-    }
-}
-
-/// FNV-1a 64-bit: tiny, dependency-free, stable across platforms; good enough
-/// to detect template drift between app versions.
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-fn fnv1a(hash: &mut u64, bytes: &[u8]) {
-    for &b in bytes {
-        *hash ^= u64::from(b);
-        *hash = hash.wrapping_mul(FNV_PRIME);
-    }
-}
-
-/// Stamp stored in dest/.terax-seed: the app version plus a content hash of
-/// the managed template entries, so an app update with new templates re-seeds
-/// while identical templates keep the user agent dir untouched.
-pub fn template_stamp(app_version: &str, template: &Path) -> String {
-    let mut hash = FNV_OFFSET;
-    for name in MANAGED_FILES {
-        hash_entry(&mut hash, template, Path::new(name));
-    }
-    for name in MANAGED_DIRS {
-        hash_entry(&mut hash, template, Path::new(name));
-    }
-    format!("{app_version}+{hash:016x}")
-}
-
-fn hash_entry(hash: &mut u64, template: &Path, rel: &Path) {
-    let full = template.join(rel);
-    if full.is_dir() {
-        let mut children: Vec<PathBuf> = match fs::read_dir(&full) {
-            Ok(entries) => entries.filter_map(Result::ok).map(|e| e.path()).collect(),
-            Err(_) => {
-                fnv1a(hash, b"<missing-dir>\0");
-                return;
-            }
-        };
-        children.sort();
-        for child in children {
-            let child_rel = rel.join(child.file_name().unwrap_or_default());
-            hash_entry(hash, template, &child_rel);
-        }
-    } else {
-        fnv1a(hash, rel.to_string_lossy().as_bytes());
-        fnv1a(hash, b"\0");
-        match fs::read(&full) {
-            Ok(bytes) => fnv1a(hash, &bytes),
-            Err(_) => fnv1a(hash, b"<missing>"),
-        }
-    }
-}
-
-/// First run copies the whole managed template; later runs re-copy only when
-/// the stamp differs, and then only the managed set. User files are never
-/// touched. The stamp is written last, so a crash mid-seed leaves the old
-/// stamp behind and the next run re-seeds.
-pub fn seed_agent_dir(template: &Path, dest: &Path, stamp: &str) -> io::Result<SeedReport> {
-    if fs::read_to_string(dest.join(SEED_STAMP_FILE)).is_ok_and(|s| s == stamp) {
-        return Ok(SeedReport::default());
-    }
-    if !template.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("agent dir template not found: {}", template.display()),
-        ));
-    }
-    fs::create_dir_all(dest)?;
-    let mut report = SeedReport::default();
-    for name in MANAGED_FILES {
-        seed_file(template, dest, name, &mut report)?;
-    }
-    for name in MANAGED_DIRS {
-        seed_dir(template, dest, name, &mut report)?;
-    }
-    fs::write(dest.join(SEED_STAMP_FILE), stamp)?;
-    Ok(report)
-}
-
-fn seed_file(template: &Path, dest: &Path, name: &str, report: &mut SeedReport) -> io::Result<()> {
-    let src = template.join(name);
-    if !src.is_file() {
-        return Ok(());
-    }
-    let dst = dest.join(name);
-    let content = fs::read(&src)?;
-    let existed = dst.exists();
-    if existed && fs::read(&dst).is_ok_and(|d| d == content) {
-        report.kept.push(name.to_string());
-        return Ok(());
-    }
-    copy_file(&src, &dst)?;
-    if existed {
-        report.updated.push(name.to_string());
-    } else {
-        report.created.push(name.to_string());
-    }
-    Ok(())
-}
-
-fn seed_dir(template: &Path, dest: &Path, name: &str, report: &mut SeedReport) -> io::Result<()> {
-    let src = template.join(name);
-    if !src.is_dir() {
-        return Ok(());
-    }
-    let mut files = Vec::new();
-    collect_files(&src, Path::new(""), &mut files)?;
-    files.sort();
-    let dst_root = dest.join(name);
-    if !dst_root.is_dir() {
-        fs::create_dir_all(&dst_root)?;
-        for rel in &files {
-            copy_file(&src.join(rel), &dst_root.join(rel))?;
-        }
-        report.created.push(format!("{name}/"));
-        return Ok(());
-    }
-    let mut stale = Vec::new();
-    for rel in &files {
-        let src_path = src.join(rel);
-        let dst_path = dst_root.join(rel);
-        match (fs::read(&src_path), fs::read(&dst_path)) {
-            (Ok(s), Ok(d)) if s == d => {}
-            (Ok(s), _) => stale.push((src_path, dst_path, s)),
-            (Err(e), _) => return Err(e),
-        }
-    }
-    if stale.is_empty() {
-        report.kept.push(format!("{name}/"));
-        return Ok(());
-    }
-    for (src_path, dst_path, _) in stale {
-        copy_file(&src_path, &dst_path)?;
-    }
-    report.updated.push(format!("{name}/"));
-    Ok(())
-}
-
-/// Copies while preserving the source permissions (skills carry scripts).
-fn copy_file(src: &Path, dst: &Path) -> io::Result<()> {
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(src, dst).map(|_| ())
-}
-
-fn collect_files(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
-    for entry in fs::read_dir(root.join(rel))? {
-        let entry = entry?;
-        let child = rel.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            collect_files(root, &child, out)?;
-        } else {
-            out.push(child);
-        }
-    }
-    Ok(())
-}
-
-/// Placeholders from bin/pi-render-models: the bppc LAN host varies by
-/// network and the oMLX key is secret.
-const BPPC_HOST_PLACEHOLDER: &str = "__BPPC_HOST__";
-const OMLX_KEY_PLACEHOLDER: &str = "__OMLX_KEY__";
-/// Blank host: the local machine, so a fresh install never points at another box.
-const BPPC_HOST_LAN: &str = "127.0.0.1";
-
-/// Same substitution as bin/pi-render-models: replaces every placeholder with
-/// the given values, byte for byte (no sed escaping involved).
-pub fn render_models_json(tmpl: &str, bppc_host: &str, omlx_key: &str) -> String {
-    tmpl.replace(BPPC_HOST_PLACEHOLDER, bppc_host)
-        .replace(OMLX_KEY_PLACEHOLDER, omlx_key)
-}
-
-/// Writes <agent_dir>/models.json only when the rendered content differs from
-/// what is on disk; returns whether it wrote.
-pub fn write_models_json(agent_dir: &Path, content: &str) -> io::Result<bool> {
-    let path = agent_dir.join("models.json");
-    if fs::read(&path).is_ok_and(|d| d.as_slice() == content.as_bytes()) {
-        return Ok(false);
-    }
-    fs::create_dir_all(agent_dir)?;
-    fs::write(&path, content)?;
-    Ok(true)
-}
-
-/// Wiki skeleton files written by bin/wiki-init. Byte-equal to the script's
-/// heredocs (the em-dashes are its output, spelled as escapes here).
-const WIKI_INDEX: &str = "# Wiki Index
-- [active-work.md](active-work.md) \u{2014} current workstreams, status, next steps
-- [decisions.md](decisions.md) \u{2014} choices made, rejected options, why
-- [log.md](log.md) \u{2014} dated session journal (grep it, never read wholesale)
-";
-const WIKI_ACTIVE_WORK: &str = "# Active Work\n\n(no open workstreams)\n";
-const WIKI_DECISIONS: &str = "# Decisions\n";
-const WIKI_LOG: &str = "# Wiki Log\n";
-
-const WIKI_FILES: &[(&str, &str)] = &[
-    ("index.md", WIKI_INDEX),
-    ("active-work.md", WIKI_ACTIVE_WORK),
-    ("decisions.md", WIKI_DECISIONS),
-    ("log.md", WIKI_LOG),
-];
-
-/// Port of bin/wiki-init: creates wiki/index.md, active-work.md, decisions.md
-/// and log.md under the project root, each only when missing, and returns the
-/// files it created.
-pub fn wiki_init(project_root: &Path) -> io::Result<Vec<PathBuf>> {
-    let wiki = project_root.join("wiki");
-    fs::create_dir_all(&wiki)?;
-    let mut created = Vec::new();
-    for (name, body) in WIKI_FILES {
-        let path = wiki.join(name);
-        if path.exists() {
-            continue;
-        }
-        fs::write(&path, body)?;
-        created.push(path);
-    }
-    Ok(created)
-}
-
-/// Step-8 project-root guard from bin/efficient-pi: the cwd must look like a
-/// project (.git of any kind, CLAUDE.md, AGENTS.md, or wiki/). The Err text
-/// mirrors the launcher's refusal message.
-pub fn project_root_check(cwd: &Path) -> Result<(), String> {
-    let is_root = cwd.join(".git").exists()
-        || cwd.join("CLAUDE.md").is_file()
-        || cwd.join("AGENTS.md").is_file()
-        || cwd.join("wiki").is_dir();
-    if is_root {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} has no .git, CLAUDE.md, AGENTS.md, or wiki/; run from inside a project directory or allow any dir",
-            cwd.display()
-        ))
-    }
-}
+/// Env var the agent reads the oMLX key from (`--omlx-key-env`). Set on the
+/// prepare child process only: the key never lands in the spawn env, the
+/// report or launcher.log.
+const OMLX_KEY_ENV: &str = "OMLX_API_KEY";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -334,159 +78,181 @@ pub struct PrepareReport {
     pub env: BTreeMap<String, String>,
 }
 
-/// Composes seed, render, root guard and wiki init in launcher step order.
-/// Every step reports its own outcome; a failed step never aborts the rest,
-/// so the frontend sees the full picture in one round-trip.
-pub fn prepare_session(input: PrepareInput) -> PrepareReport {
+/// One step of the agent's `--json` report. Status is the agent's vocabulary:
+/// OK, FAIL or SKIPPED; the last counts as ok for the spawn decision, exactly
+/// like the local steps before it.
+#[derive(Debug, Deserialize)]
+struct AgentStep {
+    name: String,
+    status: String,
+    detail: String,
+}
+
+/// The JSON object `agent pi prepare --json` prints on stdout. modelsJson is
+/// accepted and ignored: the report names the path, never the rendered body
+/// (the key stays in the file, as before).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentReport {
+    #[serde(default)]
+    steps: Vec<AgentStep>,
+    #[serde(default)]
+    agent_dir: String,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+/// Prepares a pi session by running the resolved harness agent
+/// (`agent pi prepare`) and mapping its JSON report onto PrepareReport, so
+/// launcher.log and the frontend keep their shape. A missing agent, a spawn
+/// failure or an unreadable report yields one FAIL step named "prepare",
+/// never a panic; every other step outcome comes from the agent verbatim.
+pub fn prepare_session(input: PrepareInput, agent_bin: Option<&Path>) -> PrepareReport {
     let agent_dir = user_agent_dir(&input.app_data_dir);
-    let mut steps = Vec::new();
-
-    let stamp = template_stamp(&input.app_version, &input.template_dir);
-    steps.push(match seed_agent_dir(&input.template_dir, &agent_dir, &stamp) {
-        Ok(report) if report.is_empty() => PrepareStep {
-            name: "seed".to_string(),
-            ok: true,
-            detail: format!("agent dir ready at {}", agent_dir.display()),
-        },
-        Ok(report) => PrepareStep {
-            name: "seed".to_string(),
-            ok: true,
-            detail: format!(
-                "seeded {}: {} created, {} updated, {} kept",
-                agent_dir.display(),
-                report.created.len(),
-                report.updated.len(),
-                report.kept.len()
-            ),
-        },
-        Err(e) => PrepareStep {
-            name: "seed".to_string(),
+    let fail = |detail: String| PrepareReport {
+        steps: vec![PrepareStep {
+            name: "prepare".to_string(),
             ok: false,
-            detail: e.to_string(),
-        },
-    });
+            detail,
+        }],
+        agent_dir: agent_dir.clone(),
+        env: report_env(&agent_dir, &input.roles),
+    };
+    let Some(agent_bin) = agent_bin else {
+        return fail(
+            "no harness agent binary resolved; install it (bin/pi-fetch style) or set the Agent bin path in Settings > Pi"
+                .to_string(),
+        );
+    };
+    match run_agent_prepare(&input, &agent_dir, agent_bin) {
+        Ok(report) => report,
+        Err(detail) => fail(detail),
+    }
+}
 
-    steps.push(render_step(&agent_dir, &input.endpoints));
-
-    steps.push(if input.allow_any_dir {
-        PrepareStep {
-            name: "root".to_string(),
-            ok: true,
-            detail: format!("project root: {} (any dir allowed)", input.cwd.display()),
-        }
+/// Builds and runs the command line: `agent pi prepare --template T
+/// --agent-dir A --cwd C [--version V] [--bppc-host H] [--allow-any-dir]
+/// --omlx-key-env OMLX_API_KEY --json`, the oMLX key carried on the child's
+/// env only. `--version` (not `--stamp`) reproduces the seed stamp the
+/// previous local implementation wrote, `<app version>+<template hash>`, so
+/// already-seeded agent dirs are not re-seeded. Blank host or version values
+/// are omitted: the agent treats them as unset (LAN default host, bare hash)
+/// and its usage parser rejects empty values.
+fn run_agent_prepare(
+    input: &PrepareInput,
+    agent_dir: &Path,
+    agent_bin: &Path,
+) -> Result<PrepareReport, String> {
+    let mut cmd = Command::new(agent_bin);
+    cmd.args(["pi", "prepare"]);
+    cmd.arg("--template").arg(&input.template_dir);
+    cmd.arg("--agent-dir").arg(agent_dir);
+    cmd.arg("--cwd").arg(&input.cwd);
+    if !input.app_version.trim().is_empty() {
+        cmd.arg("--version").arg(&input.app_version);
+    }
+    if !input.endpoints.bppc_host.trim().is_empty() {
+        cmd.arg("--bppc-host").arg(&input.endpoints.bppc_host);
+    }
+    cmd.arg("--omlx-key-env").arg(OMLX_KEY_ENV);
+    if input.allow_any_dir {
+        cmd.arg("--allow-any-dir");
+    }
+    cmd.arg("--json");
+    if input.endpoints.omlx_key.trim().is_empty() {
+        // A blank key must stay blank: drop any inherited value so the agent
+        // reports the gap instead of rendering with a shell's key.
+        cmd.env_remove(OMLX_KEY_ENV);
     } else {
-        match project_root_check(&input.cwd) {
-            Ok(()) => PrepareStep {
-                name: "root".to_string(),
-                ok: true,
-                detail: format!("project root: {}", input.cwd.display()),
-            },
-            Err(msg) => PrepareStep {
-                name: "root".to_string(),
-                ok: false,
-                detail: msg,
-            },
-        }
-    });
+        cmd.env(OMLX_KEY_ENV, &input.endpoints.omlx_key);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("cannot run harness agent {}: {e}", agent_bin.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exit = output
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    let parsed: AgentReport = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("harness agent report unreadable (exit {exit}): {e}; stderr: {}", stderr_tail(&stderr)))?;
+    let AgentReport {
+        steps,
+        agent_dir: reported_dir,
+        env: agent_env,
+    } = parsed;
+    if steps.is_empty() {
+        return Err(format!(
+            "harness agent report carried no steps (exit {exit}); stderr: {}",
+            stderr_tail(&stderr)
+        ));
+    }
+    let agent_dir = if reported_dir.is_empty() {
+        agent_dir.to_path_buf()
+    } else {
+        PathBuf::from(reported_dir)
+    };
+    let mut env = report_env(&agent_dir, &input.roles);
+    for (key, value) in agent_env {
+        env.insert(key, value);
+    }
+    Ok(PrepareReport {
+        steps: steps
+            .into_iter()
+            .map(|s| PrepareStep {
+                ok: matches!(s.status.as_str(), "OK" | "SKIPPED"),
+                name: s.name,
+                detail: s.detail,
+            })
+            .collect(),
+        agent_dir,
+        env,
+    })
+}
 
-    steps.push(match wiki_init(&input.cwd) {
-        Ok(created) if created.is_empty() => PrepareStep {
-            name: "wiki".to_string(),
-            ok: true,
-            detail: "wiki files present".to_string(),
-        },
-        Ok(created) => {
-            let names = created
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            PrepareStep {
-                name: "wiki".to_string(),
-                ok: true,
-                detail: format!("created {names}"),
-            }
-        }
-        Err(e) => PrepareStep {
-            name: "wiki".to_string(),
-            ok: false,
-            detail: e.to_string(),
-        },
-    });
-
+/// The report env every spawn path consumes: PI_CODING_AGENT_DIR plus the
+/// four EFFICIENT_PI_* role values. The agent owns the first (its env echoes
+/// it back); roles stay a caller concern.
+fn report_env(agent_dir: &Path, roles: &PrepareRoles) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert(
         "PI_CODING_AGENT_DIR".to_string(),
         agent_dir.to_string_lossy().into_owned(),
     );
-    env.insert("EFFICIENT_PI_PROVIDER".to_string(), input.roles.provider);
-    env.insert("EFFICIENT_PI_MODEL".to_string(), input.roles.model);
-    env.insert("EFFICIENT_PI_THINKING".to_string(), input.roles.thinking);
-    env.insert("EFFICIENT_PI_SMOL".to_string(), input.roles.smol);
-
-    PrepareReport {
-        steps,
-        agent_dir,
-        env,
-    }
+    env.insert("EFFICIENT_PI_PROVIDER".to_string(), roles.provider.clone());
+    env.insert("EFFICIENT_PI_MODEL".to_string(), roles.model.clone());
+    env.insert("EFFICIENT_PI_THINKING".to_string(), roles.thinking.clone());
+    env.insert("EFFICIENT_PI_SMOL".to_string(), roles.smol.clone());
+    env
 }
 
-/// Step 5: render pi-home/agent/models.json from the seeded template. A blank
-/// oMLX key fails like bin/pi-render-models; a blank bppc host falls back to
-/// the script's LAN default.
-fn render_step(agent_dir: &Path, endpoints: &PrepareEndpoints) -> PrepareStep {
-    let name = "render".to_string();
-    let tmpl_path = agent_dir.join("models.json.tmpl");
-    let tmpl = match fs::read_to_string(&tmpl_path) {
-        Ok(t) => t,
-        Err(e) => {
-            return PrepareStep {
-                name,
-                ok: false,
-                detail: format!("cannot read {}: {e}", tmpl_path.display()),
-            };
-        }
-    };
-    if endpoints.omlx_key.trim().is_empty() {
-        return PrepareStep {
-            name,
-            ok: false,
-            detail: "OMLX_KEY not set; cannot render models.json".to_string(),
-        };
-    }
-    let host = if endpoints.bppc_host.trim().is_empty() {
-        BPPC_HOST_LAN
+/// Last non-empty stderr line, bounded, for failure details: the agent prints
+/// its `[k/4]` progress there, and a refusal or usage error explains itself.
+fn stderr_tail(stderr: &str) -> String {
+    const MAX: usize = 200;
+    let line = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    if line.chars().count() > MAX {
+        let cut: String = line.chars().take(MAX).collect();
+        format!("{cut}...")
     } else {
-        endpoints.bppc_host.as_str()
-    };
-    let rendered = render_models_json(&tmpl, host, &endpoints.omlx_key);
-    match write_models_json(agent_dir, &rendered) {
-        Ok(true) => PrepareStep {
-            name,
-            ok: true,
-            detail: format!("wrote models.json (bppc host {host})"),
-        },
-        Ok(false) => PrepareStep {
-            name,
-            ok: true,
-            detail: format!("models.json unchanged (bppc host {host})"),
-        },
-        Err(e) => PrepareStep {
-            name,
-            ok: false,
-            detail: e.to_string(),
-        },
+        line.to_string()
     }
 }
 
 /// OMLX_KEY default, the same fallback bin/efficient-pi uses when the env
 /// carries none: `auth.api_key` from `~/.omlx/settings.json`. None when the
-/// file is missing, malformed or the key blank, so render_step's own failure
-/// message reports the gap.
+/// file is missing, malformed or the key blank, so the caller fills the gap
+/// from the secrets store or leaves the agent's render step to report it.
 pub fn omlx_key_default(home: Option<&str>) -> Option<String> {
     let home = home.map(str::trim).filter(|s| !s.is_empty())?;
     let path = Path::new(home).join(".omlx").join("settings.json");
-    let raw = fs::read_to_string(path).ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let key = parsed
         .get("auth")?
@@ -501,52 +267,6 @@ pub fn omlx_key_default(home: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
 
-    struct Template {
-        dir: tempfile::TempDir,
-    }
-
-    fn write(path: &Path, content: &str) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("mkdir");
-        }
-        fs::write(path, content).expect("write");
-    }
-
-    fn template() -> Template {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path();
-        write(&root.join("AGENTS.md"), "# agent\n");
-        write(&root.join("settings.json"), "{}\n");
-        write(&root.join("settings.README.md"), "docs\n");
-        write(
-            &root.join("models.json.tmpl"),
-            r#"{"baseUrl": "http://__BPPC_HOST__:8080/v1", "apiKey": "__OMLX_KEY__"}"#,
-        );
-        write(&root.join("agents/worker.md"), "# worker\n");
-        write(&root.join("extensions/board.mjs"), "export {};\n");
-        write(&root.join("prompts/brief.md"), "# brief\n");
-        write(&root.join("skills/dev/SKILL.md"), "# dev\n");
-        Template { dir }
-    }
-
-    fn managed_entry_names() -> Vec<String> {
-        let mut names: Vec<String> = MANAGED_FILES
-            .iter()
-            .map(|s| s.to_string())
-            .chain(MANAGED_DIRS.iter().map(|s| format!("{s}/")))
-            .collect();
-        names.sort();
-        names
-    }
-
-    fn seed_report_names(report: &SeedReport) -> Vec<String> {
-        let mut names = report.created.clone();
-        names.extend(report.updated.iter().cloned());
-        names.extend(report.kept.iter().cloned());
-        names.sort();
-        names
-    }
-
     #[test]
     fn user_agent_dir_sits_under_app_data() {
         let sep = std::path::MAIN_SEPARATOR;
@@ -557,357 +277,10 @@ mod tests {
     }
 
     #[test]
-    fn seed_first_run_copies_everything_and_writes_the_stamp() {
-        let tmpl = template();
-        let dest = tempfile::tempdir().expect("tempdir");
-        let report = seed_agent_dir(tmpl.dir.path(), dest.path(), "v1+abc").expect("seed");
-        assert_eq!(seed_report_names(&report), managed_entry_names());
-        assert!(report.kept.is_empty());
-        assert_eq!(
-            fs::read_to_string(dest.path().join(".terax-seed")).expect("stamp"),
-            "v1+abc"
-        );
-        assert_eq!(
-            fs::read_to_string(dest.path().join("AGENTS.md")).expect("agents.md"),
-            "# agent\n"
-        );
-        assert_eq!(
-            fs::read_to_string(dest.path().join("skills/dev/SKILL.md")).expect("skill"),
-            "# dev\n"
-        );
-    }
-
-    #[test]
-    fn seed_second_run_with_same_stamp_changes_nothing() {
-        let tmpl = template();
-        let dest = tempfile::tempdir().expect("tempdir");
-        let stamp = template_stamp("1.2.3", tmpl.dir.path());
-        seed_agent_dir(tmpl.dir.path(), dest.path(), &stamp).expect("first seed");
-        let agents_before = fs::read(dest.path().join("AGENTS.md")).expect("read");
-        let report = seed_agent_dir(tmpl.dir.path(), dest.path(), &stamp).expect("second seed");
-        assert!(report.is_empty(), "same stamp must be a no-op");
-        assert_eq!(fs::read(dest.path().join("AGENTS.md")).expect("read"), agents_before);
-    }
-
-    #[test]
-    fn changed_stamp_recopies_modified_prompt_and_keeps_auth_json() {
-        let tmpl = template();
-        let dest = tempfile::tempdir().expect("tempdir");
-        seed_agent_dir(tmpl.dir.path(), dest.path(), "v1").expect("first seed");
-        write(&dest.path().join("auth.json"), r#"{"bppc":"secret"}"#);
-        write(&tmpl.dir.path().join("prompts/brief.md"), "# brief v2\n");
-        let report = seed_agent_dir(tmpl.dir.path(), dest.path(), "v2").expect("re-seed");
-        assert_eq!(report.updated, vec!["prompts/".to_string()]);
-        assert!(report.created.is_empty(), "nothing new on re-seed");
-        assert_eq!(
-            fs::read_to_string(dest.path().join("prompts/brief.md")).expect("prompt"),
-            "# brief v2\n"
-        );
-        assert_eq!(
-            fs::read_to_string(dest.path().join("auth.json")).expect("auth"),
-            r#"{"bppc":"secret"}"#
-        );
-        assert_eq!(
-            fs::read_to_string(dest.path().join(".terax-seed")).expect("stamp"),
-            "v2"
-        );
-    }
-
-    #[test]
-    fn template_stamp_tracks_app_version_and_template_content() {
-        let tmpl = template();
-        let a = template_stamp("1.0.0", tmpl.dir.path());
-        let b = template_stamp("1.0.1", tmpl.dir.path());
-        let c = {
-            write(&tmpl.dir.path().join("prompts/ticket.md"), "# ticket\n");
-            template_stamp("1.0.0", tmpl.dir.path())
-        };
-        assert_ne!(a, b, "version must be part of the stamp");
-        assert_ne!(a, c, "template drift must change the stamp");
-        assert!(a.starts_with("1.0.0+"));
-    }
-
-    #[test]
-    fn render_substitutes_both_placeholders() {
-        let out = render_models_json(
-            r#"{"baseUrl": "http://__BPPC_HOST__:8080/v1", "apiKey": "__OMLX_KEY__"}"#,
-            "100.1.2.3",
-            "sk-test",
-        );
-        assert_eq!(
-            out,
-            r#"{"baseUrl": "http://100.1.2.3:8080/v1", "apiKey": "sk-test"}"#
-        );
-    }
-
-    #[test]
-    fn write_models_json_skips_identical_content() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert!(
-            write_models_json(dir.path(), "{}").expect("write"),
-            "first write lands"
-        );
-        let first = fs::read(dir.path().join("models.json")).expect("read");
-        assert!(
-            !write_models_json(dir.path(), "{}").expect("second write"),
-            "identical content must not rewrite"
-        );
-        assert_eq!(fs::read(dir.path().join("models.json")).expect("read"), first);
-        assert!(
-            write_models_json(dir.path(), "[]").expect("third write"),
-            "changed content rewrites"
-        );
-    }
-
-    #[test]
-    fn wiki_init_creates_only_missing_files() {
-        let project = tempfile::tempdir().expect("tempdir");
-        let first = wiki_init(project.path()).expect("wiki init");
-        assert_eq!(first.len(), 4, "all four files created on a fresh project");
-        for path in &first {
-            assert!(path.exists(), "{} must exist", path.display());
-        }
-        assert_eq!(
-            fs::read_to_string(project.path().join("wiki/index.md")).expect("index"),
-            "# Wiki Index\n- [active-work.md](active-work.md) \u{2014} current workstreams, status, next steps\n- [decisions.md](decisions.md) \u{2014} choices made, rejected options, why\n- [log.md](log.md) \u{2014} dated session journal (grep it, never read wholesale)\n"
-        );
-        write(&project.path().join("wiki/decisions.md"), "user edits\n");
-        let second = wiki_init(project.path()).expect("wiki init again");
-        assert!(
-            second.is_empty(),
-            "no file may be overwritten once it exists"
-        );
-        assert_eq!(
-            fs::read_to_string(project.path().join("wiki/decisions.md")).expect("decisions"),
-            "user edits\n"
-        );
-    }
-
-    #[test]
-    fn wiki_templates_are_byte_equal_to_bin_wiki_init() {
-        let expected: Vec<(&str, &str)> = vec![
-            (
-                "index.md",
-                "# Wiki Index\n- [active-work.md](active-work.md) \u{2014} current workstreams, status, next steps\n- [decisions.md](decisions.md) \u{2014} choices made, rejected options, why\n- [log.md](log.md) \u{2014} dated session journal (grep it, never read wholesale)\n",
-            ),
-            ("active-work.md", "# Active Work\n\n(no open workstreams)\n"),
-            ("decisions.md", "# Decisions\n"),
-            ("log.md", "# Wiki Log\n"),
-        ];
-        for ((name, body), (expected_name, expected_body)) in WIKI_FILES.iter().zip(expected.iter())
-        {
-            assert_eq!(name, expected_name);
-            assert_eq!(body, expected_body);
-            assert!(body.ends_with('\n'), "heredocs always end with a newline");
-        }
-    }
-
-    #[test]
-    fn project_root_check_passes_on_markers_and_fails_when_empty() {
-        let project = tempfile::tempdir().expect("tempdir");
-        write(&project.path().join("CLAUDE.md"), "x\n");
-        assert!(project_root_check(project.path()).is_ok());
-        let git_project = tempfile::tempdir().expect("tempdir");
-        fs::create_dir(git_project.path().join(".git")).expect("gitdir");
-        assert!(project_root_check(git_project.path()).is_ok());
-        let empty = tempfile::tempdir().expect("tempdir");
-        let err = project_root_check(empty.path()).expect_err("empty dir must fail");
-        assert!(err.contains(".git"));
-        assert!(err.contains(empty.path().to_str().expect("utf8")));
-    }
-
-    #[test]
-    fn prepare_session_runs_end_to_end_on_a_temp_project() {
-        let tmpl = template();
-        let app_data = tempfile::tempdir().expect("tempdir");
-        let project = tempfile::tempdir().expect("tempdir");
-        fs::create_dir(project.path().join(".git")).expect("gitdir");
-        let report = prepare_session(PrepareInput {
-            app_version: "0.7.3".to_string(),
-            template_dir: tmpl.dir.path().to_path_buf(),
-            app_data_dir: app_data.path().to_path_buf(),
-            cwd: project.path().to_path_buf(),
-            roles: PrepareRoles {
-                provider: "bppc".to_string(),
-                model: "qwen3.8-27b".to_string(),
-                thinking: "xhigh".to_string(),
-                smol: "omlx/Qwen3.6-35B-A3B-OptiQ-4bit".to_string(),
-            },
-            endpoints: PrepareEndpoints {
-                bppc_host: "203.0.113.10".to_string(),
-                omlx_key: "sk-omlx".to_string(),
-            },
-            allow_any_dir: false,
-        });
-        assert_eq!(
-            report.steps.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
-            vec!["seed", "render", "root", "wiki"]
-        );
-        for step in &report.steps {
-            assert!(step.ok, "step {} failed: {}", step.name, step.detail);
-        }
-        assert_eq!(
-            report.agent_dir,
-            app_data.path().join("pi-home").join("agent")
-        );
-        assert_eq!(
-            report.env.get("PI_CODING_AGENT_DIR").map(String::as_str),
-            Some(report.agent_dir.to_str().expect("utf8"))
-        );
-        assert_eq!(
-            report.env.get("EFFICIENT_PI_PROVIDER").map(String::as_str),
-            Some("bppc")
-        );
-        assert_eq!(
-            report.env.get("EFFICIENT_PI_MODEL").map(String::as_str),
-            Some("qwen3.8-27b")
-        );
-        assert_eq!(
-            report.env.get("EFFICIENT_PI_THINKING").map(String::as_str),
-            Some("xhigh")
-        );
-        assert_eq!(
-            report.env.get("EFFICIENT_PI_SMOL").map(String::as_str),
-            Some("omlx/Qwen3.6-35B-A3B-OptiQ-4bit")
-        );
-        assert_eq!(
-            fs::read_to_string(report.agent_dir.join("models.json")).expect("models.json"),
-            r#"{"baseUrl": "http://203.0.113.10:8080/v1", "apiKey": "sk-omlx"}"#
-        );
-        assert!(report.agent_dir.join("AGENTS.md").is_file());
-        assert!(report.agent_dir.join(".terax-seed").is_file());
-        assert!(project.path().join("wiki/index.md").is_file());
-    }
-
-    #[test]
-    fn prepare_session_reports_failures_per_step_without_aborting() {
-        let app_data = tempfile::tempdir().expect("tempdir");
-        let project = tempfile::tempdir().expect("tempdir");
-        let report = prepare_session(PrepareInput {
-            app_version: "0.7.3".to_string(),
-            template_dir: app_data.path().join("no-such-template"),
-            app_data_dir: app_data.path().to_path_buf(),
-            cwd: project.path().to_path_buf(),
-            roles: PrepareRoles {
-                provider: "bppc".to_string(),
-                model: "m".to_string(),
-                thinking: "xhigh".to_string(),
-                smol: "omlx/s".to_string(),
-            },
-            endpoints: PrepareEndpoints {
-                bppc_host: String::new(),
-                omlx_key: String::new(),
-            },
-            allow_any_dir: false,
-        });
-        let by_name = |name: &str| {
-            report
-                .steps
-                .iter()
-                .find(|s| s.name == name)
-                .unwrap_or_else(|| panic!("step {name} missing"))
-        };
-        assert!(!by_name("seed").ok, "missing template must fail seed");
-        assert!(!by_name("render").ok, "missing template must fail render");
-        assert!(!by_name("root").ok, "empty project must fail the root guard");
-        assert!(by_name("wiki").ok, "wiki init still runs");
-    }
-
-    #[test]
-    fn prepare_session_blank_omlx_key_fails_render_and_allow_any_dir_passes_root() {
-        let tmpl = template();
-        let app_data = tempfile::tempdir().expect("tempdir");
-        let project = tempfile::tempdir().expect("tempdir");
-        let report = prepare_session(PrepareInput {
-            app_version: "0.7.3".to_string(),
-            template_dir: tmpl.dir.path().to_path_buf(),
-            app_data_dir: app_data.path().to_path_buf(),
-            cwd: project.path().to_path_buf(),
-            roles: PrepareRoles {
-                provider: "bppc".to_string(),
-                model: "m".to_string(),
-                thinking: "xhigh".to_string(),
-                smol: "omlx/s".to_string(),
-            },
-            endpoints: PrepareEndpoints {
-                bppc_host: String::new(),
-                omlx_key: "  ".to_string(),
-            },
-            allow_any_dir: true,
-        });
-        let by_name = |name: &str| {
-            report
-                .steps
-                .iter()
-                .find(|s| s.name == name)
-                .unwrap_or_else(|| panic!("step {name} missing"))
-        };
-        assert!(!by_name("render").ok, "blank key must fail render");
-        assert!(by_name("render").detail.contains("OMLX_KEY"));
-        assert!(by_name("root").ok, "allow_any_dir skips the guard");
-        assert!(by_name("root").detail.contains("any dir"));
-    }
-
-    #[test]
-    fn prepare_session_render_is_idempotent() {
-        let tmpl = template();
-        let app_data = tempfile::tempdir().expect("tempdir");
-        let project = tempfile::tempdir().expect("tempdir");
-        fs::create_dir(project.path().join(".git")).expect("gitdir");
-        let endpoints = PrepareEndpoints {
-            bppc_host: "10.0.0.9".to_string(),
-            omlx_key: "k".to_string(),
-        };
-        let roles = PrepareRoles {
-            provider: "bppc".to_string(),
-            model: "m".to_string(),
-            thinking: "xhigh".to_string(),
-            smol: "omlx/s".to_string(),
-        };
-        let make_input = || PrepareInput {
-            app_version: "0.7.3".to_string(),
-            template_dir: tmpl.dir.path().to_path_buf(),
-            app_data_dir: app_data.path().to_path_buf(),
-            cwd: project.path().to_path_buf(),
-            roles: PrepareRoles {
-                provider: roles.provider.clone(),
-                model: roles.model.clone(),
-                thinking: roles.thinking.clone(),
-                smol: roles.smol.clone(),
-            },
-            endpoints: PrepareEndpoints {
-                bppc_host: endpoints.bppc_host.clone(),
-                omlx_key: endpoints.omlx_key.clone(),
-            },
-            allow_any_dir: false,
-        };
-        let first = prepare_session(make_input());
-        let second = prepare_session(make_input());
-        let first_render = first.steps.iter().find(|s| s.name == "render").expect("step");
-        let second_render = second.steps.iter().find(|s| s.name == "render").expect("step");
-        assert!(first_render.detail.starts_with("wrote"));
-        assert!(
-            second_render.detail.contains("unchanged"),
-            "second run must not rewrite models.json: {}",
-            second_render.detail
-        );
-        assert!(
-            second
-                .steps
-                .iter()
-                .find(|s| s.name == "seed")
-                .expect("step")
-                .detail
-                .starts_with("agent dir ready"),
-            "same stamp must be a no-op seed"
-        );
-    }
-
-    #[test]
     fn omlx_key_default_reads_the_same_settings_file_as_the_bash_launcher() {
         let home = tempfile::tempdir().expect("tempdir");
-        fs::create_dir_all(home.path().join(".omlx")).expect("mkdir");
-        fs::write(
+        std::fs::create_dir_all(home.path().join(".omlx")).expect("mkdir");
+        std::fs::write(
             home.path().join(".omlx").join("settings.json"),
             r#"{"auth": {"api_key": "sk-omlx"}}"#,
         )
@@ -915,8 +288,8 @@ mod tests {
         let home_str = home.path().to_str().expect("utf8");
         assert_eq!(omlx_key_default(Some(home_str)).as_deref(), Some("sk-omlx"));
         // Whitespace-only keys count as unset, as do blank homes and missing
-        // or malformed files: render_step then reports the gap itself.
-        fs::write(
+        // or malformed files: the caller fills the gap or the agent reports it.
+        std::fs::write(
             home.path().join(".omlx").join("settings.json"),
             r#"{"auth": {"api_key": "  "}}"#,
         )
@@ -930,5 +303,222 @@ mod tests {
         );
         assert_eq!(omlx_key_default(Some("   ")), None);
         assert_eq!(omlx_key_default(None), None);
+    }
+}
+
+/// The CLI-mapping tests need a fake agent binary, so they run on Unix only
+/// (a shell script stands in for the harness binary in a temp dir).
+#[cfg(all(test, unix))]
+mod agent_cli_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Writes a fake agent that records its argv and the OMLX key env into
+    /// <dir>/argv.txt, then prints `report` (the --json body) on stdout.
+    fn write_fake_agent(dir: &Path, report: &str) -> PathBuf {
+        let argv = dir.join("argv.txt");
+        let script = "#!/bin/sh\n\
+             printf '%s\\n' \"$@\" > {ARGV}\n\
+             printf 'OMLX_API_KEY=%s\\n' \"${OMLX_API_KEY-unset}\" >> {ARGV}\n\
+             cat <<'JSON'\n{REPORT}\nJSON\n"
+            .replace("{ARGV}", &argv.to_string_lossy())
+            .replace("{REPORT}", report);
+        let path = dir.join("agent");
+        fs::write(&path, script).expect("write agent stub");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    fn read_argv(dir: &Path) -> Vec<String> {
+        fs::read_to_string(dir.join("argv.txt"))
+            .expect("argv record")
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn input(template: &Path, app_data: &Path, cwd: &Path, allow_any_dir: bool) -> PrepareInput {
+        PrepareInput {
+            app_version: "0.7.3".to_string(),
+            template_dir: template.to_path_buf(),
+            app_data_dir: app_data.to_path_buf(),
+            cwd: cwd.to_path_buf(),
+            roles: PrepareRoles {
+                provider: "bppc".to_string(),
+                model: "qwen3.8-27b".to_string(),
+                thinking: "xhigh".to_string(),
+                smol: "omlx/Qwen3.6-35B-A3B-OptiQ-4bit".to_string(),
+            },
+            endpoints: PrepareEndpoints {
+                bppc_host: "203.0.113.10".to_string(),
+                omlx_key: "sk-omlx".to_string(),
+            },
+            allow_any_dir,
+        }
+    }
+
+    #[test]
+    fn prepare_session_maps_the_agent_cli_json_and_builds_the_expected_command() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let app_data = tempfile::tempdir().expect("tempdir");
+        let template = tempfile::tempdir().expect("tempdir");
+        let project = tempfile::tempdir().expect("tempdir");
+        let agent_dir = user_agent_dir(app_data.path());
+        let report = serde_json::json!({
+            "steps": [
+                {"name": "seed", "status": "OK",
+                 "detail": format!("seeded {}: 3 created, 0 updated, 0 kept", agent_dir.display())},
+                {"name": "render", "status": "SKIPPED",
+                 "detail": "models.json unchanged (bppc host 203.0.113.10)"},
+                {"name": "root", "status": "FAIL",
+                 "detail": format!("{} has no .git, CLAUDE.md, AGENTS.md, or wiki/", project.path().display())},
+                {"name": "wiki", "status": "OK", "detail": "wiki files present"},
+            ],
+            "agentDir": agent_dir.to_string_lossy(),
+            "modelsJson": agent_dir.join("models.json").to_string_lossy(),
+            "env": {"PI_CODING_AGENT_DIR": agent_dir.to_string_lossy()},
+        })
+        .to_string();
+        let agent = write_fake_agent(scratch.path(), &report);
+        let got = prepare_session(
+            input(template.path(), app_data.path(), project.path(), false),
+            Some(&agent),
+        );
+        // The exact command line each caller builds: verb, dirs, version stamp
+        // prefix, endpoint host, key env name, then --json.
+        assert_eq!(
+            read_argv(scratch.path()),
+            vec![
+                "pi".to_string(),
+                "prepare".to_string(),
+                "--template".to_string(),
+                template.path().to_string_lossy().into_owned(),
+                "--agent-dir".to_string(),
+                agent_dir.to_string_lossy().into_owned(),
+                "--cwd".to_string(),
+                project.path().to_string_lossy().into_owned(),
+                "--version".to_string(),
+                "0.7.3".to_string(),
+                "--bppc-host".to_string(),
+                "203.0.113.10".to_string(),
+                "--omlx-key-env".to_string(),
+                "OMLX_API_KEY".to_string(),
+                "--json".to_string(),
+                "OMLX_API_KEY=sk-omlx".to_string(),
+            ]
+        );
+        // Statuses map onto the report: SKIPPED counts as ok, FAIL does not,
+        // and details stay the agent's own words.
+        let oks: Vec<bool> = got.steps.iter().map(|s| s.ok).collect();
+        assert_eq!(oks, vec![true, true, false, true]);
+        assert_eq!(
+            got.steps.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["seed", "render", "root", "wiki"]
+        );
+        assert_eq!(
+            got.steps[1].detail,
+            "models.json unchanged (bppc host 203.0.113.10)"
+        );
+        assert_eq!(got.agent_dir, agent_dir);
+        assert_eq!(
+            got.env.get("PI_CODING_AGENT_DIR").map(String::as_str),
+            Some(agent_dir.to_str().expect("utf8"))
+        );
+        assert_eq!(
+            got.env.get("EFFICIENT_PI_PROVIDER").map(String::as_str),
+            Some("bppc")
+        );
+        assert_eq!(
+            got.env.get("EFFICIENT_PI_MODEL").map(String::as_str),
+            Some("qwen3.8-27b")
+        );
+        assert_eq!(
+            got.env.get("EFFICIENT_PI_THINKING").map(String::as_str),
+            Some("xhigh")
+        );
+        assert_eq!(
+            got.env.get("EFFICIENT_PI_SMOL").map(String::as_str),
+            Some("omlx/Qwen3.6-35B-A3B-OptiQ-4bit")
+        );
+    }
+
+    #[test]
+    fn prepare_session_allow_any_dir_flag_and_blank_key_stays_blank_on_the_child() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let app_data = tempfile::tempdir().expect("tempdir");
+        let template = tempfile::tempdir().expect("tempdir");
+        let project = tempfile::tempdir().expect("tempdir");
+        let agent_dir = user_agent_dir(app_data.path());
+        let report = serde_json::json!({
+            "steps": [
+                {"name": "root", "status": "SKIPPED",
+                 "detail": format!("root guard skipped (--allow-any-dir): {}", project.path().display())},
+            ],
+            "agentDir": agent_dir.to_string_lossy(),
+            "env": {},
+        })
+        .to_string();
+        let agent = write_fake_agent(scratch.path(), &report);
+        let mut inp = input(template.path(), app_data.path(), project.path(), true);
+        inp.endpoints.omlx_key = "   ".to_string();
+        inp.app_version = String::new();
+        let got = prepare_session(inp, Some(&agent));
+        // The skipped guard is ok for the spawn decision, like the local
+        // implementation's (any dir allowed) step was.
+        assert_eq!(got.steps.len(), 1);
+        assert!(got.steps[0].ok, "{}", got.steps[0].detail);
+        let argv = read_argv(scratch.path());
+        assert!(argv.contains(&"--allow-any-dir".to_string()), "argv: {argv:?}");
+        // Blank endpoint key: the var is removed from the child env, so the
+        // agent's own fallback and failure message apply.
+        assert!(
+            argv.contains(&"OMLX_API_KEY=unset".to_string()),
+            "argv: {argv:?}"
+        );
+        // An empty version or host value is omitted, never passed as "".
+        assert!(!argv.contains(&"--version".to_string()), "argv: {argv:?}");
+    }
+
+    #[test]
+    fn prepare_session_missing_agent_binary_yields_a_fail_step_not_a_panic() {
+        let app_data = tempfile::tempdir().expect("tempdir");
+        let template = tempfile::tempdir().expect("tempdir");
+        let project = tempfile::tempdir().expect("tempdir");
+        for agent_bin in [
+            None,
+            Some(Path::new("/no/such/harness-agent-for-terax-tests")),
+        ] {
+            let got = prepare_session(
+                input(template.path(), app_data.path(), project.path(), false),
+                agent_bin,
+            );
+            assert_eq!(got.steps.len(), 1, "one FAIL step for {agent_bin:?}");
+            assert!(!got.steps[0].ok);
+            assert_eq!(got.steps[0].name, "prepare");
+            assert!(got.steps[0].detail.contains("agent"), "{}", got.steps[0].detail);
+            assert_eq!(got.agent_dir, user_agent_dir(app_data.path()));
+            assert_eq!(
+                got.env.get("PI_CODING_AGENT_DIR").map(String::as_str),
+                Some(user_agent_dir(app_data.path()).to_str().expect("utf8"))
+            );
+            assert_eq!(got.env.len(), 5, "report env keeps its shape");
+        }
+    }
+
+    #[test]
+    fn prepare_session_unreadable_agent_report_yields_a_fail_step() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let app_data = tempfile::tempdir().expect("tempdir");
+        let template = tempfile::tempdir().expect("tempdir");
+        let project = tempfile::tempdir().expect("tempdir");
+        let agent = write_fake_agent(scratch.path(), "this is not json");
+        let got = prepare_session(
+            input(template.path(), app_data.path(), project.path(), false),
+            Some(&agent),
+        );
+        assert_eq!(got.steps.len(), 1);
+        assert!(!got.steps[0].ok);
+        assert!(got.steps[0].detail.contains("report unreadable"), "{}", got.steps[0].detail);
     }
 }

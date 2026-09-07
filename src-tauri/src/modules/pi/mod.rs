@@ -103,7 +103,7 @@ pub async fn pi_open(
     // Roles ride in the spawn env today (EFFICIENT_PI_* via piSpawnEnv); the
     // direct path renders them through prepare_session, whose report env
     // replaces these values at spawn. The EFFICIENT_PI_BPPC_HOST the frontend
-    // passes carries the piBppcHost pref; a blank one keeps render_step's LAN
+    // passes carries the piBppcHost pref; a blank one keeps the agent's LAN
     // fallback. The oMLX key resolves caller env, then the secrets store
     // (injected above), then the bash launcher's own default
     // (~/.omlx/settings.json) so a checkout-less machine renders models.json.
@@ -306,10 +306,12 @@ pub fn pi_paths(app: tauri::AppHandle, prefs: launch::PiPrefs) -> launch::Resolv
     resolved
 }
 
-/// Prepares a pi session without bash: seeds the user agent dir from the
-/// bundled template, renders models.json, runs the project-root guard and
-/// wiki-init, and returns the per-step report plus the spawn env. The dirs
-/// come from the AppHandle; the cwd is workspace-authorized like every spawn.
+/// Prepares a pi session without bash: the four launcher steps (seed the user
+/// agent dir from the bundled template, render models.json, the project-root
+/// guard, wiki init) run in the resolved harness agent (`agent pi prepare`),
+/// and the per-step report plus the spawn env come back from its JSON. The
+/// dirs come from the AppHandle; the cwd is workspace-authorized like every
+/// spawn.
 #[tauri::command]
 pub fn pi_prepare(
     app: tauri::AppHandle,
@@ -329,8 +331,8 @@ pub fn pi_prepare(
     // The render resolves the oMLX key the way a spawn does: a caller-supplied
     // key wins, a blank one fills from the secrets store (the frontend never
     // sees stored keys, so it cannot pass one), then the bash launcher's own
-    // ~/.omlx/settings.json default; render_step reports the gap when no
-    // source has one.
+    // ~/.omlx/settings.json default; the agent's render step reports the gap
+    // when no source has one.
     let mut endpoints = input.endpoints;
     if endpoints.omlx_key.trim().is_empty() {
         endpoints.omlx_key =
@@ -343,13 +345,32 @@ pub fn pi_prepare(
     let input = launcher::PrepareInput {
         app_version: app.package_info().version.to_string(),
         template_dir,
-        app_data_dir,
+        app_data_dir: app_data_dir.clone(),
         cwd,
         roles: input.roles,
         endpoints,
         allow_any_dir: input.allow_any_dir,
     };
-    let report = launcher::prepare_session(input);
+    // The four steps run in the harness agent, resolved like pi_paths does
+    // (pref, then the bundled sidecar); a missing binary becomes a FAIL step
+    // in the report, not an error.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let bundled = launch::BundledPaths {
+        exe_dir,
+        resource_dir: app.path().resource_dir().unwrap_or_default(),
+    };
+    let agent_bin = launch::resolve_paths(
+        &launch::PiPrefs::default(),
+        &bundled,
+        launch::home_dir().as_deref(),
+        &app_data_dir,
+    )
+    .agent
+    .path;
+    let report = launcher::prepare_session(input, agent_bin.as_deref().map(Path::new));
     grant_agent_artifacts(&app, &report.agent_dir);
     log::info!(
         "pi_prepare: {}",
@@ -450,4 +471,212 @@ pub fn pi_unwatch(
         log::debug!("pi_unwatch: unknown id={id}");
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `pi --list-models` probe (model picker, vision flag)
+// ---------------------------------------------------------------------------
+
+/// Credential families scrubbed from the listing probe env. Ambient cloud
+/// keys silently reshape what pi lists (models.rs hides rows without a
+/// resolvable credential), so the probe runs on the stored keys only: the
+/// prefixes follow the standing verifier rule, the exact names cover the
+/// oMLX vars whose prefix differs (Rust twins: PROVIDER_ENVS in secrets.rs,
+/// PI_CLOUD_PROVIDERS in src/modules/pi/lib/providers.ts). PI_CODING_AGENT_DIR
+/// is scrubbed too and re-inserted explicitly below.
+const LIST_MODEL_SCRUB_PREFIXES: &[&str] =
+    &["ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_", "OPENROUTER_"];
+const LIST_MODEL_SCRUB_EXACT: &[&str] = &[
+    "OMLX_API_KEY",
+    "EFFICIENT_PI_OMLX_KEY",
+    "PI_CODING_AGENT_DIR",
+];
+
+/// The env a listing probe runs in: the app's ambient env minus every cloud
+/// credential (process basics like PATH, HOME and the Windows SystemRoot
+/// survive so the child can run at all), PI_CODING_AGENT_DIR pinned to the
+/// session's agent dir when known, then the stored keys filled in. With no
+/// keys stored the probe carries no cloud credential, which is exactly why
+/// pi hides those rows and the UI answers "enter a key to see models".
+/// Pure over `ambient` so tests never touch the process env.
+fn list_models_env(
+    ambient: impl Iterator<Item = (String, String)>,
+    app_data_dir: &Path,
+    agent_dir: Option<&str>,
+) -> HashMap<String, String> {
+    let scrubbed = |key: &str| {
+        LIST_MODEL_SCRUB_PREFIXES.iter().any(|p| key.starts_with(p))
+            || LIST_MODEL_SCRUB_EXACT.contains(&key)
+    };
+    let mut env: HashMap<String, String> = ambient
+        .filter(|(key, _)| !scrubbed(key))
+        .collect();
+    if let Some(dir) = agent_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        env.insert("PI_CODING_AGENT_DIR".to_string(), dir.to_string());
+    }
+    secrets::inject_secret_env(&mut env, app_data_dir);
+    env
+}
+
+/// `pi --list-models <pattern>` for the Settings model picker and the pi
+/// tab's vision flag. Runs the same resolved pi binary a session spawns
+/// (pref > bundled > checkout), with the agent dir a session would run from
+/// (an explicit `agent_dir` wins, else the runtime agent dir), so auth.json
+/// keys and models.json endpoints resolve exactly as in a session. The env
+/// carries the stored cloud keys only (see list_models_env); pi fingerprints
+/// its own listing cache on credential env values, so a changed key set
+/// refreshes the table by itself. `pattern` passes straight through to pi's
+/// fuzzy filter; the frontend fetches the full table and filters per
+/// provider client-side.
+#[tauri::command]
+pub fn pi_list_models(
+    app: tauri::AppHandle,
+    prefs: launch::PiPrefs,
+    pattern: Option<String>,
+    agent_dir: Option<String>,
+) -> Result<String, String> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let bundled = launch::BundledPaths {
+        exe_dir,
+        resource_dir: app.path().resource_dir().unwrap_or_default(),
+    };
+    let app_data_dir = app.path().app_data_dir().unwrap_or_default();
+    let home = launch::home_dir();
+    let resolved = launch::resolve_paths(&prefs, &bundled, home.as_deref(), &app_data_dir);
+    let program = resolved.pi.path.ok_or_else(|| {
+        format!("no pi binary found: {}", resolved.pi.candidates.join(" or "))
+    })?;
+    let agent_dir = agent_dir
+        .map(|dir| launch::expand_home(dir.trim(), home.as_deref()))
+        .filter(|dir| !dir.is_empty())
+        .or(resolved.runtime_agent_dir.path);
+    let mut cmd = std::process::Command::new(&program);
+    cmd.arg("--list-models");
+    let pattern = pattern
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    if let Some(pattern) = pattern.as_deref() {
+        cmd.arg(pattern);
+    }
+    cmd.env_clear()
+        .envs(list_models_env(std::env::vars(), &app_data_dir, agent_dir.as_deref()));
+    let out = cmd
+        .output()
+        .map_err(|e| format!("pi --list-models failed to run: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            Err(format!("pi --list-models exited {}", out.status))
+        } else {
+            Err(stderr.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod list_models_tests {
+    use super::*;
+
+    fn ambient(pairs: &[(&str, &str)]) -> impl Iterator<Item = (String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn probe_env_scrubs_ambient_cloud_keys_and_keeps_process_basics() {
+        let env = list_models_env(
+            ambient(&[
+                ("ANTHROPIC_API_KEY", "ambient-a"),
+                ("OPENAI_API_KEY", "ambient-o"),
+                ("OPENROUTER_API_KEY", "ambient-r"),
+                ("GEMINI_API_KEY", "ambient-g"),
+                ("GOOGLE_API_KEY", "ambient-g2"),
+                ("OMLX_API_KEY", "ambient-x"),
+                ("EFFICIENT_PI_OMLX_KEY", "ambient-x2"),
+                ("PI_CODING_AGENT_DIR", "/stale/agent"),
+                ("PATH", "/bin"),
+                ("HOME", "/u/me"),
+            ]),
+            Path::new(""),
+            None,
+        );
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "OMLX_API_KEY",
+            "EFFICIENT_PI_OMLX_KEY",
+            "PI_CODING_AGENT_DIR",
+        ] {
+            assert!(!env.contains_key(key), "{key} must be scrubbed");
+        }
+        // Process basics survive so the child can run.
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/bin"));
+        assert_eq!(env.get("HOME").map(String::as_str), Some("/u/me"));
+    }
+
+    #[test]
+    fn probe_env_carries_only_the_stored_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        secrets::set_secret(dir.path(), "anthropic", "sk-stored").expect("set");
+        secrets::set_secret(dir.path(), "google", "sk-g").expect("set");
+        let env = list_models_env(
+            ambient(&[("ANTHROPIC_API_KEY", "ambient-a")]),
+            dir.path(),
+            None,
+        );
+        // The stored value replaces the scrubbed ambient one.
+        assert_eq!(
+            env.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-stored")
+        );
+        // google maps onto both env vars pi reads.
+        assert_eq!(env.get("GEMINI_API_KEY").map(String::as_str), Some("sk-g"));
+        assert_eq!(env.get("GOOGLE_API_KEY").map(String::as_str), Some("sk-g"));
+        // Providers without a stored key stay absent.
+        assert!(!env.contains_key("OPENAI_API_KEY"));
+        assert!(!env.contains_key("OMLX_API_KEY"));
+    }
+
+    #[test]
+    fn probe_env_pins_the_agent_dir_only_when_known() {
+        let env = list_models_env(
+            ambient(&[("PI_CODING_AGENT_DIR", "/stale/agent")]),
+            Path::new(""),
+            Some("/session/agent"),
+        );
+        assert_eq!(
+            env.get("PI_CODING_AGENT_DIR").map(String::as_str),
+            Some("/session/agent")
+        );
+        // A blank agent dir is unknown: the stale ambient value stays gone.
+        let env = list_models_env(
+            ambient(&[("PI_CODING_AGENT_DIR", "/stale/agent")]),
+            Path::new(""),
+            Some("   "),
+        );
+        assert!(!env.contains_key("PI_CODING_AGENT_DIR"));
+    }
+
+    #[test]
+    fn probe_env_with_no_store_is_plain_scrubbed_ambient() {
+        let env = list_models_env(
+            ambient(&[("OPENAI_API_KEY", "ambient")]),
+            Path::new("/nonexistent/pi-list-models-test"),
+            None,
+        );
+        assert!(!env.contains_key("OPENAI_API_KEY"));
+        assert_eq!(env.len(), 0);
+    }
 }

@@ -330,7 +330,13 @@ export function parsePiProviders(output: string): PiProviderRow[] {
 export type PiModelRow = {
   provider: string;
   model: string;
+  /** Context window as the table prints it, e.g. "1M" or "200K". */
+  context: string;
+  /** Max output tokens as the table prints it, e.g. "128K". */
+  maxOut: string;
   thinking: boolean;
+  /** The catalog's image-input flag; feeds the composer's vision notice. */
+  images: boolean;
 };
 
 /**
@@ -347,7 +353,10 @@ export function parsePiModels(output: string): PiModelRow[] {
     rows.push({
       provider: fields[0],
       model: fields[1],
+      context: fields[2] ?? "",
+      maxOut: fields[3] ?? "",
       thinking: fields[4] === "yes",
+      images: fields[5] === "yes",
     });
   }
   return rows;
@@ -361,6 +370,35 @@ export function modelsForProvider(
   return rows
     .filter((r) => r.provider === providerId)
     .map((r) => r.model);
+}
+
+/** Every parsed row for one provider, in table order. */
+export function modelRowsForProvider(
+  rows: PiModelRow[] | null | undefined,
+  providerId: string | null | undefined,
+): PiModelRow[] {
+  const id = providerId?.trim();
+  if (!rows || !id) return [];
+  return rows.filter((r) => r.provider === id);
+}
+
+/**
+ * Whether the model behind a provider/model pair accepts image input, from
+ * the parsed table. true or false only when the table lists the pair;
+ * undefined when the table is unavailable or has no row, which keeps the
+ * composer notice on its conservative "may not accept" text.
+ */
+export function modelAcceptsImages(
+  rows: PiModelRow[] | null | undefined,
+  providerId: string | null | undefined,
+  modelId: string | null | undefined,
+): boolean | undefined {
+  const model = modelId?.trim();
+  if (!model) return undefined;
+  const row = modelRowsForProvider(rows, providerId).find(
+    (r) => r.model === model,
+  );
+  return row ? row.images : undefined;
 }
 
 /// ---------------------------------------------------------------------------

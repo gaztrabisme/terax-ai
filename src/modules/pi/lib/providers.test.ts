@@ -6,7 +6,9 @@ import {
   authStatus,
   blankEndpoint,
   expandHomePath,
+  modelAcceptsImages,
   modelsForProvider,
+  modelRowsForProvider,
   parseModelsJsonTmpl,
   parsePiModels,
   parsePiProviders,
@@ -230,25 +232,109 @@ describe("parsePiModels", () => {
   const rows = parsePiModels(fixture("pi-list-models.sample.txt"));
 
   it("parses model rows including models.json.tmpl endpoints", () => {
-    expect(
-      rows.find((r) => r.provider === "bppc"),
-    ).toEqual({ provider: "bppc", model: "qwen3.8-27b", thinking: true });
+    expect(rows.find((r) => r.provider === "bppc")).toEqual({
+      provider: "bppc",
+      model: "qwen3.8-27b",
+      context: "73.7K",
+      maxOut: "32.8K",
+      thinking: true,
+      images: false,
+    });
     expect(rows.find((r) => r.provider === "omlx")?.model).toBe(
       "Qwen3.6-35B-A3B-OptiQ-4bit",
     );
   });
 
-  it("reads the thinking column and skips header and footer", () => {
+  it("reads the thinking, context, max-out and images columns", () => {
     expect(rows.length).toBeGreaterThan(100);
     expect(rows[0]?.provider).not.toBe("provider");
     expect(
       rows.find((r) => r.model === "anthropic.claude-3-5-haiku-20241022-v1:0")
         ?.thinking,
     ).toBe(false);
+    // A row with images yes and one with no, from the saved sample.
+    const vision = rows.find(
+      (r) =>
+        r.provider === "amazon-bedrock" &&
+        r.model === "us.meta.llama4-scout-17b-instruct-v1:0",
+    );
+    expect(vision).toEqual({
+      provider: "amazon-bedrock",
+      model: "us.meta.llama4-scout-17b-instruct-v1:0",
+      context: "3.5M",
+      maxOut: "16.4K",
+      thinking: false,
+      images: true,
+    });
+    expect(rows.find((r) => r.model === "cohere.command-r-plus-v1:0")?.images).toBe(
+      false,
+    );
+  });
+
+  it("skips header and footer lines", () => {
+    const parsed = parsePiModels(
+      [
+        "provider        model               context  max-out  thinking  images",
+        "anthropic       claude-sonnet-4-6   1M       128K     yes       yes",
+        "bppc            qwen3.8-27b         73.7K    32.8K    yes       no",
+        "Showing 7 of 102 providers. Run `pi --list-providers` to see all.",
+      ].join("\n"),
+    );
+    expect(parsed).toEqual([
+      {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        context: "1M",
+        maxOut: "128K",
+        thinking: true,
+        images: true,
+      },
+      {
+        provider: "bppc",
+        model: "qwen3.8-27b",
+        context: "73.7K",
+        maxOut: "32.8K",
+        thinking: true,
+        images: false,
+      },
+    ]);
   });
 
   it("filters model ids per provider in table order", () => {
     expect(modelsForProvider(rows, "bppc")).toEqual(["qwen3.8-27b"]);
+  });
+});
+
+describe("modelAcceptsImages", () => {
+  const rows = parsePiModels(
+    [
+      "provider   model              context  max-out  thinking  images",
+      "anthropic  claude-sonnet-4-6  1M       128K     yes       yes",
+      "bppc       qwen3.8-27b        73.7K    32.8K    yes       no",
+    ].join("\n"),
+  );
+
+  it("answers true only for a listed row with images yes", () => {
+    expect(modelAcceptsImages(rows, "anthropic", "claude-sonnet-4-6")).toBe(
+      true,
+    );
+    expect(modelAcceptsImages(rows, "bppc", "qwen3.8-27b")).toBe(false);
+  });
+
+  it("stays undefined without a table, provider or matching row", () => {
+    expect(modelAcceptsImages(null, "anthropic", "claude-sonnet-4-6")).toBeUndefined();
+    expect(modelAcceptsImages(rows, null, "claude-sonnet-4-6")).toBeUndefined();
+    expect(modelAcceptsImages(rows, "anthropic", "claude-opus-4-5")).toBeUndefined();
+    expect(modelAcceptsImages(rows, "anthropic", "  ")).toBeUndefined();
+  });
+
+  it("returns every parsed row for one provider", () => {
+    expect(modelRowsForProvider(rows, "anthropic").map((r) => r.model)).toEqual([
+      "claude-sonnet-4-6",
+    ]);
+    expect(modelRowsForProvider(rows, "missing")).toEqual([]);
+    expect(modelRowsForProvider(null, "anthropic")).toEqual([]);
+    expect(modelRowsForProvider(rows, undefined)).toEqual([]);
   });
 });
 

@@ -118,7 +118,10 @@ picked folder is where the session runs. In that folder the app creates
 `.pi/board.db` (the database that holds the tickets), `.pi/launcher.log`
 (the log of the launch steps) and, when absent, the four wiki files
 `wiki/index.md`, `wiki/active-work.md`, `wiki/decisions.md` and
-`wiki/log.md`, the project notes pi maintains.
+`wiki/log.md`, the project notes pi maintains. The four launch steps
+(seeding the agent dir copy, rendering models.json, the project-root
+guard, wiki init) run in the harness agent binary (`agent pi prepare`),
+the same one implementation the efficient-pi launcher calls.
 
 A good first prompt names a concrete task and points pi at the notes, for
 example `Read wiki/index.md, then fix the failing test in tests/ and open

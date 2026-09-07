@@ -14,7 +14,14 @@ import {
   type PiImageAttachment,
   type PiSessionState,
 } from "./parse";
-import { piSpawnEnv, resolvePiPrefs, type PiRuntimePrefs } from "./providers";
+import {
+  modelRowsForProvider,
+  parsePiModels,
+  piSpawnEnv,
+  resolvePiPrefs,
+  type PiModelRow,
+  type PiRuntimePrefs,
+} from "./providers";
 import { openPiSession, type PiSessionHandle } from "./rpc-client";
 import { PI_MODULE_PREFS_DEFAULTS } from "./settingsSchema";
 
@@ -43,6 +50,16 @@ type PiTabEntry = {
 
 type PiStore = {
   tabs: Record<number, PiTabEntry>;
+  /** Parsed `pi --list-models` rows per provider id, cached so the composer's
+   *  vision flag reads the table without a probe per render. */
+  modelRows: Record<string, PiModelRow[]>;
+  /**
+   * Fetches and caches the model rows for one provider through the Rust
+   * probe (`pi_list_models`), which runs pi with the stored cloud keys only.
+   * No-op while a fetch is in flight or rows are already cached; a failed
+   * probe leaves no cache entry so a later call retries.
+   */
+  ensureModelRows: (provider: string, cwd?: string) => Promise<void>;
   openSession: (tabId: number, opts: PiOpenOptions) => Promise<void>;
   sendPrompt: (
     tabId: number,
@@ -110,8 +127,40 @@ async function resolvePrefsForCwd(cwd?: string): Promise<PiRuntimePrefs> {
   return resolvePiPrefs(globalPiPrefs(), overrides);
 }
 
+/** Providers with a model-table fetch in flight; dedupes parallel calls. */
+const modelRowsInFlight = new Set<string>();
+
 export const usePiStore = create<PiStore>()((set, get) => ({
   tabs: {},
+  modelRows: {},
+
+  ensureModelRows: async (provider, cwd) => {
+    const id = provider.trim();
+    if (!id || modelRowsInFlight.has(id) || get().modelRows[id]) return;
+    modelRowsInFlight.add(id);
+    try {
+      const resolved = await resolvePrefsForCwd(cwd);
+      const out = await invoke<string>("pi_list_models", {
+        prefs: {
+          launcherDir: resolved.launcherDir,
+          agentDir: resolved.agentDir,
+        },
+        pattern: null,
+      });
+      const rows = modelRowsForProvider(parsePiModels(out), id);
+      // An empty listing (no stored key yet, or a provider with no models)
+      // stays uncached: storing a key in Settings must let the next tab
+      // fetch again instead of reading a frozen empty table.
+      if (rows.length > 0) {
+        set((s) => ({ modelRows: { ...s.modelRows, [id]: rows } }));
+      }
+    } catch {
+      // No table (pi missing, probe failed): leave no cache entry, so the
+      // vision flag stays unknown and a later call retries.
+    } finally {
+      modelRowsInFlight.delete(id);
+    }
+  },
 
   openSession: async (tabId, opts) => {
     // A second open for the same tab replaces the first; the stale in-flight

@@ -187,6 +187,8 @@ function mockCloudCommands(overrides: {
   providers?: boolean;
   /** Body served for $HOME/.omlx/settings.json; absent means unreadable. */
   omlxSettings?: string;
+  /** Stdout served for the pi_list_models probe; absent means it fails. */
+  models?: string;
 }): void {
   vi.mocked(invoke).mockImplementation((cmd: string, ...rest: unknown[]) => {
     if (cmd === "pi_paths") return Promise.resolve(LAB_PATHS);
@@ -214,6 +216,9 @@ function mockCloudCommands(overrides: {
           omlx: false,
         },
       );
+    }
+    if (overrides.models !== undefined && cmd === "pi_list_models") {
+      return Promise.resolve(overrides.models);
     }
     if (overrides.omlxSettings !== undefined && cmd === "fs_read_file") {
       const args = rest[0] as { path?: string } | undefined;
@@ -406,4 +411,82 @@ it("shows the stored oMLX badge and clears through pi_secret_clear", async () =>
       provider: "omlx",
     });
   });
+});
+
+const MODELS_TABLE = [
+  "provider        model                     context  max-out  thinking  images",
+  "anthropic       claude-sonnet-4-6         1M       128K     yes       yes",
+  "anthropic       claude-haiku-4-5          200K     64K      yes       no",
+  "bppc            qwen3.8-27b               73.7K    32.8K    yes       no",
+].join("\n");
+
+const NO_ANTHROPIC_TABLE = [
+  "provider        model                     context  max-out  thinking  images",
+  "bppc            qwen3.8-27b               73.7K    32.8K    yes       no",
+].join("\n");
+
+function modelRow(): HTMLElement {
+  const title = screen.getByText("Model", { exact: true });
+  return title.closest("div")!.parentElement!;
+}
+
+it("lists the chosen provider's models with context and images markers", async () => {
+  usePreferencesStore.setState({ ...FRESH_PI_PREFS, piProvider: "anthropic" });
+  mockCloudCommands({ models: MODELS_TABLE });
+  render(<PiSection />);
+
+  // The probe runs against the runtime agent dir through pi_list_models,
+  // whose env Rust-side carries the stored keys only.
+  await waitFor(() => {
+    expect(invoke).toHaveBeenCalledWith("pi_list_models", {
+      prefs: { piBin: "", agentBin: "", agentDir: "", launcherDir: "" },
+      pattern: null,
+      agentDir: "/lab/efficient-pi/pi-home/agent",
+    });
+  });
+
+  // A credential exists in the table for anthropic, so no key hint shows.
+  expect(
+    screen.queryByText("enter a key to see models"),
+  ).toBeNull();
+
+  const row = modelRow();
+  fireEvent.click(within(row).getByLabelText("Show models"));
+  const options = within(within(row).getByRole("listbox")).getAllByRole(
+    "option",
+  );
+  expect(options).toHaveLength(2);
+  const sonnet = options[0]!;
+  expect(sonnet.textContent).toContain("claude-sonnet-4-6");
+  expect(sonnet.textContent).toContain("1M");
+  expect(sonnet.textContent).toContain("img");
+  const haiku = options[1]!;
+  expect(haiku.textContent).toContain("200K");
+  expect(haiku.textContent).not.toContain("img");
+
+  // Selecting a row commits the model pref through the pref store and
+  // closes the list. (The input keeps its own draft until the pref-change
+  // event reloads preferences, so the value assertion is the store write.)
+  fireEvent.mouseDown(sonnet);
+  await waitFor(() => {
+    expect(storeWrites).toContainEqual(["piModel", "claude-sonnet-4-6"]);
+  });
+  expect(within(row).queryByRole("listbox")).toBeNull();
+});
+
+it("tells the user to enter a key when a cloud provider lists no models", async () => {
+  usePreferencesStore.setState({ ...FRESH_PI_PREFS, piProvider: "anthropic" });
+  // The probe env carries no stored key, so pi hides the anthropic rows.
+  mockCloudCommands({ models: NO_ANTHROPIC_TABLE });
+  render(<PiSection />);
+
+  expect(await screen.findByText("enter a key to see models")).toBeTruthy();
+  // The combobox dropdown explains the empty list the same way.
+  const row = modelRow();
+  fireEvent.click(within(row).getByLabelText("Show models"));
+  const listbox = within(row).getByRole("listbox");
+  expect(within(listbox).getByText("enter a key to see models")).toBeTruthy();
+  // Free text still works with no table rows: the input stays editable.
+  const input = within(row).getByRole("textbox") as HTMLInputElement;
+  expect(input.disabled).toBe(false);
 });

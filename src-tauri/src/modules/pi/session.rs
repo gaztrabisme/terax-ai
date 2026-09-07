@@ -257,18 +257,20 @@ pub fn format_launcher_log(report: &launcher::PrepareReport) -> String {
         .collect()
 }
 
-/// Prepares a direct spawn: runs the four launcher steps, truncates
-/// `<cwd>/.pi/launcher.log` with their outcome, and on any failed step
-/// refuses the spawn with the text the frontend shows as entry.error. The
-/// report's env overlays `base_env`, replacing the frontend's
-/// EFFICIENT_PI_* and PI_CODING_AGENT_DIR values with the prepared ones.
+/// Prepares a direct spawn: runs the four launcher steps in the resolved
+/// harness agent (`agent pi prepare`, forwarded by
+/// launcher::prepare_session), truncates `<cwd>/.pi/launcher.log` with their
+/// outcome, and on any failed step refuses the spawn with the text the
+/// frontend shows as entry.error. The report's env overlays `base_env`,
+/// replacing the frontend's EFFICIENT_PI_* and PI_CODING_AGENT_DIR values
+/// with the prepared ones.
 pub fn prepare_direct(
     input: launcher::PrepareInput,
     agent_bin: Option<&str>,
     base_env: HashMap<String, String>,
 ) -> Result<HashMap<String, String>, String> {
     let cwd = input.cwd.clone();
-    let report = launcher::prepare_session(input);
+    let report = launcher::prepare_session(input, agent_bin.map(Path::new));
     let log_path = cwd.join(".pi").join("launcher.log");
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
@@ -530,8 +532,8 @@ mod tests {
         assert!(!env.contains_key("PI_BOARD_AGENT_BIN"));
     }
 
-    /// Minimal template: seed only needs the dir to exist, render only the
-    /// models.json.tmpl; every other managed entry is optional.
+    /// Minimal template: the fork only names the dir on the command line now
+    /// (the agent reads it); the tmpl file keeps the template realistic.
     fn write_min_template(dir: &Path) -> std::path::PathBuf {
         let tmpl = dir.join("tmpl");
         fs::create_dir_all(&tmpl).expect("mkdir");
@@ -543,6 +545,19 @@ mod tests {
         tmpl
     }
 
+    /// Fake harness agent (the real one runs `pi prepare`): records its argv
+    /// and the OMLX key env into <stubs>/argv.txt, prints `report` on stdout.
+    fn write_fake_agent(stubs: &tempfile::TempDir, report: &str) -> String {
+        let argv_path = stubs.path().join("argv.txt");
+        let script = "#!/bin/sh\n\
+             printf '%s\\n' \"$@\" > {ARGV}\n\
+             printf 'OMLX_API_KEY=%s\\n' \"${OMLX_API_KEY-unset}\" >> {ARGV}\n\
+             cat <<'JSON'\n{REPORT}\nJSON\n"
+            .replace("{ARGV}", &argv_path.to_string_lossy())
+            .replace("{REPORT}", report);
+        write_stub(stubs, "agent", &script)
+    }
+
     #[test]
     fn direct_path_prepares_env_and_log_then_spawns_the_fake_pi() {
         let tmpl_dir = tempfile::tempdir().expect("tempdir");
@@ -550,10 +565,27 @@ mod tests {
         let app_data = tempfile::tempdir().expect("tempdir");
         let project = tempfile::tempdir().expect("tempdir");
         fs::create_dir(project.path().join(".git")).expect("gitdir");
-        // Fake pi and agent: the pi stub prints nothing and exits 0.
+        // Fake pi and agent: the pi stub prints nothing and exits 0; the
+        // agent stub answers `pi prepare --json` with an all-OK report.
         let stubs = tempfile::tempdir().expect("tempdir");
         let fake_pi = write_stub(&stubs, "pi", "#!/bin/sh\nexit 0\n");
-        let fake_agent = write_stub(&stubs, "agent", "#!/bin/sh\nexit 0\n");
+        let agent_dir = app_data.path().join("pi-home").join("agent");
+        let report = serde_json::json!({
+            "steps": [
+                {"name": "seed", "status": "OK",
+                 "detail": format!("agent dir ready at {}", agent_dir.display())},
+                {"name": "render", "status": "OK",
+                 "detail": "models.json unchanged (bppc host 10.0.0.9)"},
+                {"name": "root", "status": "OK",
+                 "detail": format!("project root: {}", project.path().display())},
+                {"name": "wiki", "status": "OK", "detail": "wiki files present"},
+            ],
+            "agentDir": agent_dir.to_string_lossy(),
+            "modelsJson": agent_dir.join("models.json").to_string_lossy(),
+            "env": {"PI_CODING_AGENT_DIR": agent_dir.to_string_lossy()},
+        })
+        .to_string();
+        let fake_agent = write_fake_agent(&stubs, &report);
 
         let env = prepare_direct(
             launcher::PrepareInput {
@@ -587,7 +619,6 @@ mod tests {
              [3/4] root ... OK\n\
              [4/4] wiki ... OK\n"
         );
-        let agent_dir = app_data.path().join("pi-home").join("agent");
         assert_eq!(
             env.get("PI_CODING_AGENT_DIR").map(String::as_str),
             Some(agent_dir.to_str().expect("utf8"))
@@ -623,10 +654,25 @@ mod tests {
             env.get("PI_BOARD_AGENT_BIN").map(String::as_str),
             Some(fake_agent.as_str())
         );
-        assert_eq!(
-            fs::read_to_string(agent_dir.join("models.json")).expect("models.json"),
-            r#"{"baseUrl": "http://10.0.0.9:8080/v1", "apiKey": "sk-omlx"}"#
-        );
+        // The command line the caller builds for the agent (the render itself
+        // is the agent's job now, so its argv carries the endpoints).
+        let argv =
+            fs::read_to_string(stubs.path().join("argv.txt")).expect("agent argv record");
+        for flag in [
+            "--template",
+            "--agent-dir",
+            "--cwd",
+            "--version",
+            "0.7.3",
+            "--bppc-host",
+            "10.0.0.9",
+            "--omlx-key-env",
+            "OMLX_API_KEY",
+            "--json",
+            "OMLX_API_KEY=sk-omlx",
+        ] {
+            assert!(argv.contains(flag), "argv missing {flag}: {argv}");
+        }
 
         // The prepared env feeds the spawn the way pi_open assembles the
         // spec; rpc handshake skipped (the stub exits 0 on its own).
@@ -654,6 +700,21 @@ mod tests {
         let tmpl = write_min_template(tmpl_dir.path());
         let app_data = tempfile::tempdir().expect("tempdir");
         let project = tempfile::tempdir().expect("tempdir");
+        let stubs = tempfile::tempdir().expect("tempdir");
+        let agent_dir = app_data.path().join("pi-home").join("agent");
+        let report = serde_json::json!({
+            "steps": [
+                {"name": "seed", "status": "OK", "detail": "agent dir ready"},
+                {"name": "render", "status": "OK", "detail": "models.json unchanged"},
+                {"name": "root", "status": "FAIL",
+                 "detail": format!("{} has no .git, CLAUDE.md, AGENTS.md, or wiki/; run from inside a project directory or allow any dir", project.path().display())},
+                {"name": "wiki", "status": "OK", "detail": "wiki files present"},
+            ],
+            "agentDir": agent_dir.to_string_lossy(),
+            "env": {"PI_CODING_AGENT_DIR": agent_dir.to_string_lossy()},
+        })
+        .to_string();
+        let fake_agent = write_fake_agent(&stubs, &report);
         let err = prepare_direct(
             launcher::PrepareInput {
                 app_version: "0.7.3".to_string(),
@@ -672,7 +733,7 @@ mod tests {
                 },
                 allow_any_dir: false,
             },
-            None,
+            Some(fake_agent.as_str()),
             HashMap::new(),
         )
         .expect_err("empty project must fail the root guard");
@@ -682,5 +743,39 @@ mod tests {
             fs::read_to_string(project.path().join(".pi").join("launcher.log")).expect("log");
         assert!(log.contains("[3/4] root ... FAIL "));
         assert!(log.contains("[4/4] wiki ... OK"), "later steps still logged");
+    }
+
+    #[test]
+    fn direct_path_without_an_agent_binary_refuses_with_a_prepare_fail_step() {
+        let tmpl_dir = tempfile::tempdir().expect("tempdir");
+        let tmpl = write_min_template(tmpl_dir.path());
+        let app_data = tempfile::tempdir().expect("tempdir");
+        let project = tempfile::tempdir().expect("tempdir");
+        let err = prepare_direct(
+            launcher::PrepareInput {
+                app_version: "0.7.3".to_string(),
+                template_dir: tmpl,
+                app_data_dir: app_data.path().to_path_buf(),
+                cwd: project.path().to_path_buf(),
+                roles: launcher::PrepareRoles {
+                    provider: "bppc".to_string(),
+                    model: "m".to_string(),
+                    thinking: "xhigh".to_string(),
+                    smol: "omlx/s".to_string(),
+                },
+                endpoints: launcher::PrepareEndpoints {
+                    bppc_host: String::new(),
+                    omlx_key: String::new(),
+                },
+                allow_any_dir: false,
+            },
+            None,
+            HashMap::new(),
+        )
+        .expect_err("no agent binary must refuse the spawn");
+        assert!(err.starts_with("prepare failed: "), "got: {err}");
+        let log =
+            fs::read_to_string(project.path().join(".pi").join("launcher.log")).expect("log");
+        assert!(log.contains("[1/1] prepare ... FAIL "), "log: {log}");
     }
 }

@@ -252,6 +252,14 @@ describe("composer image chips", () => {
     expect(container.textContent).toContain("may not accept images");
     expect(container.querySelector("button[aria-label='Attach images']")).toBeTruthy();
   });
+
+  it("shows no images notice when the model accepts images", () => {
+    const { container } = renderComposer(vi.fn(), {
+      modelAcceptsImages: true,
+    });
+    expect(container.textContent).not.toContain("may not accept images");
+    expect(container.querySelector("button[aria-label='Attach images']")).toBeTruthy();
+  });
 });
 
 describe("composer send with images", () => {

@@ -27,7 +27,7 @@ import {
   blankEndpoint,
   cloudProvider,
   expandHomePath,
-  modelsForProvider,
+  modelRowsForProvider,
   parseModelsJsonTmpl,
   parsePiModels,
   parsePiProviders,
@@ -126,6 +126,109 @@ function GroupTitle({ children }: { children: string }) {
     <h2 className="text-[12px] font-medium uppercase tracking-wide text-muted-foreground">
       {children}
     </h2>
+  );
+}
+
+/**
+ * Combobox for the model roles: free text in the input, plus a dropdown of
+ * the parsed `pi --list-models` rows for the chosen provider, each with its
+ * context and images markers. Selecting a row commits immediately; typing
+ * commits on blur or Enter like every pref input. When the table has no rows
+ * (cloud provider without a stored key, or pi unavailable) the dropdown
+ * explains that instead of rendering an empty list.
+ */
+function ModelCombo({
+  value,
+  rows,
+  optionValue,
+  emptyText,
+  onCommit,
+}: {
+  value: string;
+  rows: PiModelRow[];
+  optionValue: (row: PiModelRow) => string;
+  emptyText: string;
+  onCommit: (next: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const commit = () => {
+    if (draft !== value) onCommit(draft);
+  };
+  return (
+    <div
+      className="relative"
+      onBlurCapture={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setOpen(false);
+        }
+      }}
+    >
+      <div className="flex items-center gap-2">
+        <Input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              commit();
+              (e.target as HTMLInputElement).blur();
+            }
+            if (e.key === "Escape") setOpen(false);
+          }}
+          className="h-7 w-56 text-[14px]"
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 shrink-0 text-[12px]"
+          aria-label="Show models"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+        >
+          Choose
+        </Button>
+      </div>
+      {open ? (
+        <div
+          role="listbox"
+          aria-label="Models"
+          className="absolute left-0 right-0 z-20 mt-1 max-h-56 overflow-y-auto rounded-md border border-border/60 bg-popover p-1 shadow-md"
+        >
+          {rows.length === 0 ? (
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">
+              {emptyText}
+            </div>
+          ) : (
+            rows.map((row) => {
+              const next = optionValue(row);
+              return (
+                <button
+                  key={next}
+                  type="button"
+                  role="option"
+                  aria-selected={next === value}
+                  title={next}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    onCommit(next);
+                    setOpen(false);
+                  }}
+                  className="flex w-full items-baseline gap-2 rounded-sm px-2 py-1 text-left text-xs hover:bg-accent/50"
+                >
+                  <span className="truncate font-mono">{row.model}</span>
+                  <span className="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {row.context}
+                    {row.images ? " img" : ""}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -286,20 +389,31 @@ export function PiSection() {
     [],
   );
 
+  // The model table comes from the pi_list_models probe: the resolved pi
+  // binary runs --list-models with the app's stored cloud keys only, so the
+  // ambient shell keys can never silently reshape the catalog. pi hides
+  // credential rows without a key, which is exactly what the "enter a key"
+  // hint below keys off.
   const loadModels = useMemo(
-    () => async (piBin: string, agentDir: string) => {
+    () => async (agentDir: string) => {
       try {
-        const out = await native.runCommand(
-          `PI_CODING_AGENT_DIR="${agentDir}" "${piBin}" --list-models`,
+        const out = await invoke<string>("pi_list_models", {
+          prefs: {
+            piBin: "",
+            agentBin: piAgentBin,
+            agentDir: piAgentDir,
+            launcherDir: piLauncherDir,
+          },
+          pattern: null,
           agentDir,
-          20,
-        );
-        if (out.exit_code === 0) setModels(parsePiModels(out.stdout));
+        });
+        setModels(parsePiModels(out));
       } catch {
         // The model comboboxes degrade to free text when pi is unavailable.
+        setModels(null);
       }
     },
-    [],
+    [piAgentBin, piAgentDir, piLauncherDir],
   );
 
   const loadAuth = useMemo(
@@ -342,18 +456,32 @@ export function PiSection() {
   useEffect(() => {
     if (!fsReady || !piBinPath || !runtimeDirPath) return;
     void loadProviders(piBinPath, runtimeDirPath);
-    void loadModels(piBinPath, runtimeDirPath);
     void loadAuth(runtimeDirPath);
     void loadEndpoints(runtimeDirPath);
-  }, [fsReady, piBinPath, runtimeDirPath, loadProviders, loadModels, loadAuth, loadEndpoints]);
+  }, [fsReady, piBinPath, runtimeDirPath, loadProviders, loadAuth, loadEndpoints]);
 
-  const modelOptions = useMemo(
-    () => (models && piProvider ? modelsForProvider(models, piProvider) : []),
+  // The model table refetches when the stored keys change: saving a key in
+  // the cloud keys group must make the hidden provider rows appear.
+  useEffect(() => {
+    if (!fsReady || !runtimeDirPath) return;
+    void loadModels(runtimeDirPath);
+  }, [fsReady, runtimeDirPath, secretStatus, loadModels]);
+
+  const providerModelRows = useMemo(
+    () => modelRowsForProvider(models, piProvider),
     [models, piProvider],
   );
-  const smolOptions = useMemo(
-    () => (models ? models.map((m) => `${m.provider}/${m.model}`) : []),
-    [models],
+  // A cloud provider with no credential anywhere shows why its list is empty
+  // instead of an unexplained nothing: the probe runs on the stored keys, so
+  // without one pi hides the rows entirely.
+  const providerNeedsKey = useMemo(
+    () =>
+      !!piProvider &&
+      cloudProvider(piProvider) !== null &&
+      providerModelRows.length === 0 &&
+      secretStatus?.[piProvider] !== "set" &&
+      authStatus(authEntries, piProvider) === "none",
+    [piProvider, providerModelRows, secretStatus, authEntries],
   );
 
   const checkPath = async (
@@ -675,17 +803,19 @@ export function PiSection() {
           title="Model"
           description="Free text allowed; suggestions come from pi --list-models."
         >
-          <CommitInput
+          <ModelCombo
             value={piModel}
+            rows={providerModelRows}
+            optionValue={(row) => row.model}
+            emptyText={
+              providerNeedsKey
+                ? "enter a key to see models"
+                : piProvider
+                  ? `no models listed for ${piProvider}`
+                  : "choose a provider to see models"
+            }
             onCommit={setPiModel}
-            listId="pi-model-options"
-            className="w-56"
           />
-          <datalist id="pi-model-options">
-            {modelOptions.map((m) => (
-              <option key={m} value={m} />
-            ))}
-          </datalist>
         </SettingRow>
         <SettingRow
           title="Thinking"
@@ -711,18 +841,25 @@ export function PiSection() {
           title="Subagent model"
           description="provider/model passed to pi as --smol."
         >
-          <CommitInput
+          <ModelCombo
             value={piSmol}
+            rows={providerModelRows}
+            optionValue={(row) => `${piProvider}/${row.model}`}
+            emptyText={
+              providerNeedsKey
+                ? "enter a key to see models"
+                : piProvider
+                  ? `no models listed for ${piProvider}`
+                  : "choose a provider to see models"
+            }
             onCommit={setPiSmol}
-            listId="pi-smol-options"
-            className="w-56"
           />
-          <datalist id="pi-smol-options">
-            {smolOptions.map((m) => (
-              <option key={m} value={m} />
-            ))}
-          </datalist>
         </SettingRow>
+        {providerNeedsKey ? (
+          <p className="-mt-1 px-3 text-[12px] text-muted-foreground">
+            enter a key to see models
+          </p>
+        ) : null}
       </div>
 
       <div id="pi-group-cloud-keys" className="flex flex-col gap-2">

@@ -306,6 +306,7 @@ pub fn run() {
             pi::pi_open,
             pi::pi_home_dir,
             pi::pi_paths,
+            pi::pi_list_models,
             pi::health::pi_health,
             pi::pi_prepare,
             pi::pi_send,
