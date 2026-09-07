@@ -12,6 +12,7 @@ import {
   promptLine,
   resetAsk,
   type PiBlock,
+  type PiErrorBlock,
   type PiSessionState,
 } from "./parse";
 
@@ -197,6 +198,39 @@ describe("q3-rpc-ask: pending ask card", () => {
     expect(blocksOfKind(resetAsk(dismissed, id), "ask")[0].state).toBe(
       "pending",
     );
+  });
+});
+
+describe("q7-rpc-model-error: failed model request", () => {
+  const final = replay("q7-rpc-model-error.jsonl");
+  const errorText = "IO error: Connection refused (os error 61)";
+
+  it("lands in status error with one error card and lastErrorText", () => {
+    expect(final.status).toBe("error");
+    const errors = final.blocks.filter(
+      (b): b is PiErrorBlock => b.kind === "error",
+    );
+    // Four auto-retries repeat the same top-level agent_end error; only the
+    // first becomes a card.
+    expect(errors).toHaveLength(1);
+    expect(errors[0].text).toBe(errorText);
+    expect(final.lastErrorText).toBe(errorText);
+  });
+
+  it("a user message_start clears the latch so the next failure gets its own card", () => {
+    const rearmed = applyEvent(
+      final,
+      '{"type":"message_start","message":{"role":"user","content":"try again"}}',
+    );
+    expect(rearmed.lastErrorText).toBeNull();
+    const retried = applyEvent(
+      rearmed,
+      `{"error":"${errorText}","type":"agent_end"}`,
+    );
+    const errors = retried.blocks.filter(
+      (b): b is PiErrorBlock => b.kind === "error",
+    );
+    expect(errors).toHaveLength(2);
   });
 });
 

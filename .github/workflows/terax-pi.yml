@@ -1,0 +1,131 @@
+name: Terax Pi
+
+# Builds Terax Pi with its pi sidecars for macOS (arm64, x86_64), Linux
+# (x86_64) and Windows (x86_64) on every push of efficient-pi/pi-tab, and
+# publishes draft releases with installers on pi-v* tags. Branch pushes keep
+# the bundles as workflow artifacts instead of creating a release.
+on:
+  push:
+    branches: ["efficient-pi/pi-tab"]
+    tags: ["pi-v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: terax-pi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            triple: aarch64-apple-darwin
+            bundles: app,dmg
+            pi-asset: pi_darwin_arm64
+            agent-asset: agent-aarch64-apple-darwin
+          - os: macos-15-intel
+            triple: x86_64-apple-darwin
+            bundles: app,dmg
+            pi-asset: pi_darwin_amd64
+            agent-asset: agent-x86_64-apple-darwin
+          - os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+            pi-asset: pi_linux_amd64
+            agent-asset: agent-x86_64-unknown-linux-gnu
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+            bundles: nsis
+            pi-asset: pi_windows_amd64.exe
+            agent-asset: agent-x86_64-pc-windows-msvc.exe
+
+    permissions:
+      # Required only for tauri-action to create the draft release on tags.
+      contents: write
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Checkout efficient-pi (pi agent dir template)
+        uses: actions/checkout@v6
+        with:
+          repository: gaztrabisme/efficient-pi
+          ref: master
+          path: ../efficient-pi
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            patchelf
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+          key: ${{ matrix.triple }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Fetch sidecars
+        run: node scripts/fetch-sidecars.mjs --triple ${{ matrix.triple }} --dest sidecars
+
+      - name: Stage sidecars
+        run: >-
+          node scripts/prepare-sidecars.mjs --triple ${{ matrix.triple }}
+          --pi sidecars/${{ matrix.pi-asset }}
+          --agent sidecars/${{ matrix.agent-asset }}
+          --agent-dir ../efficient-pi/pi-home/agent
+
+      # On pi-v* tags this creates a draft release named after the tag and
+      # uploads the bundles to it. On branch pushes the release inputs resolve
+      # to empty and tauri-action only builds; the bundle step below then
+      # uploads the artifacts.
+      - name: Build Terax Pi
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VITE_TERAX_UPDATER: "off"
+          # Ad-hoc codesign identity. Overrides the config's "Terax Pi Dev",
+          # which only exists on the maintainer's keychain. APPLE_SIGNING_IDENTITY
+          # is the environment variable tauri-bundler reads for macOS signing.
+          APPLE_SIGNING_IDENTITY: "-"
+        with:
+          args: --target ${{ matrix.triple }} --bundles ${{ matrix.bundles }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: ${{ github.ref_type == 'tag' && format('Terax Pi {0}', github.ref_name) || '' }}
+          releaseDraft: ${{ github.ref_type == 'tag' }}
+          prerelease: false
+
+      - name: Upload bundle artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: terax-pi-${{ matrix.triple }}
+          path: |
+            src-tauri/target/${{ matrix.triple }}/release/bundle/macos/*.app
+            src-tauri/target/${{ matrix.triple }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.triple }}/release/bundle/deb/*.deb
+            src-tauri/target/${{ matrix.triple }}/release/bundle/appimage/*.AppImage
+            src-tauri/target/${{ matrix.triple }}/release/bundle/nsis/*.exe
+          if-no-files-found: error

@@ -6,6 +6,7 @@ import {
   answerAsk,
   applyEvent,
   initialPiSessionState,
+  messageBlocks,
   type PiBlock,
   type PiSessionState,
 } from "./parse";
@@ -82,7 +83,7 @@ function toolBlock(
 }
 
 describe("q2-rpc-tools: one turn with tools", () => {
-  const turns = groupTurns(replay("q2-rpc-tools.jsonl").blocks);
+  const turns = groupTurns(messageBlocks(replay("q2-rpc-tools.jsonl").blocks));
 
   it("groups the whole session into a single turn keyed by the user message", () => {
     expect(turns).toHaveLength(1);
@@ -122,7 +123,7 @@ describe("streaming turn", () => {
     const mid = replayUpTo("q2-rpc-tools.jsonl", (raw) =>
       raw.includes('"type":"tool_execution_start"'),
     );
-    const [turn] = groupTurns(mid.blocks);
+    const [turn] = groupTurns(messageBlocks(mid.blocks));
     expect(turn.status).toBe("streaming");
     const running = turn.activity.find((a) => a.kind === "tool");
     if (running?.kind !== "tool") throw new Error("no tool entry");
@@ -148,7 +149,7 @@ describe("q3-rpc-ask: turn with ask", () => {
     const atAsk = replayUpTo("q3-rpc-ask.jsonl", (raw) =>
       raw.includes('"type":"ask_request"'),
     );
-    const [turn] = groupTurns(atAsk.blocks);
+    const [turn] = groupTurns(messageBlocks(atAsk.blocks));
     expect(turn.status).toBe("streaming");
     expect(turn.asks).toHaveLength(1);
     expect(turn.asks[0].state).toBe("pending");
@@ -162,7 +163,7 @@ describe("q3-rpc-ask: turn with ask", () => {
       "c8519be0-1f52-4897-a9d7-424680058e56",
       [{ questionId: "0", selected: ["Yes"] }],
     );
-    const [turn] = groupTurns(answered.blocks);
+    const [turn] = groupTurns(messageBlocks(answered.blocks));
     expect(turn.status).toBe("done");
     expect(turn.asks).toHaveLength(1);
     expect(turn.asks[0].state).toBe("answered");
@@ -184,7 +185,7 @@ describe("two turns", () => {
     (s, raw, i) => applyEvent(s, raw, (i + 1) * 1000),
     initialPiSessionState(),
   );
-  const turns = groupTurns(state.blocks);
+  const turns = groupTurns(messageBlocks(state.blocks));
 
   it("splits at the second user message", () => {
     expect(turns).toHaveLength(2);

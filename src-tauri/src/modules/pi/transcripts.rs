@@ -184,9 +184,9 @@ mod tests {
             .append(true)
             .open(&file)
             .expect("open append");
-        write!(f, "{{\"type\":\"agent_start\"}}\n").expect("write 1");
+        writeln!(f, "{{\"type\":\"agent_start\"}}").expect("write 1");
         f.flush().expect("flush 1");
-        write!(f, "{{\"type\":\"turn_start\",\"turnIndex\":0}}\n").expect("write 2");
+        writeln!(f, "{{\"type\":\"turn_start\",\"turnIndex\":0}}").expect("write 2");
         f.flush().expect("flush 2");
         drop(f);
 

@@ -29,6 +29,10 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": ["binaries/pi", "binaries/agent"],
+    "resources": {
+      "resources/pi-home/agent": "pi-home/agent"
+    },
     "targets": "all",
     "copyright": "Copyright 2026 Crynta",
     "license": "Apache-2.0",

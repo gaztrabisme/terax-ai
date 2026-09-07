@@ -43,6 +43,28 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # tauri-build fails unless the pi sidecars are staged under src-tauri.
+      - name: Checkout efficient-pi (pi agent dir template)
+        uses: actions/checkout@v6
+        with:
+          repository: gaztrabisme/efficient-pi
+          ref: master
+          path: ../efficient-pi
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Fetch pi sidecars
+        run: node scripts/fetch-sidecars.mjs --triple x86_64-unknown-linux-gnu --dest sidecars
+
+      - name: Stage pi sidecars
+        run: >-
+          node scripts/prepare-sidecars.mjs --triple x86_64-unknown-linux-gnu
+          --pi sidecars/pi_linux_amd64
+          --agent sidecars/agent-x86_64-unknown-linux-gnu
+          --agent-dir ../efficient-pi/pi-home/agent
+
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
@@ -81,10 +103,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        include:
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+            pi-asset: pi_windows_amd64.exe
+            agent-asset: agent-x86_64-pc-windows-msvc.exe
+          - os: macos-latest
+            triple: aarch64-apple-darwin
+            pi-asset: pi_darwin_arm64
+            agent-asset: agent-aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+
+      # tauri-build fails unless the pi sidecars are staged under src-tauri.
+      - name: Checkout efficient-pi (pi agent dir template)
+        uses: actions/checkout@v6
+        with:
+          repository: gaztrabisme/efficient-pi
+          ref: master
+          path: ../efficient-pi
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Fetch pi sidecars
+        run: node scripts/fetch-sidecars.mjs --triple ${{ matrix.triple }} --dest sidecars
+
+      - name: Stage pi sidecars
+        run: >-
+          node scripts/prepare-sidecars.mjs --triple ${{ matrix.triple }}
+          --pi sidecars/${{ matrix.pi-asset }}
+          --agent sidecars/${{ matrix.agent-asset }}
+          --agent-dir ../efficient-pi/pi-home/agent
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -109,6 +161,28 @@ jobs:
     needs: rust
     steps:
       - uses: actions/checkout@v6
+
+      # tauri-build fails unless the pi sidecars are staged under src-tauri.
+      - name: Checkout efficient-pi (pi agent dir template)
+        uses: actions/checkout@v6
+        with:
+          repository: gaztrabisme/efficient-pi
+          ref: master
+          path: ../efficient-pi
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Fetch pi sidecars
+        run: node scripts/fetch-sidecars.mjs --triple x86_64-unknown-linux-gnu --dest sidecars
+
+      - name: Stage pi sidecars
+        run: >-
+          node scripts/prepare-sidecars.mjs --triple x86_64-unknown-linux-gnu
+          --pi sidecars/pi_linux_amd64
+          --agent sidecars/agent-x86_64-unknown-linux-gnu
+          --agent-dir ../efficient-pi/pi-home/agent
 
       - name: Install Linux build dependencies
         run: |

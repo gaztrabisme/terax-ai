@@ -34,10 +34,12 @@ export const PI_PREF_DEFAULTS: PiRuntimePrefs = {
   boardBin: "$HOME/Documents/Work/Lab/efficient-pi/bin/board",
   agentBin: "$HOME/Documents/Work/harness/target/release/agent",
   agentDir: "",
-  provider: "bppc",
-  model: "qwen3.8-27b",
+  // Roles start empty so a fresh install has no provider until the user picks
+  // one; piSpawnEnv omits empty values so the launcher defaults stay in charge.
+  provider: "",
+  model: "",
   thinking: "xhigh",
-  smol: "omlx/Qwen3.6-35B-A3B-OptiQ-4bit",
+  smol: "",
 };
 
 /** Providers that authenticate through pi's interactive /login flow. */
@@ -132,25 +134,73 @@ export function resolvePiPrefs(
 }
 
 /**
- * Spawn env for one pi session: the four EFFICIENT_PI_* variables the
- * launcher reads, plus PI_CODING_AGENT_DIR only when the user set a custom
- * agent dir (empty leaves the launcher's default in charge). A leading $HOME
- * in agentDir is expanded Rust-side before spawn.
+ * Spawn env for one pi session: the EFFICIENT_PI_* variables the launcher
+ * reads, plus PI_CODING_AGENT_DIR only when the user set a custom agent dir.
+ * Empty values are omitted rather than exported, because an empty export
+ * would override the checkout launcher's own defaults for unset variables.
+ * endpoints carries the models.json.tmpl render overrides (bppc host, oMLX
+ * key); no pref stores either today, so the caller passes what it has and
+ * the launcher falls back for the rest. A leading $HOME in agentDir is
+ * expanded Rust-side before spawn.
  */
 export function piSpawnEnv(
   prefs: PiRuntimePrefs,
   customAgentDir?: string | null,
+  endpoints?: { bppcHost?: string | null; omlxKey?: string | null } | null,
 ): Record<string, string> {
-  const env: Record<string, string> = {
-    EFFICIENT_PI_PROVIDER: prefs.provider,
-    EFFICIENT_PI_MODEL: prefs.model,
-    EFFICIENT_PI_THINKING: prefs.thinking,
-    EFFICIENT_PI_SMOL: prefs.smol,
+  const env: Record<string, string> = {};
+  const set = (key: string, value: string | null | undefined): void => {
+    if (value && value.trim()) env[key] = value;
   };
+  set("EFFICIENT_PI_PROVIDER", prefs.provider);
+  set("EFFICIENT_PI_MODEL", prefs.model);
+  set("EFFICIENT_PI_THINKING", prefs.thinking);
+  set("EFFICIENT_PI_SMOL", prefs.smol);
+  set("EFFICIENT_PI_BPPC_HOST", endpoints?.bppcHost);
+  set("EFFICIENT_PI_OMLX_KEY", endpoints?.omlxKey);
   const dir = customAgentDir?.trim();
   if (dir) env.PI_CODING_AGENT_DIR = dir;
   return env;
 }
+
+/// ---------------------------------------------------------------------------
+/// `pi_paths` response (Rust twin: launch.rs ResolvedPaths)
+/// ---------------------------------------------------------------------------
+
+export type PiPathSource = "pref" | "bundled" | "checkout" | "missing";
+
+export type PiResolvedPath = {
+  /** The winning path, or null when source is "missing". */
+  path: string | null;
+  source: PiPathSource;
+  /** Every candidate in precedence order; the useful bit when path is null. */
+  candidates: string[];
+};
+
+export type PiResolvedPaths = {
+  pi: PiResolvedPath;
+  agent: PiResolvedPath;
+  agentDir: PiResolvedPath;
+};
+
+/// ---------------------------------------------------------------------------
+/// `pi_prepare` response (Rust twin: launcher.rs PrepareReport)
+/// ---------------------------------------------------------------------------
+
+export type PiPrepareStep = {
+  /** Launcher step in fixed order: seed, render, root, wiki. */
+  name: string;
+  ok: boolean;
+  detail: string;
+};
+
+export type PiPrepareReport = {
+  steps: PiPrepareStep[];
+  /** Writable per-user agent dir the session must spawn with. */
+  agentDir: string;
+  /** PI_CODING_AGENT_DIR plus the four EFFICIENT_PI_* values. */
+  env: Record<string, string>;
+};
 
 /// ---------------------------------------------------------------------------
 /// `$HOME` expansion (frontend twin of launch.rs expand_home)

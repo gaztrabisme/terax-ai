@@ -206,6 +206,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             // Config windows (incl. "main") are created just above, so the
             // window-state plugin has already restored the saved geometry.
@@ -257,6 +258,9 @@ pub fn run() {
             pty::pty_has_foreground_process,
             pi::pi_open,
             pi::pi_home_dir,
+            pi::pi_paths,
+            pi::health::pi_health,
+            pi::pi_prepare,
             pi::pi_send,
             pi::pi_kill,
             pi::pi_watch_transcripts,

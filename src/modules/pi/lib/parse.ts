@@ -60,14 +60,39 @@ export type PiAskBlock = {
   at: number;
 };
 
+export type PiErrorBlock = {
+  kind: "error";
+  /** The error text pi reported on the wire. */
+  text: string;
+  /** Creation epoch ms; applyEvent pins it from its optional `now` argument. */
+  at: number;
+};
+
 export type PiBlock = PiMessageBlock | PiToolBlock | PiAskBlock;
 
-export type PiStatus = "idle" | "thinking" | "tool" | "awaiting-ask" | "done";
+/** The transcript feed: turn-model blocks plus error cards. Errors live
+ *  outside PiBlock so the turn model (turns.ts) keeps its exhaustive
+ *  message/tool/ask shape; renderers attach error cards to the turn that
+ *  failed instead. */
+export type PiFeedItem = PiBlock | PiErrorBlock;
+
+/** Drops error cards so the turn model only sees message/tool/ask blocks. */
+export function messageBlocks(feed: PiFeedItem[]): PiBlock[] {
+  return feed.filter((item): item is PiBlock => item.kind !== "error");
+}
+
+export type PiStatus =
+  | "idle"
+  | "thinking"
+  | "tool"
+  | "awaiting-ask"
+  | "done"
+  | "error";
 
 export type PiSessionState = {
   status: PiStatus;
   sessionId: string | null;
-  blocks: PiBlock[];
+  blocks: PiFeedItem[];
   /** Assistant message currently streaming; message_update replaces its parts. */
   openMessageId: string | null;
   toolPos: Record<string, number>;
@@ -79,6 +104,8 @@ export type PiSessionState = {
   lastMs: number | null;
   /** Sum of turn_end usage.totalTokens across turns. */
   turnTokens: number;
+  /** Text of the error already on the feed; agent_end retries repeat it. */
+  lastErrorText: string | null;
 };
 
 export function initialPiSessionState(): PiSessionState {
@@ -94,6 +121,7 @@ export function initialPiSessionState(): PiSessionState {
     startedMs: null,
     lastMs: null,
     turnTokens: 0,
+    lastErrorText: null,
   };
 }
 
@@ -218,8 +246,25 @@ export function applyEvent(
         turnTokens: state.turnTokens + usage.totalTokens,
       };
     }
-    case "agent_end":
-      return { ...state, status: "done" };
+    case "agent_end": {
+      const error = asString(event.error);
+      if (error === null) {
+        return { ...state, status: "done", lastErrorText: null };
+      }
+      // Failed model request: pi ends every auto-retry attempt with the same
+      // top-level error string, so only the first occurrence becomes a
+      // transcript block; a later user message re-arms the card.
+      const deduped = state.lastErrorText === error;
+      return {
+        ...state,
+        status: "error",
+        lastErrorText: error,
+        blocks: deduped
+          ? state.blocks
+          : [...state.blocks, { kind: "error", text: error, at: now }],
+        seq: deduped ? state.seq : state.seq + 1,
+      };
+    }
     case "tool_execution_start":
       return applyToolStart(state, event, now);
     case "tool_execution_update":
@@ -258,6 +303,8 @@ function applyMessageStart(
     ...state,
     seq: state.seq + 1,
     status: role === "assistant" ? "thinking" : state.status,
+    // A new user message opens a fresh turn: its failure gets its own card.
+    ...(role === "user" && { lastErrorText: null }),
     blocks: [...state.blocks, block],
     openMessageId: role === "assistant" ? block.id : state.openMessageId,
   };

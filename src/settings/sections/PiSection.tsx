@@ -47,6 +47,7 @@ import { emit } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
 import { SettingRow } from "../components/SettingRow";
+import { PiFirstRun } from "./PiFirstRun";
 
 type StatResult = { kind: "file" | "dir" | "symlink" };
 
@@ -311,6 +312,12 @@ export function PiSection() {
     }));
   };
 
+  const focusGroup = (id: string) => {
+    document
+      .getElementById(id)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   const filteredProviders = useMemo(() => {
     if (!providers) return [];
     const q = search.trim().toLowerCase();
@@ -361,7 +368,18 @@ export function PiSection() {
         description="Roles, providers and endpoints for the pi agent sessions."
       />
 
-      <div className="flex flex-col gap-2">
+      <PiFirstRun
+        onFocusPaths={() => focusGroup("pi-group-paths")}
+        onFocusRoles={() => focusGroup("pi-group-roles")}
+        onFocusEndpoints={() => focusGroup("pi-group-endpoints")}
+        onSignIn={(provider) => void signIn(provider)}
+        onAddKey={(provider) => {
+          setKeyDraft("");
+          setKeyInputFor(provider);
+        }}
+      />
+
+      <div id="pi-group-paths" className="flex flex-col gap-2">
         <GroupTitle>Paths</GroupTitle>
         <SettingRow
           title="Launcher dir"
@@ -442,20 +460,23 @@ export function PiSection() {
         <PathNote note={pathNote("agentDir")} />
       </div>
 
-      <div className="flex flex-col gap-2">
+      <div id="pi-group-roles" className="flex flex-col gap-2">
         <GroupTitle>Roles</GroupTitle>
         <SettingRow
           title="Orchestrator provider"
           description="Passed to pi as --provider on every session."
         >
           <Select
-            value={piProvider}
+            value={piProvider || undefined}
             onValueChange={(v) => void setPiProvider(v)}
           >
             <SelectTrigger className="h-7 w-56 text-[14px]">
-              <SelectValue />
+              <SelectValue placeholder="Choose a provider" />
             </SelectTrigger>
             <SelectContent>
+              {/* The fallback list runs before providers load, so it needs the
+                  same empty-id guard or a fresh install mounts SelectItem
+                  value="" and Radix throws, unmounting the settings root. */}
               {(providers
                 ? [
                     ...new Set([
@@ -463,13 +484,15 @@ export function PiSection() {
                       ...endpoints?.map((e) => e.id) ?? [],
                       ...providers.map((p) => p.id),
                     ]),
-                  ].filter((id) => id.length > 0)
+                  ]
                 : [piProvider]
-              ).map((id) => (
-                <SelectItem key={id} value={id} className="text-[14px]">
-                  {id}
-                </SelectItem>
-              ))}
+              )
+                .filter((id) => id.length > 0)
+                .map((id) => (
+                  <SelectItem key={id} value={id} className="text-[14px]">
+                    {id}
+                  </SelectItem>
+                ))}
             </SelectContent>
           </Select>
         </SettingRow>
@@ -586,7 +609,7 @@ export function PiSection() {
         </p>
       </div>
 
-      <div className="flex flex-col gap-2">
+      <div id="pi-group-endpoints" className="flex flex-col gap-2">
         <GroupTitle>Endpoints</GroupTitle>
         <p className="text-[12px] text-muted-foreground">
           Custom OpenAI-compatible providers in {agentDirPath}/models.json.tmpl.

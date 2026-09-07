@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { cn } from "@/lib/utils";
 import {
+  AlertCircleIcon,
   ArrowDown01Icon,
   BotIcon,
   CheckmarkCircle01Icon,
@@ -18,11 +19,13 @@ import {
   MessageResponse,
   Shimmer,
 } from "@/components/chat";
-import { useCallback, useMemo, useState } from "react";
-import type {
-  PiAskAnswer,
-  PiBlock,
-  PiToolBlock,
+import { Fragment, useCallback, useMemo, useState } from "react";
+import {
+  messageBlocks,
+  type PiAskAnswer,
+  type PiErrorBlock,
+  type PiFeedItem,
+  type PiToolBlock,
 } from "@/modules/pi/lib/parse";
 import {
   boardOp,
@@ -38,7 +41,7 @@ import { KeystoneCard } from "./blocks/KeystoneCard";
 import { ToolStep } from "./blocks/ToolRow";
 
 type Props = {
-  blocks: PiBlock[];
+  blocks: PiFeedItem[];
   onAnswer: (requestId: string, answers: PiAskAnswer[]) => void;
   onDismiss: (requestId: string) => void;
   emptyHint?: string;
@@ -106,6 +109,43 @@ function streamingLabel(turn: Turn): string {
     return `Running ${block.toolName}`;
   }
   return "Thinking";
+}
+
+/**
+ * Groups error blocks by the turn they belong to: the turn index mirrors
+ * groupBlocks (a user message opens the next group, leading blocks share
+ * group 0), so the card renders attached to the turn that failed.
+ */
+function errorsByTurn(blocks: PiFeedItem[]): Map<number, PiErrorBlock[]> {
+  const map = new Map<number, PiErrorBlock[]>();
+  let userCount = 0;
+  for (const block of blocks) {
+    if (block.kind === "error") {
+      const turn = userCount > 0 ? userCount - 1 : 0;
+      const list = map.get(turn);
+      if (list) list.push(block);
+      else map.set(turn, [block]);
+      continue;
+    }
+    if (block.kind === "message" && block.role === "user") userCount += 1;
+  }
+  return map;
+}
+
+function ErrorCard({ block }: { block: PiErrorBlock }) {
+  return (
+    <div className="flex max-w-[72ch] items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+      <HugeiconsIcon
+        icon={AlertCircleIcon}
+        size={14}
+        strokeWidth={1.75}
+        className="mt-0.5 shrink-0"
+      />
+      <span className="select-text whitespace-pre-wrap wrap-break-word">
+        {block.text}
+      </span>
+    </div>
+  );
 }
 
 function workedLabel(turn: Turn): string {
@@ -390,14 +430,17 @@ export function Transcript({
   cwd,
   onOpenChild,
 }: Props) {
-  const turns = useMemo(() => groupTurns(blocks), [blocks]);
+  // Error blocks render as their own cards attached to the turn that failed,
+  // so the turn model never sees them.
+  const turns = useMemo(() => groupTurns(messageBlocks(blocks)), [blocks]);
+  const errors = useMemo(() => errorsByTurn(blocks), [blocks]);
   // Fold state is remembered per turn for as long as this tab lives.
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({});
   const toggle = useCallback((key: string) => {
     setOpenTurns((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
 
-  if (turns.length === 0) {
+  if (turns.length === 0 && errors.size === 0) {
     return (
       <div className="min-h-0 flex-1 select-text overflow-y-auto">
         <ConversationEmptyState
@@ -412,17 +455,26 @@ export function Transcript({
     <div className="relative flex min-h-0 flex-1 flex-col select-text">
       <Conversation className="min-h-0 flex-1">
         <ConversationContent className="gap-6 p-4">
-          {turns.map((turn) => (
-            <TurnView
-              key={turn.key}
-              turn={turn}
-              open={openTurns[turn.key] ?? false}
-              onToggle={() => toggle(turn.key)}
-              cwd={cwd}
-              onOpenChild={onOpenChild}
-              onAnswer={onAnswer}
-              onDismiss={onDismiss}
-            />
+          {turns.map((turn, i) => (
+            <Fragment key={turn.key}>
+              <TurnView
+                key={turn.key}
+                turn={turn}
+                open={openTurns[turn.key] ?? false}
+                onToggle={() => toggle(turn.key)}
+                cwd={cwd}
+                onOpenChild={onOpenChild}
+                onAnswer={onAnswer}
+                onDismiss={onDismiss}
+              />
+              {(errors.get(i) ?? []).map((block, j) => (
+                <ErrorCard key={`error-${i}-${j}`} block={block} />
+              ))}
+            </Fragment>
+          ))}
+          {/* Errors with no turn under them (failed before any message). */}
+          {(errors.get(turns.length) ?? []).map((block, j) => (
+            <ErrorCard key={`error-bare-${j}`} block={block} />
           ))}
         </ConversationContent>
         <ConversationScrollButton />

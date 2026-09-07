@@ -1,12 +1,17 @@
+pub mod health;
 mod launch;
+mod launcher;
 mod session;
 pub mod transcripts;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use tauri::ipc::Channel;
+use tauri::Manager;
 
 use crate::modules::workspace::{
     authorize_spawn_cwd, authorize_user_spawn_cwd, WorkspaceEnv, WorkspaceRegistry,
@@ -16,6 +21,12 @@ use session::{PiSession, SpawnSpec};
 pub struct PiTranscriptState {
     watchers: RwLock<HashMap<u32, Arc<transcripts::WatchHandle>>>,
     next_watch_id: AtomicU32,
+    /// Project cwd -> agent dir of the session pi_open spawns for it. pi
+    /// 0.3.0 writes child transcripts under <agent dir>/agent-hub/<pid>
+    /// (vendor pi_agent_rust src/agent_hub.rs dir(), src/config.rs
+    /// global_dir_from_env), so the watcher must arm on the spawn's agent
+    /// dir rather than the cwd the frontend passes.
+    agent_dirs: RwLock<HashMap<String, PathBuf>>,
 }
 
 impl Default for PiTranscriptState {
@@ -23,6 +34,7 @@ impl Default for PiTranscriptState {
         Self {
             watchers: RwLock::new(HashMap::new()),
             next_watch_id: AtomicU32::new(1),
+            agent_dirs: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -46,7 +58,9 @@ impl Default for PiState {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn pi_open(
+    app: tauri::AppHandle,
     state: tauri::State<'_, PiState>,
+    hub: tauri::State<'_, PiTranscriptState>,
     registry: tauri::State<'_, WorkspaceRegistry>,
     cwd: Option<String>,
     launcher_dir: Option<String>,
@@ -64,23 +78,139 @@ pub async fn pi_open(
             e
         })?;
     let env = launch::expand_env_homes(&env.unwrap_or_default());
+    // Roles ride in the spawn env today (EFFICIENT_PI_* via piSpawnEnv); the
+    // direct path renders them through prepare_session, whose report env
+    // replaces these values at spawn. The oMLX key falls back to the bash
+    // launcher's own default (~/.omlx/settings.json) so a checkout-less
+    // machine renders models.json; the bppc host keeps render_step's LAN
+    // fallback. EFFICIENT_PI_OMLX_KEY / EFFICIENT_PI_BPPC_HOST override when
+    // a caller sets them.
+    let env_var = |key: &str| env.get(key).cloned().unwrap_or_default();
+    let mut omlx_key = env_var("EFFICIENT_PI_OMLX_KEY");
+    if omlx_key.trim().is_empty() {
+        omlx_key = launcher::omlx_key_default(launch::home_dir().as_deref()).unwrap_or_default();
+    }
+    let roles = launcher::PrepareRoles {
+        provider: env_var("EFFICIENT_PI_PROVIDER"),
+        model: env_var("EFFICIENT_PI_MODEL"),
+        thinking: env_var("EFFICIENT_PI_THINKING"),
+        smol: env_var("EFFICIENT_PI_SMOL"),
+    };
+    let endpoints = launcher::PrepareEndpoints {
+        bppc_host: env_var("EFFICIENT_PI_BPPC_HOST"),
+        omlx_key,
+    };
+    // Dirs the direct branch needs: the resource dir holds the agent-dir
+    // template, the app data dir the writable copy, and the resolved agent
+    // binary feeds PI_BOARD_AGENT_BIN on both paths.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let bundled = launch::BundledPaths {
+        exe_dir,
+        resource_dir: app.path().resource_dir().unwrap_or_default(),
+    };
+    let app_data_dir = app.path().app_data_dir().unwrap_or_default();
+    let app_version = app.package_info().version.to_string();
+    let home = launch::home_dir();
+    let prefs = launch::PiPrefs {
+        launcher_dir: launcher_dir.clone(),
+        ..launch::PiPrefs::default()
+    };
+    let board_agent_bin =
+        launch::resolve_paths(&prefs, &bundled, home.as_deref())
+            .agent
+            .path;
+    // Record the agent dir this cwd's session will spawn with before the
+    // spawn runs, so a transcript watch armed in parallel resolves pi 0.3.0's
+    // real hub root instead of watching the project. Per spawn shape: the
+    // launcher pins PI_CODING_AGENT_DIR to <launcher root>/pi-home/agent, the
+    // direct prepare pins it to the app's writable agent dir, and a program
+    // override passes the caller env through (pi's own ~/.pi/agent default
+    // when unset).
+    if let Some(dir) = canonical.as_deref() {
+        let agent_dir = match program.as_deref().map(str::trim) {
+            Some(p) if !p.is_empty() => env
+                .get("PI_CODING_AGENT_DIR")
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| launch::default_global_dir(home.as_deref())),
+            _ => {
+                let root = launch::launcher_root(&prefs, home.as_deref(), dir);
+                if root.join("bin").join("efficient-pi").is_file() {
+                    root.join("pi-home").join("agent")
+                } else {
+                    launcher::user_agent_dir(&app_data_dir)
+                }
+            }
+        };
+        hub.agent_dirs
+            .write()
+            .expect("pi hub agent dirs poisoned")
+            .insert(dir.to_string_lossy().into_owned(), agent_dir);
+    }
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let session = tauri::async_runtime::spawn_blocking(move || {
+        let extra_args = args.unwrap_or_default();
         let spec = match program.as_deref().map(str::trim) {
             Some(p) if !p.is_empty() => SpawnSpec {
                 program: p.to_string(),
-                args: args.unwrap_or_default(),
+                args: extra_args,
                 cwd: canonical.as_ref().map(|p| p.to_string_lossy().into_owned()),
                 env,
             },
-            // Empty program: resolve bin/efficient-pi, then bin/pi, under
-            // launcherDir (workspace-local bin/ when launcherDir is empty).
-            _ => launch::resolve_spec(
-                canonical.as_deref(),
-                launcher_dir.as_deref(),
-                &args.unwrap_or_default(),
-                env,
-            )?,
+            // Empty program: the checkout launcher when it exists (its eight
+            // steps run in the child), else a resolved pi binary spawns
+            // directly after Rust-side session preparation.
+            _ => {
+                let dir = canonical.as_deref().ok_or_else(|| {
+                    "pi needs a workspace cwd as its project root".to_string()
+                })?;
+                match launch::spawn_plan(&prefs, &bundled, home.as_deref(), dir, &roles)? {
+                    launch::SpawnPlan::CheckoutLauncher { program, mut args } => {
+                        log::info!("pi_open plan: checkout launcher {}", program);
+                        args.extend_from_slice(&extra_args);
+                        let mut spawn_env = env;
+                        session::add_board_env(
+                            &mut spawn_env,
+                            dir,
+                            board_agent_bin.as_deref(),
+                        );
+                        SpawnSpec {
+                            program,
+                            args,
+                            cwd: Some(dir.to_string_lossy().into_owned()),
+                            env: spawn_env,
+                        }
+                    }
+                    launch::SpawnPlan::Direct {
+                        program,
+                        mut args,
+                        source,
+                    } => {
+                        log::info!("pi_open plan: direct pi={program} (source {source:?})");
+                        args.extend_from_slice(&extra_args);
+                        let input = launcher::PrepareInput {
+                            app_version,
+                            template_dir: bundled.resource_dir.join("pi-home").join("agent"),
+                            app_data_dir,
+                            cwd: dir.to_path_buf(),
+                            roles,
+                            endpoints,
+                            allow_any_dir: false,
+                        };
+                        let spawn_env =
+                            session::prepare_direct(input, board_agent_bin.as_deref(), env)?;
+                        SpawnSpec {
+                            program,
+                            args,
+                            cwd: Some(dir.to_string_lossy().into_owned()),
+                            env: spawn_env,
+                        }
+                    }
+                }
+            }
         };
         session::spawn_session(
             spec,
@@ -115,6 +245,75 @@ pub async fn pi_open(
 #[tauri::command]
 pub fn pi_home_dir() -> Option<String> {
     launch::home_dir()
+}
+
+/// Where pi, the harness agent, and the agent dir actually live, each tagged
+/// with its source (pref > bundled > checkout > missing), so the Pi settings
+/// tab can show what a launch would use. Read-only diagnostics.
+#[tauri::command]
+pub fn pi_paths(app: tauri::AppHandle, prefs: launch::PiPrefs) -> launch::ResolvedPaths {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let resource_dir = app.path().resource_dir().unwrap_or_default();
+    let bundled = launch::BundledPaths {
+        exe_dir,
+        resource_dir,
+    };
+    let resolved = launch::resolve_paths(&prefs, &bundled, launch::home_dir().as_deref());
+    log::info!(
+        "pi_paths: pi={:?} ({:?}) agent={:?} ({:?}) agent_dir={:?} ({:?})",
+        resolved.pi.path,
+        resolved.pi.source,
+        resolved.agent.path,
+        resolved.agent.source,
+        resolved.agent_dir.path,
+        resolved.agent_dir.source,
+    );
+    resolved
+}
+
+/// Prepares a pi session without bash: seeds the user agent dir from the
+/// bundled template, renders models.json, runs the project-root guard and
+/// wiki-init, and returns the per-step report plus the spawn env. The dirs
+/// come from the AppHandle; the cwd is workspace-authorized like every spawn.
+#[tauri::command]
+pub fn pi_prepare(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+    input: launcher::PrepareOptions,
+    cwd: String,
+) -> Result<launcher::PrepareReport, String> {
+    let workspace = WorkspaceEnv::default();
+    let canonical = authorize_user_spawn_cwd(&registry, Some(&cwd), &workspace)?;
+    let cwd = canonical.ok_or_else(|| "pi_prepare needs a cwd".to_string())?;
+    let template_dir = app
+        .path()
+        .resource_dir()
+        .map(|dir| dir.join("pi-home").join("agent"))
+        .unwrap_or_default();
+    let app_data_dir = app.path().app_data_dir().unwrap_or_default();
+    let input = launcher::PrepareInput {
+        app_version: app.package_info().version.to_string(),
+        template_dir,
+        app_data_dir,
+        cwd,
+        roles: input.roles,
+        endpoints: input.endpoints,
+        allow_any_dir: input.allow_any_dir,
+    };
+    let report = launcher::prepare_session(input);
+    log::info!(
+        "pi_prepare: {}",
+        report
+            .steps
+            .iter()
+            .map(|s| format!("{}={}", s.name, if s.ok { "ok" } else { "fail" }))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    Ok(report)
 }
 
 #[tauri::command]
@@ -158,11 +357,30 @@ pub fn pi_watch_transcripts(
     let workspace_env = WorkspaceEnv::from_option(workspace);
     let canonical =
         authorize_spawn_cwd(&registry, Some(&agent_dir), &workspace_env)?;
+    let canonical = canonical.ok_or_else(|| "agent dir required".to_string())?;
+    // Follow the spawn's agent dir: pi writes child transcripts under
+    // <agent dir>/agent-hub/<pid>, never under the project cwd the frontend
+    // passes here. pi_open records that dir at open time; a watch armed in
+    // the same mount can race the record, so poll briefly before falling
+    // back to the passed path (still right for an explicit agent dir).
+    let mut root = None;
+    for _ in 0..20 {
+        let hit = state
+            .agent_dirs
+            .read()
+            .expect("pi hub agent dirs poisoned")
+            .get(&canonical.to_string_lossy().into_owned())
+            .cloned();
+        if hit.is_some() {
+            root = hit;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let root = root.unwrap_or_else(|| canonical.clone());
     let id = state.next_watch_id.fetch_add(1, Ordering::Relaxed);
     let handle = Arc::new(transcripts::watch_with(
-        canonical
-            .as_deref()
-            .ok_or_else(|| "agent dir required".to_string())?,
+        &root,
         move |line| {
             if let Err(e) = on_line.send(line) {
                 log::debug!("pi transcript send failed (channel closed): {e}");
@@ -170,7 +388,7 @@ pub fn pi_watch_transcripts(
         },
     )?);
     state.watchers.write().unwrap().insert(id, handle);
-    log::info!("pi transcripts watched id={id}");
+    log::info!("pi transcripts watched id={id} root={}", root.display());
     Ok(id)
 }
 

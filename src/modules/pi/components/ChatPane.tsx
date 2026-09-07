@@ -27,6 +27,8 @@ function statusLabel(
       return "waiting for answer";
     case "done":
       return "done";
+    case "error":
+      return "error";
     default:
       return status;
   }
@@ -55,7 +57,8 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
   const showStop =
     !exited &&
     (status === "thinking" || status === "tool" || status === "awaiting-ask");
-  const showNew = exited || status === "done" || status === "idle";
+  const showNew =
+    exited || status === "done" || status === "idle" || status === "error";
 
   // Best-known model for the composer chip: the store's resolved roles win;
   // the last assistant message is the fallback while roles.model is empty.
@@ -98,7 +101,7 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
         <span
           className={cn(
             "size-1.5 shrink-0 rounded-full",
-            exited
+            exited || status === "error"
               ? "bg-destructive"
               : status === "awaiting-ask"
                 ? "bg-yellow-500"

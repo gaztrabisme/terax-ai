@@ -38,6 +38,8 @@ type Props = {
   onNewPrivate: () => void;
   onNewEditor: () => void;
   onNewPi: () => void;
+  /** New pi session on a folder chosen via the system picker. */
+  onNewPiSession: () => void;
   onNewGitGraph: () => void;
   onClose: (id: number) => void;
   /** Promote a preview (transient) tab to persistent. */
@@ -63,6 +65,7 @@ export function Header({
   onNewPrivate,
   onNewEditor,
   onNewPi,
+  onNewPiSession,
   onNewGitGraph,
   onClose,
   onPin,
@@ -191,6 +194,7 @@ export function Header({
           onNewPrivate={onNewPrivate}
           onNewEditor={onNewEditor}
           onNewPi={onNewPi}
+          onNewPiSession={onNewPiSession}
           onNewGitGraph={onNewGitGraph}
           onClose={onClose}
           onPin={onPin}

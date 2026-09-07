@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Staged sidecars (pnpm prepare-sidecars), never committed
+src-tauri/binaries/
+src-tauri/resources/pi-home/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -30,6 +30,17 @@ describe("resolvePiPrefs", () => {
     expect(resolvePiPrefs({}, null)).toEqual(PI_PREF_DEFAULTS);
   });
 
+  it("returns the empty role defaults for an empty store", () => {
+    const resolved = resolvePiPrefs(
+      { provider: "", model: "", smol: "", thinking: "xhigh" },
+      null,
+    );
+    expect(resolved.provider).toBe("");
+    expect(resolved.model).toBe("");
+    expect(resolved.smol).toBe("");
+    expect(resolved.thinking).toBe("xhigh");
+  });
+
   it("applies global prefs over defaults", () => {
     const resolved = resolvePiPrefs(
       { provider: "openai", model: "gpt-4o", piSmol: undefined } as never,
@@ -88,13 +99,47 @@ describe("resolvePiPrefs", () => {
 });
 
 describe("piSpawnEnv", () => {
-  it("maps the four EFFICIENT_PI_* variables from resolved prefs", () => {
+  it("omits EFFICIENT_PI_PROVIDER/MODEL/SMOL when the resolved prefs are empty", () => {
     const resolved = resolvePiPrefs({}, null);
+    expect(resolved.provider).toBe("");
+    const env = piSpawnEnv(resolved, null);
+    expect(env.EFFICIENT_PI_PROVIDER).toBeUndefined();
+    expect(env.EFFICIENT_PI_MODEL).toBeUndefined();
+    expect(env.EFFICIENT_PI_SMOL).toBeUndefined();
+    // Thinking keeps its non-empty default, so it always exports.
+    expect(env.EFFICIENT_PI_THINKING).toBe(PI_PREF_DEFAULTS.thinking);
+  });
+
+  it("exports the EFFICIENT_PI_* role values when they are set", () => {
+    const resolved = resolvePiPrefs(
+      { provider: "bppc", model: "qwen3.8-27b", smol: "omlx/m" },
+      null,
+    );
     expect(piSpawnEnv(resolved, null)).toEqual({
       EFFICIENT_PI_PROVIDER: "bppc",
       EFFICIENT_PI_MODEL: "qwen3.8-27b",
       EFFICIENT_PI_THINKING: "xhigh",
-      EFFICIENT_PI_SMOL: "omlx/Qwen3.6-35B-A3B-OptiQ-4bit",
+      EFFICIENT_PI_SMOL: "omlx/m",
+    });
+  });
+
+  it("exports the endpoint overrides only when they are set", () => {
+    const resolved = resolvePiPrefs({}, null);
+    const base = piSpawnEnv(resolved, null);
+    // Blank or unset members are omitted so the launcher defaults survive.
+    expect(piSpawnEnv(resolved, null, { bppcHost: "  ", omlxKey: null })).toEqual(
+      base,
+    );
+    expect(piSpawnEnv(resolved, null, {}).EFFICIENT_PI_BPPC_HOST).toBeUndefined();
+    expect(
+      piSpawnEnv(resolved, null, { bppcHost: "10.0.0.9" }).EFFICIENT_PI_OMLX_KEY,
+    ).toBeUndefined();
+    expect(
+      piSpawnEnv(resolved, null, { bppcHost: "10.0.0.9", omlxKey: "sk-omlx" }),
+    ).toEqual({
+      EFFICIENT_PI_THINKING: PI_PREF_DEFAULTS.thinking,
+      EFFICIENT_PI_BPPC_HOST: "10.0.0.9",
+      EFFICIENT_PI_OMLX_KEY: "sk-omlx",
     });
   });
 

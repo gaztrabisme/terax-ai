@@ -57,6 +57,7 @@ import {
   PiStack,
   RunGraphTabStack,
 } from "@/modules/pi";
+import { pickPiSessionFolder } from "@/modules/pi/lib/newSession";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setThemeId as persistThemeId } from "@/modules/settings/store";
@@ -677,6 +678,21 @@ export default function App() {
     newPiTab(inheritedCwdForNewTab());
   }, [newPiTab, inheritedCwdForNewTab]);
 
+  const openNewPiSession = useCallback(async () => {
+    // Seed the picker from the active tab's cwd; only a picked folder opens a
+    // session (the same newPiTab the --pi launch path uses). The pick also
+    // authorizes the folder so the board's shell commands can run under it.
+    const picked = await pickPiSessionFolder(
+      activeTab && "cwd" in activeTab ? activeTab.cwd : inheritedCwdForNewTab(),
+    );
+    if (picked.status === "cancelled") return;
+    if (picked.status === "unauthorized") {
+      toast(picked.error);
+      return;
+    }
+    newPiTab(picked.dir);
+  }, [activeTab, inheritedCwdForNewTab, newPiTab]);
+
   const openChildTranscript = useCallback(
     (path: string) => {
       openAgentTranscriptTab(path);
@@ -884,6 +900,7 @@ export default function App() {
       "tab.new": openNewTab,
       "tab.newPrivate": openNewPrivateTab,
       "tab.newEditor": () => setNewEditorOpen(true),
+      "pi.new": () => void openNewPiSession(),
       "tab.close": handleCloseTabOrPane,
       "tab.next": () => cycleTab(1),
       "tab.prev": () => cycleTab(-1),
@@ -912,6 +929,7 @@ export default function App() {
       activeId,
       cycleTab,
       handleCloseTabOrPane,
+      openNewPiSession,
       openNewTab,
       openNewPrivateTab,
       selectByIndex,
@@ -1170,6 +1188,7 @@ export default function App() {
               onNewPrivate={openNewPrivateTab}
               onNewEditor={() => setNewEditorOpen(true)}
               onNewPi={openNewPiTab}
+              onNewPiSession={() => void openNewPiSession()}
               onNewGitGraph={openGitGraphFromContext}
               onClose={handleClose}
               onPin={pinTab}

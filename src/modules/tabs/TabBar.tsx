@@ -28,7 +28,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { fmtShortcut, MOD_KEY } from "@/lib/platform";
+import { fmtShortcut, MOD_KEY, SHIFT_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import { labelFor } from "./lib/tabLabel";
@@ -42,6 +42,8 @@ type Props = {
   onNewPrivate: () => void;
   onNewEditor: () => void;
   onNewPi: () => void;
+  /** New pi session on a folder chosen via the system picker. */
+  onNewPiSession: () => void;
   onNewGitGraph: () => void;
   onClose: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
@@ -59,6 +61,7 @@ export function TabBar({
   onNewPrivate,
   onNewEditor,
   onNewPi,
+  onNewPiSession,
   onNewGitGraph,
   onClose,
   onPin,
@@ -287,6 +290,15 @@ export function TabBar({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+          title={`New pi session (${fmtShortcut(MOD_KEY, SHIFT_KEY, "P")})`}
+          onClick={onNewPiSession}
+        >
+          <HugeiconsIcon icon={AiChat02Icon} size={14} strokeWidth={2} />
+        </Button>
       </div>
     </div>
   );
