@@ -7,7 +7,12 @@ import {
   initialPiSessionState,
   type PiSessionState,
 } from "./parse";
-import { buildRunGraph, PARENT_NODE_ID, summarizeChild } from "./runGraph";
+import {
+  buildRunGraph,
+  parentStatus,
+  PARENT_NODE_ID,
+  summarizeChild,
+} from "./runGraph";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -109,6 +114,27 @@ describe("runGraph over the q6 child transcript", () => {
     expect(parent?.status).toBe("done");
     expect(child?.status).toBe("done");
     expect(child?.role).toBe("child");
+  });
+
+  it("parent only, running, tokens > 0 produces one node", () => {
+    const running = replayChild(
+      FIXTURE_LINES.filter((l) => !l.includes('"agent_end"')),
+    );
+    expect(running.status).toBe("thinking");
+    const graph = buildRunGraph(running, {});
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.nodes[0].id).toBe(PARENT_NODE_ID);
+    expect(graph.nodes[0].role).toBe("parent");
+    expect(graph.nodes[0].status).toBe("running");
+    expect(graph.nodes[0].tokens).toBeGreaterThan(0);
+    expect(graph.edges).toEqual([]);
+  });
+
+  it("an idle parent keeps its own idle status, not running", () => {
+    expect(parentStatus(initialPiSessionState())).toBe("idle");
+    const graph = buildRunGraph(initialPiSessionState(), {});
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.nodes[0].status).toBe("idle");
   });
 
   it("a finished child keeps error as its final status when a tool failed", () => {

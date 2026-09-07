@@ -1,6 +1,6 @@
 import type { PiSessionState } from "./parse";
 
-export type PiRunNodeStatus = "running" | "done" | "error";
+export type PiRunNodeStatus = "idle" | "running" | "done" | "error";
 
 export type PiRunNode = {
   id: string;
@@ -32,6 +32,20 @@ export function childStatus(state: PiSessionState): PiRunNodeStatus {
   if (state.blocks.some((b) => b.kind === "tool" && b.status === "error")) {
     return "error";
   }
+  return state.status === "done" ? "done" : "running";
+}
+
+/**
+ * Parent status differs from a child's: the parent exists before its first
+ * turn, so PiStatus "idle" maps to its own idle node status; thinking, tool
+ * and awaiting-ask all mean the run is live. A tool that ended in error keeps
+ * the node in error.
+ */
+export function parentStatus(state: PiSessionState): PiRunNodeStatus {
+  if (state.blocks.some((b) => b.kind === "tool" && b.status === "error")) {
+    return "error";
+  }
+  if (state.status === "idle") return "idle";
   return state.status === "done" ? "done" : "running";
 }
 
@@ -67,7 +81,7 @@ export function buildRunGraph(
       id: PARENT_NODE_ID,
       label: "pi (parent)",
       role: "parent",
-      status: childStatus(parent),
+      status: parentStatus(parent),
       elapsedMs:
         parent.startedMs !== null && parent.lastMs !== null
           ? Math.max(0, parent.lastMs - parent.startedMs)

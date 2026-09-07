@@ -44,7 +44,8 @@ export function PiStack({
           aria-hidden={t.id !== activeId}
           className={cn(
             "absolute inset-0",
-            t.id !== activeId && "invisible pointer-events-none",
+            t.id !== activeId &&
+              "invisible pointer-events-none [&_.react-flow__node]:invisible!",
           )}
         >
           <PiTab

@@ -47,12 +47,18 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
 
   const blocks = entry?.state.blocks ?? [];
   const state = entry?.state;
-  const busy = state?.status === "thinking" || state?.status === "tool";
-  const running = Boolean(entry?.session) && !entry?.exited;
-  const finished = entry?.exited === true || state?.status === "done";
+  const status = state?.status ?? "idle";
+  const exited = entry?.exited === true;
+  // Stop only while the session is actively working; New session takes over
+  // once the run is done, nothing is busy, or the process exited. The two are
+  // mutually exclusive, so a done-but-alive session no longer shows both.
+  const showStop =
+    !exited &&
+    (status === "thinking" || status === "tool" || status === "awaiting-ask");
+  const showNew = exited || status === "done" || status === "idle";
 
-  // Best-known model for the composer chip; the settings worker owns the
-  // data-pi-model / data-pi-smol attributes on this root later.
+  // Best-known model for the composer chip: the store's resolved roles win;
+  // the last assistant message is the fallback while roles.model is empty.
   const model = useMemo(() => {
     for (let i = blocks.length - 1; i >= 0; i--) {
       const block = blocks[i];
@@ -62,6 +68,8 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
     }
     return null;
   }, [blocks]);
+  const roles = entry?.roles;
+  const chipModel = roles?.model || model;
 
   const submit = (markdown: string) => {
     if (!entry?.session || entry.exited) return;
@@ -82,18 +90,19 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
 
   return (
     <div
-      data-pi-model={model ?? undefined}
+      data-pi-model={chipModel ?? undefined}
+      data-pi-smol={roles?.smol || undefined}
       className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-card"
     >
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-xs text-muted-foreground">
         <span
           className={cn(
             "size-1.5 shrink-0 rounded-full",
-            entry?.exited
+            exited
               ? "bg-destructive"
-              : state?.status === "awaiting-ask"
+              : status === "awaiting-ask"
                 ? "bg-yellow-500"
-                : busy
+                : showStop
                   ? "animate-pulse bg-blue-500"
                   : "bg-muted-foreground/40",
           )}
@@ -101,8 +110,8 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
         <span className="font-medium text-foreground">pi</span>
         <span>
           {statusLabel(
-            state?.status ?? "idle",
-            entry?.exited ?? false,
+            status,
+            exited,
             entry?.exitCode ?? null,
           )}
         </span>
@@ -110,7 +119,7 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
           <span>{state.tokens.totalTokens.toLocaleString()} tok</span>
         ) : null}
         <span className="flex-1" />
-        {running ? (
+        {showStop ? (
           <button
             type="button"
             onClick={() => void kill(tabId)}
@@ -119,7 +128,7 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
             Stop
           </button>
         ) : null}
-        {finished ? (
+        {showNew ? (
           <button type="button" onClick={newSession} className={headerBtn}>
             New session
           </button>

@@ -34,7 +34,8 @@ type Props = {
 
 export type BoardViewMode = "rail" | "full";
 
-const POLL_MS = 10000;
+// Both rail and full mode share BoardView and therefore this poll cadence.
+export const POLL_MS = 10000;
 
 export function BoardView({
   cwd,

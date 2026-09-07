@@ -12,13 +12,13 @@ type Props = {
 };
 
 /**
- * Reads the model chip data from the nearest pane root. The settings worker
- * fills data-pi-model and data-pi-smol on the ChatPane root; until then the
- * chip renders "model unset".
+ * Reads the model chip data from the nearest pane root. ChatPane fills
+ * data-pi-model and data-pi-smol from the store's resolved session roles;
+ * until then the chip renders "model unset".
  */
 function useModelChip(ref: React.RefObject<HTMLElement | null>) {
   const [model, setModel] = useState<string | null>(null);
-  const [smol, setSmol] = useState(false);
+  const [smol, setSmol] = useState<string | null>(null);
 
   useEffect(() => {
     const read = () => {
@@ -29,7 +29,7 @@ function useModelChip(ref: React.RefObject<HTMLElement | null>) {
       const value = root.getAttribute("data-pi-model");
       setModel(value && value.trim() ? value : null);
       const smolValue = root.getAttribute("data-pi-smol");
-      setSmol(smolValue === "true" || smolValue === "1");
+      setSmol(smolValue && smolValue.trim() ? smolValue : null);
     };
     read();
     const observer = new MutationObserver(read);
@@ -148,7 +148,7 @@ export function Composer({
           className="rounded-md border border-border/60 px-2 py-0.5 text-xs text-muted-foreground"
         >
           {model ?? "model unset"}
-          {smol ? " smol" : ""}
+          {smol ? `, subagent ${smol}` : ""}
         </span>
         <span className="flex-1" />
         <button

@@ -5,6 +5,7 @@ import {
   RAIL_STATES,
   stateLabel,
 } from "../lib/board";
+import { POLL_MS } from "./BoardPane";
 
 // Pane-level expectations: the compact rail lists the four active states, and
 // the harness agent default matches the efficient-pi checkout layout.
@@ -30,5 +31,11 @@ describe("BoardView rail configuration", () => {
     expect(PI_MODULE_PREFS_DEFAULTS.boardBin).toBe(
       "$HOME/Documents/Work/Lab/efficient-pi/bin/board",
     );
+  });
+
+  // Rail and full mode share BoardView, so both re-poll on the same
+  // visibility-gated 10s cadence; refreshKey bumps stay the fast path.
+  it("polls every 10 seconds in both modes", () => {
+    expect(POLL_MS).toBe(10000);
   });
 });

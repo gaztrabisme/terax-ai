@@ -1,5 +1,5 @@
 import "@xyflow/react/dist/style.css";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useChildStore } from "@/modules/pi/lib/childStore";
 import { buildRunGraph, type PiRunNode } from "@/modules/pi/lib/runGraph";
 import { usePiStore } from "@/modules/pi/lib/piStore";
@@ -12,7 +12,7 @@ const Background = lazy(() =>
   import("@xyflow/react").then((m) => ({ default: m.Background })),
 );
 import { lazy } from "react";
-import type { Edge, Node } from "@xyflow/react";
+import type { Edge, Node, ReactFlowInstance } from "@xyflow/react";
 
 type Props = {
   tabId: number;
@@ -20,6 +20,7 @@ type Props = {
 };
 
 const statusColor: Record<PiRunNode["status"], string> = {
+  idle: "#94a3b8",
   running: "#3b82f6",
   done: "#22c55e",
   error: "#ef4444",
@@ -66,16 +67,31 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
     Record<string, { x: number; y: number }>
   >({});
   const [layoutError, setLayoutError] = useState(false);
+  // React Flow instance + the node-set key the viewport was last fitted for.
+  // The `fitView` prop only applies at mount, which is before the async dagre
+  // layout has placed anything: the fitted viewport then stays behind while
+  // nodes are moved (a lone node gets zoomed in until the post-layout position
+  // lands outside it, so the pane looks empty). We refit ourselves whenever
+  // the node set changes instead.
+  const rfRef = useRef<ReactFlowInstance | null>(null);
+  const fittedFor = useRef<string | null>(null);
+
+  const fit = (key: string) => {
+    if (fittedFor.current === key) return;
+    fittedFor.current = key;
+    rfRef.current?.fitView({ padding: 0.2, maxZoom: 1, duration: 200 });
+  };
 
   useEffect(() => {
     let alive = true;
     void layout(graph.nodes, graph.edges)
       .then((pos) => {
-        if (alive) setLayoutError(false);
-        if (alive)
-          setPositions(
-            Object.fromEntries(graph.nodes.map((n, i) => [n.id, pos[i]])),
-          );
+        if (!alive) return;
+        setLayoutError(false);
+        setPositions(
+          Object.fromEntries(graph.nodes.map((n, i) => [n.id, pos[i]])),
+        );
+        fit(graph.nodes.map((n) => n.id).join("|"));
       })
       .catch(() => {
         if (alive) setLayoutError(true);
@@ -83,6 +99,7 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph]);
 
   const flowNodes: Node[] = useMemo(
@@ -136,10 +153,14 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
           nodes={flowNodes}
           edges={flowEdges}
           fitView
+          fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
           proOptions={{ hideAttribution: true }}
           nodesDraggable={false}
           nodesConnectable={false}
           elementsSelectable
+          onInit={(instance) => {
+            rfRef.current = instance;
+          }}
           onNodeClick={(_, node) => {
             if (node.id !== "parent") onOpenChild(node.id);
           }}
