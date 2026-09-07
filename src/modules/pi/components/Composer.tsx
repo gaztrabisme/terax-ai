@@ -1,7 +1,24 @@
-import { EditorContent, Extension, useEditor } from "@tiptap/react";
+import { Extension, EditorContent, useEditor } from "@tiptap/react";
+import { StarterKit } from "@tiptap/starter-kit";
 import { useEffect, useRef, useState } from "react";
 import { clearDraft, loadDraft, saveDraft } from "@/modules/pi/lib/drafts";
 import { piEditorExtensions } from "./renderers/Markdown";
+
+// Tiptap's Link autolinks any dotted word, so typing CLAUDE.md produced
+// http://CLAUDE.md. Only a real URL may autolink: an explicit scheme:// or a
+// www. host (tiptap prefixes the scheme itself).
+export function autolinkable(url: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(url) || /^www\./i.test(url);
+}
+
+// Same extension set as the read-only renderers, with the link guard applied.
+export function composerExtensions() {
+  return piEditorExtensions().map((ext) =>
+    ext === StarterKit
+      ? StarterKit.configure({ link: { shouldAutoLink: autolinkable } })
+      : ext,
+  );
+}
 
 type Props = {
   tabId: number;
@@ -60,7 +77,7 @@ export function Composer({
 
   const editor = useEditor({
     extensions: [
-      ...piEditorExtensions(),
+      ...composerExtensions(),
       // Enter sends, Shift+Enter inserts a newline. Bold/italic stay on the
       // starter-kit Cmd+B / Cmd+I bindings; the markdown serializer turns
       // them into ** and *.

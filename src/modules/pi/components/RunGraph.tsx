@@ -1,7 +1,11 @@
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useChildStore } from "@/modules/pi/lib/childStore";
-import { buildRunGraph, type PiRunNode } from "@/modules/pi/lib/runGraph";
+import {
+  buildRunGraph,
+  formatNodeStatus,
+  type PiRunNode,
+} from "@/modules/pi/lib/runGraph";
 import { usePiStore } from "@/modules/pi/lib/piStore";
 
 // React Flow and dagre load only when the pane first mounts.
@@ -26,10 +30,15 @@ const statusColor: Record<PiRunNode["status"], string> = {
   error: "#ef4444",
 };
 
-function statusText(node: PiRunNode): string {
-  const elapsed =
-    node.elapsedMs !== null ? `${(node.elapsedMs / 1000).toFixed(1)}s` : "-";
-  return `${node.status} - ${elapsed} - ${node.tokens} tok - ${node.toolCalls} tools`;
+// Identity of a laid-out graph: node ids plus their rounded positions, so a
+// re-landing with moved nodes refits while identical landings do not.
+function fitKey(
+  nodes: PiRunNode[],
+  pos: { x: number; y: number }[],
+): string {
+  return nodes
+    .map((n, i) => `${n.id}@${Math.round(pos[i].x)},${Math.round(pos[i].y)}`)
+    .join("|");
 }
 
 // Dagre layout runs in a worker-free lazy import: the 15 kB layout dep stays
@@ -67,19 +76,23 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
     Record<string, { x: number; y: number }>
   >({});
   const [layoutError, setLayoutError] = useState(false);
-  // React Flow instance + the node-set key the viewport was last fitted for.
-  // The `fitView` prop only applies at mount, which is before the async dagre
-  // layout has placed anything: the fitted viewport then stays behind while
-  // nodes are moved (a lone node gets zoomed in until the post-layout position
-  // lands outside it, so the pane looks empty). We refit ourselves whenever
-  // the node set changes instead.
+  // React Flow instance + a snapshot of what the viewport was last fitted
+  // for. The `fitView` prop only applies at mount, which is before the async
+  // dagre layout has placed anything: the fitted viewport then stays behind
+  // while nodes are moved (a lone node gets zoomed in until the post-layout
+  // position lands outside it, so the pane looks empty). We refit whenever
+  // the laid-out graph differs from the fitted snapshot, and only once the
+  // instance exists: marking the snapshot without an instance used to swallow
+  // the fit for good, because the same node set never re-fitted.
   const rfRef = useRef<ReactFlowInstance | null>(null);
   const fittedFor = useRef<string | null>(null);
 
   const fit = (key: string) => {
     if (fittedFor.current === key) return;
+    const rf = rfRef.current;
+    if (!rf) return;
     fittedFor.current = key;
-    rfRef.current?.fitView({ padding: 0.2, maxZoom: 1, duration: 200 });
+    rf.fitView({ padding: 0.2, maxZoom: 1, duration: 200 });
   };
 
   useEffect(() => {
@@ -91,7 +104,7 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
         setPositions(
           Object.fromEntries(graph.nodes.map((n, i) => [n.id, pos[i]])),
         );
-        fit(graph.nodes.map((n) => n.id).join("|"));
+        fit(fitKey(graph.nodes, pos));
       })
       .catch(() => {
         if (alive) setLayoutError(true);
@@ -118,7 +131,7 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
                 {n.label}
               </div>
               <div className="text-xs text-muted-foreground">
-                {statusText(n)}
+                {formatNodeStatus(n)}
               </div>
             </div>
           ),
@@ -160,6 +173,10 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
           elementsSelectable
           onInit={(instance) => {
             rfRef.current = instance;
+            // A layout may have landed before mount and dropped its fit on
+            // the null instance; clear the snapshot so the next landing
+            // (or nothing, if positions are unchanged) can restore it.
+            fittedFor.current = null;
           }}
           onNodeClick={(_, node) => {
             if (node.id !== "parent") onOpenChild(node.id);
@@ -200,4 +217,5 @@ const emptyParent = {
   startedMs: null,
   lastMs: null,
   turnTokens: 0,
+  lastErrorText: null,
 };

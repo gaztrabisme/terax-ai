@@ -24,6 +24,20 @@ export type PiRunGraph = {
 export const PARENT_NODE_ID = "parent";
 
 /**
+ * One-line status for a node, e.g. "done · 4,828 tok · 2 tools". Fields with
+ * nothing to show are dropped: no elapsed yet, zero tokens, zero tool calls.
+ */
+export function formatNodeStatus(node: PiRunNode): string {
+  const parts: string[] = [node.status];
+  if (node.elapsedMs !== null) {
+    parts.push(`${(node.elapsedMs / 1000).toFixed(1)}s`);
+  }
+  if (node.tokens > 0) parts.push(`${node.tokens.toLocaleString("en-US")} tok`);
+  if (node.toolCalls > 0) parts.push(`${node.toolCalls} tools`);
+  return parts.join(" · ");
+}
+
+/**
  * Terminal states stick: agent_end (state.status "done") finishes the node as
  * done unless a tool ended in error, which stays error. A node never flips
  * back to running once its stream has ended.

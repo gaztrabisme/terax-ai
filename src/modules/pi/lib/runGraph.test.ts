@@ -28,6 +28,27 @@ const FIXTURE_LINES = readFileSync(
 
 const CHILD_FILE = "agent-hub/22838/worker-1.transcript.jsonl";
 
+// The q1 capture is a driver log of a full parent-session turn: wire frames
+// with dir "stdin"/"stdout", the stdout entries byte-for-byte what the Rust
+// pi module forwards over the event channel. agent_end included.
+const Q1_LINES = readFileSync(
+  path.join(here, "__fixtures__", "q1-rpc-basic.jsonl"),
+  "utf8",
+)
+  .split("\n")
+  .filter((line) => line.trim().length > 0)
+  .map((line) => JSON.parse(line) as { dir: string; raw: string })
+  .filter((entry) => entry.dir === "stdout")
+  .map((entry) => entry.raw);
+
+function replayParent(lines: string[]): PiSessionState {
+  let state = initialPiSessionState();
+  for (const line of lines) {
+    state = applyEvent(state, line);
+  }
+  return state;
+}
+
 function replayChild(lines: string[] = FIXTURE_LINES): PiSessionState {
   let state = initialPiSessionState();
   for (const line of lines) {
@@ -150,5 +171,26 @@ describe("runGraph over the q6 child transcript", () => {
     expect(graph.nodes.find((n) => n.id === PARENT_NODE_ID)?.status).toBe(
       "done",
     );
+  });
+});
+
+describe("runGraph over the q1 parent session capture", () => {
+  const final = replayParent(Q1_LINES);
+  const graph = buildRunGraph(final, {});
+
+  it("keeps the parent node after agent_end with done status", () => {
+    expect(final.status).toBe("done");
+    expect(graph.nodes).toHaveLength(1);
+    const parent = graph.nodes[0];
+    expect(parent.id).toBe(PARENT_NODE_ID);
+    expect(parent.role).toBe("parent");
+    expect(parent.status).toBe("done");
+  });
+
+  it("carries the session token total and tool count on the parent", () => {
+    const parent = graph.nodes[0];
+    expect(parent.tokens).toBe(4939);
+    expect(parent.toolCalls).toBe(0);
+    expect(graph.edges).toEqual([]);
   });
 });
