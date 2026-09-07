@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { usePiStore } from "../lib/piStore";
 import { Composer } from "./Composer";
 import { Transcript } from "./Transcript";
@@ -33,18 +33,35 @@ function statusLabel(
 }
 
 // The chat column of a pi tab: session header, transcript, composer. Owns no
-// session lifecycle; PiTab opens and closes the session and the layout.
-export function ChatPane({ tabId, cwd, onOpenChild: _onOpenChild }: Props) {
+// session lifecycle beyond the header buttons; PiTab opens the session and
+// the layout owns the tab.
+export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
   const entry = usePiStore((s) => s.tabs[tabId]);
   const sendPrompt = usePiStore((s) => s.sendPrompt);
   const answerAsk = usePiStore((s) => s.answerAsk);
   const dismissAsk = usePiStore((s) => s.dismissAsk);
   const kill = usePiStore((s) => s.kill);
+  const close = usePiStore((s) => s.close);
+  const openSession = usePiStore((s) => s.openSession);
   const [sendError, setSendError] = useState<string | null>(null);
 
   const blocks = entry?.state.blocks ?? [];
   const state = entry?.state;
   const busy = state?.status === "thinking" || state?.status === "tool";
+  const running = Boolean(entry?.session) && !entry?.exited;
+  const finished = entry?.exited === true || state?.status === "done";
+
+  // Best-known model for the composer chip; the settings worker owns the
+  // data-pi-model / data-pi-smol attributes on this root later.
+  const model = useMemo(() => {
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const block = blocks[i];
+      if (block.kind === "message" && block.role === "assistant" && block.model) {
+        return block.model;
+      }
+    }
+    return null;
+  }, [blocks]);
 
   const submit = (markdown: string) => {
     if (!entry?.session || entry.exited) return;
@@ -54,8 +71,20 @@ export function ChatPane({ tabId, cwd, onOpenChild: _onOpenChild }: Props) {
     });
   };
 
+  const newSession = () => {
+    setSendError(null);
+    close(tabId);
+    void openSession(tabId, { cwd });
+  };
+
+  const headerBtn =
+    "rounded-md border border-border/60 px-2 py-0.5 text-xs hover:bg-accent hover:text-foreground";
+
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-card">
+    <div
+      data-pi-model={model ?? undefined}
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-card"
+    >
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-xs text-muted-foreground">
         <span
           className={cn(
@@ -77,33 +106,33 @@ export function ChatPane({ tabId, cwd, onOpenChild: _onOpenChild }: Props) {
             entry?.exitCode ?? null,
           )}
         </span>
-        {state?.sessionId ? (
-          <span className="truncate font-mono text-[10px]">
-            {state.sessionId.slice(0, 8)}
-          </span>
-        ) : null}
         {state?.tokens ? (
           <span>{state.tokens.totalTokens.toLocaleString()} tok</span>
         ) : null}
         <span className="flex-1" />
-        {!entry?.exited && entry?.session ? (
+        {running ? (
           <button
             type="button"
             onClick={() => void kill(tabId)}
-            className="rounded px-1.5 py-0.5 hover:bg-accent hover:text-foreground"
+            className={headerBtn}
           >
-            Kill
+            Stop
+          </button>
+        ) : null}
+        {finished ? (
+          <button type="button" onClick={newSession} className={headerBtn}>
+            New session
           </button>
         ) : null}
       </div>
 
       {entry?.error ? (
-        <div className="mx-3 mt-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
+        <div className="mx-3 mt-3 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
           {entry.error}
         </div>
       ) : null}
       {sendError ? (
-        <div className="mx-3 mt-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
+        <div className="mx-3 mt-3 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
           {sendError}
         </div>
       ) : null}
@@ -114,6 +143,8 @@ export function ChatPane({ tabId, cwd, onOpenChild: _onOpenChild }: Props) {
           void answerAsk(tabId, requestId, answers)
         }
         onDismiss={(requestId) => void dismissAsk(tabId, requestId)}
+        cwd={cwd}
+        onOpenChild={onOpenChild}
       />
 
       <Composer

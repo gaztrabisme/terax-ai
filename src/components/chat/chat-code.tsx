@@ -72,7 +72,7 @@ export function ChatCodeBlock({ code, lang }: ChatCodeBlockProps) {
 
 function GeneratingPlaceholder({ label }: { label: string }) {
   return (
-    <div className="not-prose my-2 flex items-center gap-2 rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+    <div className="not-prose my-2 flex items-center gap-2 rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
       <span className="inline-block size-1.5 animate-pulse rounded-full bg-muted-foreground/60" />
       <Shimmer duration={1.2}>
         {label === "text" ? "Generating code…" : `Generating ${label}…`}
@@ -93,7 +93,7 @@ function BlockChrome({
   return (
     <div className="not-prose my-2 overflow-hidden rounded-lg border border-border/50 bg-muted/30">
       <div className="flex items-center justify-between gap-2 border-b border-border/40 bg-muted/20 px-3 py-1">
-        <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+        <span className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
           {label}
         </span>
         <CopyButton text={code} />
@@ -179,7 +179,7 @@ function CommandCard({ code, lang }: { code: string; lang: string }) {
   return (
     <div className="not-prose my-2 overflow-hidden rounded-lg border border-border/50 bg-muted/40">
       <div className="flex items-center justify-between gap-2 px-3 py-1.5">
-        <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+        <span className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
           {normalizeLangLabel(lang)}
         </span>
         <div className="flex items-center gap-1">

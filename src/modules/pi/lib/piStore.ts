@@ -1,3 +1,6 @@
+import { invoke } from "@tauri-apps/api/core";
+import { currentWorkspaceEnv } from "@/modules/workspace";
+import { usePreferencesStore } from "@/modules/settings/preferences";
 import { create } from "zustand";
 import {
   answerAsk as answerAskIn,
@@ -10,7 +13,9 @@ import {
   type PiAskAnswer,
   type PiSessionState,
 } from "./parse";
+import { piSpawnEnv, resolvePiPrefs, type PiRuntimePrefs } from "./providers";
 import { openPiSession, type PiSessionHandle } from "./rpc-client";
+import { PI_MODULE_PREFS_DEFAULTS } from "./settingsSchema";
 
 export type PiOpenOptions = {
   cwd?: string;
@@ -20,6 +25,10 @@ export type PiOpenOptions = {
   env?: Record<string, string>;
 };
 
+/** Resolved model roles for the session; ChatPane reads this for its
+ *  data-pi-model / data-pi-smol root attributes. */
+export type PiRoles = { provider: string; model: string; smol: string };
+
 type PiTabEntry = {
   /** Open generation; a later open for the same tab supersedes this one. */
   gen: number;
@@ -28,6 +37,7 @@ type PiTabEntry = {
   exited: boolean;
   exitCode: number | null;
   error: string | null;
+  roles: PiRoles;
 };
 
 type PiStore = {
@@ -59,6 +69,41 @@ function patchEntry(
 
 let openGen = 0;
 
+/** Global pi prefs from the LazyStore (defaults when not yet hydrated). */
+function globalPiPrefs(): Partial<PiRuntimePrefs> {
+  const p = usePreferencesStore.getState();
+  return {
+    launcherDir: p.piLauncherDir,
+    boardBin: p.piBoardBin,
+    agentBin: p.piAgentBin,
+    agentDir: p.piAgentDir,
+    provider: p.piProvider,
+    model: p.piModel,
+    thinking: p.piThinking,
+    smol: p.piSmol,
+  };
+}
+
+/** Parses `<cwd>/.pi/terax.json`; unreadable or missing file resolves to null. */
+async function readWorkspaceOverrides(cwd?: string): Promise<unknown> {
+  if (!cwd) return null;
+  try {
+    const res = await invoke<{ kind: string; content?: string }>(
+      "fs_read_file",
+      { path: `${cwd}/.pi/terax.json`, workspace: currentWorkspaceEnv() },
+    );
+    if (res.kind !== "text" || !res.content) return null;
+    return JSON.parse(res.content) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+async function resolvePrefsForCwd(cwd?: string): Promise<PiRuntimePrefs> {
+  const overrides = await readWorkspaceOverrides(cwd);
+  return resolvePiPrefs(globalPiPrefs(), overrides);
+}
+
 export const usePiStore = create<PiStore>()((set, get) => ({
   tabs: {},
 
@@ -66,6 +111,14 @@ export const usePiStore = create<PiStore>()((set, get) => ({
     // A second open for the same tab replaces the first; the stale in-flight
     // open is killed the moment it resolves.
     const gen = ++openGen;
+    const resolved = await resolvePrefsForCwd(opts.cwd);
+    // The PiTab default param equals the module default; an explicit caller
+    // override wins, otherwise the user's launcherDir pref applies.
+    const launcherDir =
+      opts.launcherDir &&
+      opts.launcherDir !== PI_MODULE_PREFS_DEFAULTS.launcherDir
+        ? opts.launcherDir
+        : resolved.launcherDir;
     const entry: PiTabEntry = {
       gen,
       state: initialPiSessionState(),
@@ -73,11 +126,21 @@ export const usePiStore = create<PiStore>()((set, get) => ({
       exited: false,
       exitCode: null,
       error: null,
+      roles: {
+        provider: resolved.provider,
+        model: resolved.model,
+        smol: resolved.smol,
+      },
     };
     set((s) => ({ tabs: { ...s.tabs, [tabId]: entry } }));
     try {
       const session = await openPiSession({
         ...opts,
+        launcherDir,
+        env: {
+          ...piSpawnEnv(resolved, resolved.agentDir),
+          ...opts.env,
+        },
         onEvent: (line) =>
           set((s) =>
             patchEntry(s.tabs, tabId, (e) => ({

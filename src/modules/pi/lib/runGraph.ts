@@ -23,7 +23,11 @@ export type PiRunGraph = {
 
 export const PARENT_NODE_ID = "parent";
 
-/** agent_end seen means done; a tool that ended in error marks error. */
+/**
+ * Terminal states stick: agent_end (state.status "done") finishes the node as
+ * done unless a tool ended in error, which stays error. A node never flips
+ * back to running once its stream has ended.
+ */
 export function childStatus(state: PiSessionState): PiRunNodeStatus {
   if (state.blocks.some((b) => b.kind === "tool" && b.status === "error")) {
     return "error";
@@ -47,7 +51,12 @@ export function summarizeChild(file: string, state: PiSessionState): PiRunNode {
   };
 }
 
-/** Parent node plus one node per known child transcript, star-wired. */
+/**
+ * Parent node plus one node per known child transcript, star-wired. Children
+ * are never filtered by status: a finished child stays a node carrying its
+ * final status (done or error), so the graph keeps the full run shape after
+ * the turn ends.
+ */
 export function buildRunGraph(
   parent: PiSessionState,
   children: Record<string, PiSessionState>,

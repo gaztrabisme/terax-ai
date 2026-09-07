@@ -132,6 +132,56 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
     Ok(())
 }
 
+/// Clamp a restored window to the current monitor's work area. Called once in
+/// setup for `--pi` launches, after the window-state plugin has restored the
+/// saved geometry: a window saved on a bigger (or since-disconnected) monitor
+/// would otherwise open oversized or off-screen.
+fn clamp_window_to_work_area(window: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let area = monitor.work_area();
+    let (area_x, area_y) = (area.position.x, area.position.y);
+    let (area_w, area_h) = (area.size.width as i32, area.size.height as i32);
+    if area_w <= 0 || area_h <= 0 {
+        return;
+    }
+
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let Ok(pos) = window.outer_position() else {
+        return;
+    };
+
+    let width = (size.width as i32).min(area_w).max(1) as u32;
+    let height = (size.height as i32).min(area_h).max(1) as u32;
+    if width != size.width || height != size.height {
+        let _ = window.set_size(tauri::PhysicalSize::new(width, height));
+    }
+
+    let out_of_bounds = pos.x < area_x
+        || pos.y < area_y
+        || pos.x + size.width as i32 > area_x + area_w
+        || pos.y + size.height as i32 > area_y + area_h;
+    if !out_of_bounds {
+        return;
+    }
+    // Fits: re-center in the work area. Otherwise: pin inside it.
+    let (x, y) = if width < area_w as u32 && height < area_h as u32 {
+        (
+            area_x + (area_w - width as i32) / 2,
+            area_y + (area_h - height as i32) / 2,
+        )
+    } else {
+        (
+            pos.x.max(area_x).min(area_x + area_w - width as i32),
+            pos.y.max(area_y).min(area_y + area_h - height as i32),
+        )
+    };
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let cli_dir = parse_launch_dir();
@@ -156,12 +206,20 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
-        .setup(|_app| {
+        .setup(move |app| {
+            // Config windows (incl. "main") are created just above, so the
+            // window-state plugin has already restored the saved geometry.
+            // --pi launches then clamp it to the visible work area.
+            if cli_pi {
+                if let Some(window) = app.get_webview_window("main") {
+                    clamp_window_to_work_area(&window);
+                }
+            }
             // macOS skips parent() for the settings window, so tie its lifecycle
             // to the main window here instead. Other platforms keep parent().
             #[cfg(target_os = "macos")]
-            if let Some(main) = _app.get_webview_window("main") {
-                let handle = _app.handle().clone();
+            if let Some(main) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
                 main.on_window_event(move |event| {
                     if matches!(
                         event,
@@ -198,6 +256,7 @@ pub fn run() {
             pty::pty_close_all,
             pty::pty_has_foreground_process,
             pi::pi_open,
+            pi::pi_home_dir,
             pi::pi_send,
             pi::pi_kill,
             pi::pi_watch_transcripts,

@@ -50,7 +50,7 @@ export function TableCsvRenderer({ part }: PiPartRendererProps) {
   if (rows.length === 0) return null;
   const [head, ...body] = rows;
   return (
-    <table className="my-1 w-full border-collapse text-[11px]">
+    <table className="my-1 w-full border-collapse text-xs">
       <thead>
         <tr>
           {head.map((h, i) => (

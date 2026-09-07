@@ -1,16 +1,384 @@
-import { useEffect, useRef } from "react";
-import type { PiAskAnswer, PiBlock } from "@/modules/pi/lib/parse";
-import { AssistantBlock } from "./blocks/AssistantBlock";
+import { invoke } from "@tauri-apps/api/core";
+import { currentWorkspaceEnv } from "@/modules/workspace";
+import { cn } from "@/lib/utils";
+import {
+  ArrowDown01Icon,
+  BotIcon,
+  CheckmarkCircle01Icon,
+  CircuitBoardIcon,
+  CopyIcon,
+  FileEditIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  Conversation,
+  ConversationContent,
+  ConversationEmptyState,
+  ConversationScrollButton,
+  MessageResponse,
+  Shimmer,
+} from "@/components/chat";
+import { useCallback, useMemo, useState } from "react";
+import type {
+  PiAskAnswer,
+  PiBlock,
+  PiToolBlock,
+} from "@/modules/pi/lib/parse";
+import {
+  boardOp,
+  childTranscriptPath,
+  groupTurns,
+  isBoardTool,
+  isSubagentTool,
+  subagentBrief,
+  subagentName,
+  type Turn,
+} from "@/modules/pi/lib/turns";
 import { KeystoneCard } from "./blocks/KeystoneCard";
-import { ToolRow } from "./blocks/ToolRow";
-import { UserBlock } from "./blocks/UserBlock";
+import { ToolStep } from "./blocks/ToolRow";
 
 type Props = {
   blocks: PiBlock[];
   onAnswer: (requestId: string, answers: PiAskAnswer[]) => void;
   onDismiss: (requestId: string) => void;
   emptyHint?: string;
+  /** Workspace root: anchors empty state and exported answer files. */
+  cwd?: string;
+  /** Opens a child transcript tab from a subagent step. */
+  onOpenChild?: (path: string) => void;
 };
+
+/** Markdown stripped down to the text a reader sees, for plain Copy. */
+export function renderedText(markdown: string): string {
+  return markdown
+    .replace(/```[a-zA-Z0-9_-]*\n?/g, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*\d+\.\s+/gm, "")
+    .replace(/(\*|_)([^*_]+)\1/g, "$2")
+    .trim();
+}
+
+/** Writes the markdown to <cwd>/.pi/answers and asks the layout to open it. */
+async function openAnswerInEditor(
+  cwd: string,
+  turnIndex: number,
+  markdown: string,
+): Promise<string> {
+  const base = cwd.replace(/[\\/]+$/, "");
+  const dir = `${base}/.pi/answers`;
+  try {
+    await invoke("fs_create_dir", {
+      path: dir,
+      workspace: currentWorkspaceEnv(),
+    });
+  } catch {
+    // The answers dir already existing is the normal steady state.
+  }
+  const path = `${dir}/${turnIndex}-${Date.now()}.md`;
+  await invoke("fs_write_file", {
+    path,
+    content: markdown,
+    workspace: currentWorkspaceEnv(),
+  });
+  window.dispatchEvent(new CustomEvent("pi:open-file", { detail: { path } }));
+  return path;
+}
+
+function basename(cwd?: string): string | null {
+  const base = cwd?.split(/[\\/]/).filter(Boolean).pop();
+  return base ?? null;
+}
+
+function streamingLabel(turn: Turn): string {
+  const running = [...turn.activity]
+    .reverse()
+    .find((entry) => entry.kind === "tool" && entry.block.status === "running");
+  if (running?.kind === "tool") {
+    const block = running.block;
+    if (isBoardTool(block)) return `Board: ${boardOp(block.toolName)}`;
+    if (isSubagentTool(block)) return `${subagentName(block)} working`;
+    return `Running ${block.toolName}`;
+  }
+  return "Thinking";
+}
+
+function workedLabel(turn: Turn): string {
+  const parts: string[] = [];
+  if (turn.durationMs !== null) {
+    parts.push(`Worked ${Math.max(1, Math.round(turn.durationMs / 1000))} s`);
+  }
+  if (turn.counts.tools > 0) parts.push(`${turn.counts.tools} tools`);
+  if (turn.counts.children > 0) parts.push(`${turn.counts.children} children`);
+  return parts.join(", ") || "Worked";
+}
+
+function ThinkingEntry({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const trimmed = text.trim();
+  const firstLine = trimmed.split("\n")[0] ?? "";
+  return (
+    <div className="text-[13px] text-muted-foreground">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="rounded text-left italic hover:text-foreground"
+      >
+        {open ? "Thought" : firstLine}
+        {!open && trimmed.includes("\n") ? "..." : ""}
+      </button>
+      {open ? (
+        <div className="mt-1 whitespace-pre-wrap wrap-break-word">{trimmed}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function BoardChip({ block }: { block: PiToolBlock }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-0.5 text-xs text-muted-foreground">
+      <HugeiconsIcon icon={CircuitBoardIcon} size={12} strokeWidth={1.75} />
+      Board: {boardOp(block.toolName)}
+      {block.status === "running" ? "..." : ""}
+    </span>
+  );
+}
+
+function ChildCard({
+  block,
+  cwd,
+  onOpenChild,
+}: {
+  block: PiToolBlock;
+  cwd?: string;
+  onOpenChild?: (path: string) => void;
+}) {
+  const path = childTranscriptPath(block, cwd);
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-border/60 px-2 py-1.5">
+      <HugeiconsIcon
+        icon={BotIcon}
+        size={14}
+        strokeWidth={1.75}
+        className="shrink-0 text-muted-foreground"
+      />
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] font-medium">{subagentName(block)}</div>
+        {subagentBrief(block) ? (
+          <div className="truncate text-xs text-muted-foreground">
+            {subagentBrief(block)}
+          </div>
+        ) : null}
+      </div>
+      {path && onOpenChild ? (
+        <button
+          type="button"
+          onClick={() => onOpenChild(path)}
+          className="shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-xs hover:bg-accent hover:text-foreground"
+        >
+          Open transcript
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function ActivityFold({
+  turn,
+  open,
+  onToggle,
+  cwd,
+  onOpenChild,
+}: {
+  turn: Turn;
+  open: boolean;
+  onToggle: () => void;
+  cwd?: string;
+  onOpenChild?: (path: string) => void;
+}) {
+  return (
+    <div className="w-full">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="group flex w-full items-center gap-1.5 rounded-md py-0.5 text-left text-xs text-muted-foreground hover:text-foreground"
+      >
+        {turn.status === "streaming" ? (
+          <Shimmer duration={1.4}>{streamingLabel(turn)}</Shimmer>
+        ) : (
+          <span>{workedLabel(turn)}</span>
+        )}
+        <HugeiconsIcon
+          icon={ArrowDown01Icon}
+          size={12}
+          strokeWidth={1.75}
+          className={cn("transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open ? (
+        <div className="mt-1.5 ml-1 space-y-2 border-l border-border/60 pl-3">
+          {turn.activity.map((entry, i) => (
+            // Activity entries are positional: a turn's feed only appends.
+            <div key={i}>
+              {entry.kind === "thinking" ? <ThinkingEntry text={entry.text} /> : null}
+              {entry.kind === "narration" ? (
+                <div className="text-[13px] text-muted-foreground whitespace-pre-wrap wrap-break-word">
+                  {entry.text}
+                </div>
+              ) : null}
+              {entry.kind === "tool" ? (
+                isSubagentTool(entry.block) ? (
+                  <ChildCard block={entry.block} cwd={cwd} onOpenChild={onOpenChild} />
+                ) : isBoardTool(entry.block) ? (
+                  <BoardChip block={entry.block} />
+                ) : (
+                  <ToolStep block={entry.block} />
+                )
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AnswerActions({
+  cwd,
+  turn,
+  markdown,
+}: {
+  cwd?: string;
+  turn: Turn;
+  markdown: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const copyRendered = useCallback(() => {
+    void navigator.clipboard
+      ?.writeText(renderedText(markdown))
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {});
+  }, [markdown]);
+
+  const copyMarkdown = useCallback(() => {
+    void navigator.clipboard
+      ?.writeText(markdown)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {});
+  }, [markdown]);
+
+  const openInEditor = useCallback(() => {
+    if (!cwd) return;
+    setError(null);
+    openAnswerInEditor(cwd, turn.index, markdown)
+      .then((path) => {
+        setSaved(path.split(/[\\/]/).pop() ?? path);
+        window.setTimeout(() => setSaved(null), 2000);
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e));
+      });
+  }, [cwd, markdown, turn.index]);
+
+  const btn =
+    "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground";
+  return (
+    <div className="flex items-center gap-1">
+      <button type="button" onClick={copyRendered} className={btn}>
+        <HugeiconsIcon icon={copied ? CheckmarkCircle01Icon : CopyIcon} size={12} strokeWidth={1.75} />
+        Copy
+      </button>
+      <button type="button" onClick={copyMarkdown} className={btn}>
+        <HugeiconsIcon icon={copied ? CheckmarkCircle01Icon : CopyIcon} size={12} strokeWidth={1.75} />
+        Copy markdown
+      </button>
+      {cwd ? (
+        <button type="button" onClick={openInEditor} className={btn}>
+          <HugeiconsIcon icon={FileEditIcon} size={12} strokeWidth={1.75} />
+          Open in editor
+        </button>
+      ) : null}
+      {saved ? <span className="text-xs text-muted-foreground">saved {saved}</span> : null}
+      {error ? <span className="text-xs text-destructive">{error}</span> : null}
+    </div>
+  );
+}
+
+function TurnView({
+  turn,
+  open,
+  onToggle,
+  cwd,
+  onOpenChild,
+  onAnswer,
+  onDismiss,
+}: {
+  turn: Turn;
+  open: boolean;
+  onToggle: () => void;
+  cwd?: string;
+  onOpenChild?: (path: string) => void;
+  onAnswer: (requestId: string, answers: PiAskAnswer[]) => void;
+  onDismiss: (requestId: string) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {turn.user ? (
+        <div className="flex justify-end">
+          <div className="max-w-[65%] rounded-md bg-muted/70 px-3.5 py-2 text-[14px] leading-relaxed whitespace-pre-wrap text-foreground">
+            {turn.user}
+          </div>
+        </div>
+      ) : null}
+      {turn.activity.length > 0 || turn.asks.length > 0 ? (
+        <ActivityFold
+          turn={turn}
+          open={open}
+          onToggle={onToggle}
+          cwd={cwd}
+          onOpenChild={onOpenChild}
+        />
+      ) : null}
+      {turn.asks.map((ask) => (
+        <KeystoneCard
+          key={ask.requestId}
+          block={ask}
+          onAnswer={(answers) => onAnswer(ask.requestId, answers)}
+          onDismiss={() => onDismiss(ask.requestId)}
+        />
+      ))}
+      {turn.answer ? (
+        <div className="max-w-[72ch]">
+          <MessageResponse
+            streaming={turn.status === "streaming"}
+            className="text-[14px] leading-relaxed text-foreground"
+          >
+            {turn.answer}
+          </MessageResponse>
+          {turn.status === "done" ? (
+            <div className="mt-1.5">
+              <AnswerActions cwd={cwd} turn={turn} markdown={turn.answer} />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 // Source-agnostic: the parent feed comes from piStore, a child transcript
 // from the child store. Callers wire their own store reads.
@@ -18,47 +386,47 @@ export function Transcript({
   blocks,
   onAnswer,
   onDismiss,
-  emptyHint = "Session starting...",
+  emptyHint = "Enter sends, Shift+Enter newline",
+  cwd,
+  onOpenChild,
 }: Props) {
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const turns = useMemo(() => groupTurns(blocks), [blocks]);
+  // Fold state is remembered per turn for as long as this tab lives.
+  const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({});
+  const toggle = useCallback((key: string) => {
+    setOpenTurns((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [blocks.length]);
+  if (turns.length === 0) {
+    return (
+      <div className="min-h-0 flex-1 select-text overflow-y-auto">
+        <ConversationEmptyState
+          title={basename(cwd) ?? "pi"}
+          description={emptyHint}
+        />
+      </div>
+    );
+  }
 
   return (
-    <div
-      ref={scrollRef}
-      className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3 text-xs"
-    >
-      {blocks.length === 0 ? (
-        <div className="text-muted-foreground">{emptyHint}</div>
-      ) : null}
-      {blocks.map((block) => {
-        if (block.kind === "message") {
-          if (block.role === "user") {
-            const text = block.parts
-              .filter((p) => p.type === "text")
-              .map((p) => p.text)
-              .join("");
-            return <UserBlock key={block.id} text={text} />;
-          }
-          return <AssistantBlock key={block.id} block={block} />;
-        }
-        if (block.kind === "tool") {
-          return <ToolRow key={block.toolCallId} block={block} />;
-        }
-        return (
-          <KeystoneCard
-            key={block.requestId}
-            block={block}
-            onAnswer={(answers) => onAnswer(block.requestId, answers)}
-            onDismiss={() => onDismiss(block.requestId)}
-          />
-        );
-      })}
+    <div className="relative flex min-h-0 flex-1 flex-col select-text">
+      <Conversation className="min-h-0 flex-1">
+        <ConversationContent className="gap-6 p-4">
+          {turns.map((turn) => (
+            <TurnView
+              key={turn.key}
+              turn={turn}
+              open={openTurns[turn.key] ?? false}
+              onToggle={() => toggle(turn.key)}
+              cwd={cwd}
+              onOpenChild={onOpenChild}
+              onAnswer={onAnswer}
+              onDismiss={onDismiss}
+            />
+          ))}
+        </ConversationContent>
+        <ConversationScrollButton />
+      </Conversation>
     </div>
   );
 }

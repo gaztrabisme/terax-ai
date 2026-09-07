@@ -1,9 +1,11 @@
-import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "@/components/ui/resizable";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { homeDir } from "@tauri-apps/api/path";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import type { SearchAddon } from "@xterm/addon-search";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PanelImperativeHandle } from "react-resizable-panels";
+import { toast } from "sonner";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -14,22 +16,24 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { cn } from "@/lib/utils";
-import { native } from "@/lib/native";
-import { Toaster } from "@/components/ui/sonner";
 import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
+import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { consumeLaunchPi, getLaunchDir } from "@/lib/launchDir";
+import { native } from "@/lib/native";
+import { quoteShellArg } from "@/lib/shellQuote";
+import { useZoom } from "@/lib/useZoom";
+import { cn } from "@/lib/utils";
+import {
+  type EditorPaneHandle,
   EditorStack,
   GitDiffStack,
   NewEditorDialog,
-  type EditorPaneHandle,
 } from "@/modules/editor";
-import {
-  GitHistoryStack,
-  type GitHistorySearchHandle,
-} from "@/modules/git-history";
-import { consumeLaunchPi, getLaunchDir } from "@/lib/launchDir";
-import { quoteShellArg } from "@/lib/shellQuote";
-import { useZoom } from "@/lib/useZoom";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
 import {
   listenFsChanged,
@@ -38,20 +42,29 @@ import {
   watchRemove,
 } from "@/modules/explorer/lib/watch";
 import {
+  type GitHistorySearchHandle,
+  GitHistoryStack,
+} from "@/modules/git-history";
+import {
   Header,
   type SearchInlineHandle,
   type SearchTarget,
 } from "@/modules/header";
 import { MarkdownStack } from "@/modules/markdown";
-import { AgentTranscriptStack, PiStack } from "@/modules/pi";
+import {
+  AgentTranscriptStack,
+  BoardTabStack,
+  PiStack,
+  RunGraphTabStack,
+} from "@/modules/pi";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setThemeId as persistThemeId } from "@/modules/settings/store";
 import {
-  ShortcutsDialog,
-  useGlobalShortcuts,
   type ShortcutHandlers,
   type ShortcutId,
+  ShortcutsDialog,
+  useGlobalShortcuts,
 } from "@/modules/shortcuts";
 import { SidebarRail, type SidebarViewId } from "@/modules/sidebar";
 import { SourceControlPanel, useSourceControl } from "@/modules/source-control";
@@ -65,9 +78,11 @@ import {
   leafHasForegroundProcess,
   leafIds,
   respawnSession,
-  TerminalStack,
   type TerminalPaneHandle,
+  TerminalStack,
   useTerminalFileDrop,
+  whenSessionReady,
+  writeToSession,
 } from "@/modules/terminal";
 import { ThemeProvider } from "@/modules/theme";
 import {
@@ -89,12 +104,6 @@ import {
   useWorkspaceEnvStore,
   type WorkspaceEnv,
 } from "@/modules/workspace";
-import { invoke } from "@tauri-apps/api/core";
-import { homeDir } from "@tauri-apps/api/path";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import type { SearchAddon } from "@xterm/addon-search";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { PanelImperativeHandle } from "react-resizable-panels";
 
 function dirname(path: string | null): string | null {
   if (!path) return null;
@@ -150,6 +159,8 @@ export default function App() {
     pinTab,
     newMarkdownTab,
     newPiTab,
+    openBoardTab,
+    openRunGraphTab,
     openAgentTranscriptTab,
     openGitDiffTab,
     openCommitHistoryTab,
@@ -385,6 +396,8 @@ export default function App() {
   const isEditorTab = activeTab?.kind === "editor";
   const isMarkdownTab = activeTab?.kind === "markdown";
   const isPiTab = activeTab?.kind === "pi";
+  const isBoardTab = activeTab?.kind === "board";
+  const isRunGraphTab = activeTab?.kind === "run-graph";
   const isAgentTranscriptTab = activeTab?.kind === "agent-transcript";
   const isGitDiffTab =
     activeTab?.kind === "git-diff" || activeTab?.kind === "git-commit-file";
@@ -411,6 +424,56 @@ export default function App() {
       void unlistenPromise.then((un) => un());
     };
   }, []);
+
+  // pi module bridge: a pane asks the shell to open a file (DOM CustomEvent,
+  // same window). Always an editor tab — even markdown — never the read-only
+  // markdown preview.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const path = (e as CustomEvent<{ path?: string }>).detail?.path;
+      if (typeof path !== "string" || path.length === 0) return;
+      openFileTab(path, true);
+    };
+    window.addEventListener("pi:open-file", handler);
+    return () => window.removeEventListener("pi:open-file", handler);
+  }, [openFileTab]);
+
+  // pi module bridge: run a command in a fresh terminal tab (Tauri event,
+  // may originate from the backend or another window). Waits for the pty to
+  // be ready, then writes the command into it.
+  useEffect(() => {
+    type OpenTerminalPayload = { cwd: string; command: string; hint?: string };
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void listen<OpenTerminalPayload>("pi:open-terminal", (event) => {
+      const { cwd, command, hint } = event.payload;
+      if (
+        typeof cwd !== "string" ||
+        cwd.length === 0 ||
+        typeof command !== "string" ||
+        command.length === 0
+      ) {
+        return;
+      }
+      if (typeof hint === "string" && hint.length > 0) toast(hint);
+      const tabId = newTab(cwd);
+      setTimeout(() => {
+        const tab = tabsRef.current.find((x) => x.id === tabId);
+        if (!tab || tab.kind !== "terminal") return;
+        const leafId = tab.activeLeafId;
+        void whenSessionReady(leafId).then(() => {
+          writeToSession(leafId, `${command}\n`);
+        });
+      }, 0);
+    }).then((fn) => {
+      if (alive) unlisten = fn;
+      else fn();
+    });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [newTab]);
 
   const editorWatchRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -977,7 +1040,6 @@ export default function App() {
     gitHistoryHandle,
   ]);
 
-
   const workspaceSurface = (
     <div className="relative h-full min-h-0">
       <div
@@ -1029,6 +1091,30 @@ export default function App() {
         aria-hidden={!isPiTab}
       >
         <PiStack
+          tabs={tabs}
+          activeId={activeId}
+          onOpenChild={openChildTranscript}
+          onOpenBoard={openBoardTab}
+          onOpenRunGraph={openRunGraphTab}
+        />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isBoardTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isBoardTab}
+      >
+        <BoardTabStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isRunGraphTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isRunGraphTab}
+      >
+        <RunGraphTabStack
           tabs={tabs}
           activeId={activeId}
           onOpenChild={openChildTranscript}
@@ -1151,7 +1237,6 @@ export default function App() {
                   <div className="relative min-h-0 flex-1">
                     {workspaceSurface}
                   </div>
-
                 </div>
               </ResizablePanel>
             </ResizablePanelGroup>

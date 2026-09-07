@@ -33,6 +33,8 @@ export type PiMessageBlock = {
   model: string | null;
   usage: PiUsage | null;
   streaming: boolean;
+  /** Creation epoch ms; applyEvent pins it from its optional `now` argument. */
+  at: number;
 };
 
 export type PiToolBlock = {
@@ -44,6 +46,8 @@ export type PiToolBlock = {
   partialText: string | null;
   resultText: string | null;
   isError: boolean;
+  /** Creation epoch ms; applyEvent pins it from its optional `now` argument. */
+  at: number;
 };
 
 export type PiAskBlock = {
@@ -52,6 +56,8 @@ export type PiAskBlock = {
   questions: PiQuestion[];
   timeoutMs: number;
   state: "pending" | "answered" | "dismissed";
+  /** Creation epoch ms; applyEvent pins it from its optional `now` argument. */
+  at: number;
 };
 
 export type PiBlock = PiMessageBlock | PiToolBlock | PiAskBlock;
@@ -165,7 +171,11 @@ export function askResponseLine(
  * appending (replaying the same snapshot twice must not duplicate parts).
  * Unknown or malformed lines return the state unchanged.
  */
-export function applyEvent(state: PiSessionState, raw: string): PiSessionState {
+export function applyEvent(
+  state: PiSessionState,
+  raw: string,
+  now: number = Date.now(),
+): PiSessionState {
   const line = raw.trimStart();
   if (!line.startsWith("{")) return state;
   let event: unknown;
@@ -192,7 +202,7 @@ export function applyEvent(state: PiSessionState, raw: string): PiSessionState {
       };
     }
     case "message_start":
-      return applyMessageStart(state, event);
+      return applyMessageStart(state, event, now);
     case "message_update":
       return applyMessageUpdate(state, event);
     case "message_end":
@@ -211,13 +221,13 @@ export function applyEvent(state: PiSessionState, raw: string): PiSessionState {
     case "agent_end":
       return { ...state, status: "done" };
     case "tool_execution_start":
-      return applyToolStart(state, event);
+      return applyToolStart(state, event, now);
     case "tool_execution_update":
       return applyToolUpdate(state, event);
     case "tool_execution_end":
-      return applyToolEnd(state, event);
+      return applyToolEnd(state, event, now);
     case "ask_request":
-      return applyAskRequest(state, event);
+      return applyAskRequest(state, event, now);
     case "response":
       return applyResponse(state, event);
     default:
@@ -228,6 +238,7 @@ export function applyEvent(state: PiSessionState, raw: string): PiSessionState {
 function applyMessageStart(
   state: PiSessionState,
   event: Record<string, unknown>,
+  now: number,
 ): PiSessionState {
   const message = event.message;
   if (!isRecord(message)) return state;
@@ -241,6 +252,7 @@ function applyMessageStart(
     model: asString(message.model),
     usage: null,
     streaming: role === "assistant",
+    at: now,
   };
   return {
     ...state,
@@ -308,6 +320,7 @@ function withMessageBlock(
 function applyToolStart(
   state: PiSessionState,
   event: Record<string, unknown>,
+  now: number,
 ): PiSessionState {
   const toolCallId = asString(event.toolCallId);
   if (!toolCallId || state.toolPos[toolCallId] !== undefined) return state;
@@ -320,6 +333,7 @@ function applyToolStart(
     partialText: null,
     resultText: null,
     isError: false,
+    at: now,
   };
   return {
     ...state,
@@ -353,6 +367,7 @@ function applyToolUpdate(
 function applyToolEnd(
   state: PiSessionState,
   event: Record<string, unknown>,
+  now: number,
 ): PiSessionState {
   const toolCallId = asString(event.toolCallId);
   if (!toolCallId) return state;
@@ -376,6 +391,7 @@ function applyToolEnd(
       toolName: asString(event.toolName) ?? "",
       args: event.args,
       partialText: null,
+      at: now,
       ...patch,
     };
     return {
@@ -395,6 +411,7 @@ function applyToolEnd(
 function applyAskRequest(
   state: PiSessionState,
   event: Record<string, unknown>,
+  now: number,
 ): PiSessionState {
   const requestId = asString(event.id);
   if (!requestId || state.askPos[requestId] !== undefined) return state;
@@ -423,6 +440,7 @@ function applyAskRequest(
     questions,
     timeoutMs: typeof event.timeoutMs === "number" ? event.timeoutMs : 0,
     state: "pending",
+    at: now,
   };
   return {
     ...state,

@@ -4,12 +4,12 @@ import {
   hasLeaf,
   leafIds,
   nextLeafId,
+  type PaneNode,
   removeLeaf,
+  type SplitDir,
   setLeafCwd as setLeafCwdInTree,
   siblingLeafOf,
   splitLeaf,
-  type PaneNode,
-  type SplitDir,
 } from "@/modules/terminal/lib/panes";
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
 
@@ -57,6 +57,24 @@ export type PiTab = {
   cwd?: string;
 };
 
+/** Full-window kanban for a project's board. One per cwd. */
+export type BoardTab = {
+  id: number;
+  kind: "board";
+  title: string;
+  cwd: string;
+};
+
+/** Full-window run graph for a pi session. One per cwd. */
+export type RunGraphTab = {
+  id: number;
+  kind: "run-graph";
+  title: string;
+  cwd?: string;
+  /** The pi tab whose session this run graph renders. */
+  piTabId: number;
+};
+
 export type AgentTranscriptTab = {
   id: number;
   kind: "agent-transcript";
@@ -98,6 +116,8 @@ export type Tab =
   | EditorTab
   | MarkdownTab
   | PiTab
+  | BoardTab
+  | RunGraphTab
   | AgentTranscriptTab
   | GitDiffTab
   | GitHistoryTab
@@ -317,6 +337,64 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     setActiveId(id);
     return id;
   }, []);
+
+  /** Open (or reuse + activate) the project's board tab. One per cwd. */
+  const openBoardTab = useCallback((cwd: string) => {
+    const curr = tabsRef.current;
+    const existing = curr.find((t) => t.kind === "board" && t.cwd === cwd);
+    if (existing) {
+      setActiveId(existing.id);
+      return existing.id;
+    }
+    const id = nextIdRef.current++;
+    const nextTabs = [
+      ...curr,
+      { id, kind: "board", title: "Board", cwd } satisfies BoardTab,
+    ];
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+    setActiveId(id);
+    return id;
+  }, []);
+
+  /**
+   * Open (or reuse + activate) the run-graph tab for a cwd. One per cwd;
+   * re-point it at the requesting pi session when it changes.
+   */
+  const openRunGraphTab = useCallback(
+    (cwd: string | undefined, piTabId: number) => {
+      const curr = tabsRef.current;
+      const existing = curr.find(
+        (t): t is RunGraphTab => t.kind === "run-graph" && t.cwd === cwd,
+      );
+      if (existing) {
+        const nextTabs =
+          existing.piTabId === piTabId
+            ? curr
+            : curr.map((t) => (t.id === existing.id ? { ...t, piTabId } : t));
+        tabsRef.current = nextTabs;
+        if (nextTabs !== curr) setTabs(nextTabs);
+        setActiveId(existing.id);
+        return existing.id;
+      }
+      const id = nextIdRef.current++;
+      const nextTabs = [
+        ...curr,
+        {
+          id,
+          kind: "run-graph",
+          title: "Run graph",
+          cwd,
+          piTabId,
+        } satisfies RunGraphTab,
+      ];
+      tabsRef.current = nextTabs;
+      setTabs(nextTabs);
+      setActiveId(id);
+      return id;
+    },
+    [],
+  );
 
   const openGitDiffTab = useCallback(
     (input: {
@@ -701,6 +779,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     pinTab,
     newMarkdownTab,
     newPiTab,
+    openBoardTab,
+    openRunGraphTab,
     openAgentTranscriptTab,
     openGitDiffTab,
     openCommitHistoryTab,

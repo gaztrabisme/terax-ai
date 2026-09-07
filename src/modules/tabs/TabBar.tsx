@@ -1,3 +1,18 @@
+import {
+  AiChat02Icon,
+  Cancel01Icon,
+  Clock01Icon,
+  ComputerTerminal02Icon,
+  DashboardSquare02Icon,
+  FlowIcon,
+  GitBranchIcon,
+  GitCompareIcon,
+  IncognitoIcon,
+  PencilEdit02Icon,
+  PlusSignIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -16,19 +31,6 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
-import {
-  AiChat02Icon,
-  Cancel01Icon,
-  Clock01Icon,
-  ComputerTerminal02Icon,
-  GitBranchIcon,
-  GitCompareIcon,
-  IncognitoIcon,
-  PencilEdit02Icon,
-  PlusSignIcon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useRef, useState } from "react";
 import { labelFor } from "./lib/tabLabel";
 import type { EditorTab, Tab } from "./lib/useTabs";
 
@@ -329,6 +331,26 @@ function TabIcon({ tab }: { tab: Tab }) {
     return (
       <HugeiconsIcon
         icon={AiChat02Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
+  if (tab.kind === "board") {
+    return (
+      <HugeiconsIcon
+        icon={DashboardSquare02Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
+  if (tab.kind === "run-graph") {
+    return (
+      <HugeiconsIcon
+        icon={FlowIcon}
         size={14}
         strokeWidth={2}
         className="shrink-0"

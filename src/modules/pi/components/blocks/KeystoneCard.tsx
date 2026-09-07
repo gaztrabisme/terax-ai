@@ -25,7 +25,7 @@ export function recommendedAnswers(block: PiAskBlock): PiAskAnswer[] {
 export function KeystoneCard({ block, onAnswer, onDismiss }: Props) {
   if (block.state !== "pending") {
     return (
-      <div className="rounded-md border border-border/60 px-2 py-1 text-[11px] text-muted-foreground">
+      <div className="rounded-md border border-border/60 rounded-md px-2 py-1 text-xs text-muted-foreground">
         ask {block.state}
       </div>
     );
@@ -36,7 +36,7 @@ export function KeystoneCard({ block, onAnswer, onDismiss }: Props) {
         const questionId = effectiveQuestionId(q, qi);
         return (
           <div key={questionId}>
-            <div className="text-[11px] font-medium">
+            <div className="text-xs font-medium">
               {q.header ? `${q.header}: ` : ""}
               {q.question}
             </div>
@@ -49,7 +49,7 @@ export function KeystoneCard({ block, onAnswer, onDismiss }: Props) {
                     onAnswer([{ questionId, selected: [opt.label] }])
                   }
                   className={cn(
-                    "rounded border border-border/60 px-2 py-0.5 hover:bg-accent hover:text-foreground",
+                    "rounded-md border border-border/60 px-2 py-0.5 hover:bg-accent hover:text-foreground",
                     q.recommended === oi && "border-yellow-500/60 font-medium",
                   )}
                   title={opt.description}
@@ -65,14 +65,14 @@ export function KeystoneCard({ block, onAnswer, onDismiss }: Props) {
         <button
           type="button"
           onClick={() => onAnswer(recommendedAnswers(block))}
-          className="rounded bg-primary px-2 py-0.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+          className="rounded-md bg-primary px-2 py-0.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
         >
           Approve
         </button>
         <button
           type="button"
           onClick={onDismiss}
-          className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="rounded-md px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           Reject
         </button>

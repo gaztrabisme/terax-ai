@@ -32,14 +32,14 @@ export function MermaidRenderer({ part }: PiPartRendererProps) {
 
   if (error) {
     return (
-      <pre className="my-1 overflow-x-auto rounded bg-accent/40 p-2 font-mono text-[11px] text-destructive">
+      <pre className="my-1 overflow-x-auto rounded bg-accent/40 p-2 font-mono text-xs text-destructive">
         {code}
       </pre>
     );
   }
   if (svg === null) {
     return (
-      <pre className="my-1 overflow-x-auto rounded bg-accent/40 p-2 font-mono text-[11px] text-muted-foreground">
+      <pre className="my-1 overflow-x-auto rounded bg-accent/40 p-2 font-mono text-xs text-muted-foreground">
         {code}
       </pre>
     );

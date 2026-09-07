@@ -93,14 +93,14 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
         data: {
           label: (
             <div className="text-left">
-              <div className="flex items-center gap-1.5 text-[11px] font-medium">
+              <div className="flex items-center gap-1.5 text-xs font-medium">
                 <span
                   className="inline-block size-2 rounded-full"
                   style={{ background: statusColor[n.status] }}
                 />
                 {n.label}
               </div>
-              <div className="text-[10px] text-muted-foreground">
+              <div className="text-xs text-muted-foreground">
                 {statusText(n)}
               </div>
             </div>

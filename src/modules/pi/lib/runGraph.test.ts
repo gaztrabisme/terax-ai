@@ -99,4 +99,30 @@ describe("runGraph over the q6 child transcript", () => {
     const state = replayChild();
     expect(state.sessionId).toBe("8b394965-ac25-4144-8d5e-87dc14d04ad6");
   });
+
+  it("keeps finished children as nodes with final status and a done parent", () => {
+    const done = replayChild();
+    const graph = buildRunGraph(done, { [CHILD_FILE]: done });
+    expect(graph.nodes.map((n) => n.id)).toEqual([PARENT_NODE_ID, CHILD_FILE]);
+    const parent = graph.nodes.find((n) => n.id === PARENT_NODE_ID);
+    const child = graph.nodes.find((n) => n.id === CHILD_FILE);
+    expect(parent?.status).toBe("done");
+    expect(child?.status).toBe("done");
+    expect(child?.role).toBe("child");
+  });
+
+  it("a finished child keeps error as its final status when a tool failed", () => {
+    const failed = replayChild([
+      ...FIXTURE_LINES,
+      '{"type":"tool_execution_start","toolCallId":"call_e","toolName":"bash","args":{}}',
+      '{"type":"tool_execution_end","toolCallId":"call_e","toolName":"bash","result":{"content":[]},"isError":true}',
+    ]);
+    const graph = buildRunGraph(replayChild(), { [CHILD_FILE]: failed });
+    expect(graph.nodes.map((n) => n.id)).toContain(CHILD_FILE);
+    expect(graph.nodes.find((n) => n.id === CHILD_FILE)?.status).toBe("error");
+    // The parent itself is unaffected by the child's failed tool.
+    expect(graph.nodes.find((n) => n.id === PARENT_NODE_ID)?.status).toBe(
+      "done",
+    );
+  });
 });

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { PiToolBlock } from "@/modules/pi/lib/parse";
-import { ToolRow, tokenEstimate } from "./ToolRow";
+import { ToolRow, toolFamilyIcon, toolSummary } from "./ToolRow";
 
 function toolBlock(over: Partial<PiToolBlock> = {}): PiToolBlock {
   return {
@@ -13,29 +13,32 @@ function toolBlock(over: Partial<PiToolBlock> = {}): PiToolBlock {
     partialText: "hi\n",
     resultText: "hi\n",
     isError: false,
+    at: 0,
     ...over,
   };
 }
 
-describe("ToolRow fold state", () => {
-  it("is folded by default: name and estimate visible, result hidden", () => {
+describe("ToolStep fold state", () => {
+  it("is folded by default: icon family, name and one-line summary visible", () => {
     const html = renderToStaticMarkup(<ToolRow block={toolBlock()} />);
     expect(html).toContain("bash");
-    expect(html).toContain("~1 tok");
-    // Folded shows a one-line preview only: no args panel, no full result.
-    expect(html).not.toContain("echo hi");
-    expect(html).not.toContain("args:");
+    expect(html).toContain("echo hi");
+    // Folded shows the summary only: no args panel, no full result body.
+    expect(html).not.toContain("Args");
+    expect(html).not.toContain("Result");
   });
 
-  it("expanded shows the args and the full result text", () => {
+  it("expanded shows the args and the result body", () => {
     const html = renderToStaticMarkup(
       <ToolRow block={toolBlock()} defaultOpen />,
     );
+    expect(html).toContain("Args");
     expect(html).toContain("echo hi");
+    expect(html).toContain("Result");
     expect(html).toContain("hi");
   });
 
-  it("running rows show the partial output estimate, no result", () => {
+  it("running rows show a live status and no result yet", () => {
     const html = renderToStaticMarkup(
       <ToolRow
         block={toolBlock({
@@ -43,16 +46,20 @@ describe("ToolRow fold state", () => {
           resultText: null,
           partialText: "working output here",
         })}
-      />,
+      />
     );
-    expect(html).toContain("...");
-    expect(html).toContain("work");
+    expect(html).toContain("running");
+    expect(html).not.toContain("Result");
   });
 
-  it("token estimate is ceil(chars/4), minimum 1", () => {
-    expect(tokenEstimate(null)).toBe(1);
-    expect(tokenEstimate("")).toBe(1);
-    expect(tokenEstimate("ab")).toBe(1);
-    expect(tokenEstimate("abcde")).toBe(2);
+  it("summaries fall back to the result text when args carry nothing", () => {
+    const block = toolBlock({ args: {}, resultText: "line one\nline two" });
+    expect(toolSummary(block)).toBe("line one");
+  });
+
+  it("icons follow the tool family", () => {
+    // Unknown tools keep the generic wrench; families map to their own icon.
+    expect(toolFamilyIcon("bash")).not.toBe(toolFamilyIcon("read"));
+    expect(toolFamilyIcon("mystery_tool")).toBeTruthy();
   });
 });

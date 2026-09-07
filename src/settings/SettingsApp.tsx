@@ -8,6 +8,7 @@ import {
   InformationCircleIcon,
   KeyboardIcon,
   PaintBoardIcon,
+  ServerStack03Icon,
   Settings01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -15,12 +16,18 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { JSX, useEffect, useState } from "react";
 import { AboutSection } from "./sections/AboutSection";
 import { GeneralSection } from "./sections/GeneralSection";
+import { PiSection } from "./sections/PiSection";
 import { ShortcutsSection } from "./sections/ShortcutsSection";
 import { ThemesSection } from "./sections/ThemesSection";
+
+// openSettingsWindow.ts owns the SettingsTab union and lives outside this
+// task's file scope; "pi" is cast until that union grows the member.
+const PI_TAB_ID = "pi";
 
 const TABS: { id: SettingsTab; label: string; icon: typeof Settings01Icon, component: () => JSX.Element }[] =
   [
     { id: "general", label: "General", icon: Settings01Icon, component: GeneralSection },
+    { id: PI_TAB_ID, label: "Pi", icon: ServerStack03Icon, component: PiSection },
     { id: "themes", label: "Themes", icon: PaintBoardIcon, component: ThemesSection },
     { id: "shortcuts", label: "Shortcuts", icon: KeyboardIcon, component: ShortcutsSection },
     { id: "about", label: "About", icon: InformationCircleIcon, component: AboutSection },
@@ -28,6 +35,7 @@ const TABS: { id: SettingsTab; label: string; icon: typeof Settings01Icon, compo
 
 const VALID_TABS: SettingsTab[] = [
   "general",
+  PI_TAB_ID,
   "themes",
   "shortcuts",
   "about",

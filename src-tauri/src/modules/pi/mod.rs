@@ -63,7 +63,7 @@ pub async fn pi_open(
             log::warn!("pi_open: cwd rejected: {e}");
             e
         })?;
-    let env = env.unwrap_or_default();
+    let env = launch::expand_env_homes(&env.unwrap_or_default());
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let session = tauri::async_runtime::spawn_blocking(move || {
         let spec = match program.as_deref().map(str::trim) {
@@ -108,6 +108,13 @@ pub async fn pi_open(
     state.sessions.write().unwrap().insert(id, session);
     log::info!("pi opened id={id}");
     Ok(id)
+}
+
+/// The user's home dir, so the frontend can expand `$HOME/...` paths (agent
+/// dir auth.json, models.json.tmpl) before calling the fs invokes.
+#[tauri::command]
+pub fn pi_home_dir() -> Option<String> {
+    launch::home_dir()
 }
 
 #[tauri::command]

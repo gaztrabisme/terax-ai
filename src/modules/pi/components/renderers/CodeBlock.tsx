@@ -15,7 +15,7 @@ export function CodeBlockRenderer({ part, language }: PiPartRendererProps) {
   };
   return (
     <div className="group relative my-1 overflow-x-auto rounded bg-accent/40">
-      <div className="flex items-center justify-between px-2 pt-1 text-[10px] text-muted-foreground">
+      <div className="flex items-center justify-between px-2 pt-1 text-xs text-muted-foreground">
         <span>{language ?? "code"}</span>
         <button
           type="button"
@@ -25,7 +25,7 @@ export function CodeBlockRenderer({ part, language }: PiPartRendererProps) {
           {copied ? "copied" : "copy"}
         </button>
       </div>
-      <pre className="p-2 pt-0.5 font-mono text-[11px]">{code}</pre>
+      <pre className="p-2 pt-0.5 font-mono text-xs">{code}</pre>
     </div>
   );
 }

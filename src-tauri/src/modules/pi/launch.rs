@@ -6,7 +6,7 @@ use super::session::SpawnSpec;
 /// HOME for `$HOME/` expansion in settings values: the env var first (the
 /// documented contract), the `dirs` lookup as the Windows fallback where HOME
 /// is usually unset. Never passed through a shell.
-fn home_dir() -> Option<String> {
+pub(crate) fn home_dir() -> Option<String> {
     match std::env::var("HOME") {
         Ok(home) if !home.is_empty() => Some(home),
         _ => dirs::home_dir().map(|p| p.to_string_lossy().into_owned()),
@@ -15,7 +15,7 @@ fn home_dir() -> Option<String> {
 
 /// Expands a leading `$HOME/` (or bare `$HOME`) in `dir` against `home`.
 /// Pure: everything else passes through untouched.
-fn expand_home(dir: &str, home: Option<&str>) -> String {
+pub(crate) fn expand_home(dir: &str, home: Option<&str>) -> String {
     let Some(home) = home.filter(|h| !h.is_empty()) else {
         return dir.to_string();
     };
@@ -27,6 +27,16 @@ fn expand_home(dir: &str, home: Option<&str>) -> String {
         Some(rest) if !rest.is_empty() => format!("{home}/{rest}"),
         _ => dir.to_string(),
     }
+}
+
+/// Expands a leading `$HOME` in every spawn env value Rust-side: pi and the
+/// launcher receive these literally (no shell ever sees them), so a user-set
+/// `PI_CODING_AGENT_DIR=$HOME/...` must be resolved before spawn.
+pub(crate) fn expand_env_homes(env: &HashMap<String, String>) -> HashMap<String, String> {
+    let home = home_dir();
+    env.iter()
+        .map(|(k, v)| (k.clone(), expand_home(v, home.as_deref())))
+        .collect()
 }
 
 /// Extra args appended after the mode flags (prompt targets, provider
@@ -206,6 +216,32 @@ mod tests {
         assert_eq!(expand_home("/abs/bin", Some("/u/me")), "/abs/bin");
         assert_eq!(expand_home("$HOME/x", None), "$HOME/x");
         assert_eq!(expand_home("$HOME/x", Some("")), "$HOME/x");
+    }
+
+    #[test]
+    fn expand_env_homes_maps_only_home_prefixed_values() {
+        let mut env = HashMap::new();
+        env.insert(
+            "PI_CODING_AGENT_DIR".to_string(),
+            "$HOME/agents/main".to_string(),
+        );
+        env.insert("EFFICIENT_PI_MODEL".to_string(), "qwen3.8-27b".to_string());
+        let expanded = expand_env_homes(&env);
+        // expand_env_homes reads the process HOME; mirror expand_home here.
+        let expected = match home_dir().as_deref() {
+            Some(h) => format!("{}/agents/main", h.trim_end_matches('/')),
+            None => "$HOME/agents/main".to_string(),
+        };
+        assert_eq!(
+            expanded.get("PI_CODING_AGENT_DIR").map(String::as_str),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            expanded.get("EFFICIENT_PI_MODEL").map(String::as_str),
+            Some("qwen3.8-27b")
+        );
+        // Empty input: nothing to expand.
+        assert_eq!(expand_env_homes(&HashMap::new()).len(), 0);
     }
 
     #[test]

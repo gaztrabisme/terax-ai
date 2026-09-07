@@ -33,6 +33,7 @@ function mountAsk(tabId: number, requestId: string) {
         exited: false,
         exitCode: null,
         error: null,
+        roles: { provider: "", model: "", smol: "" },
       },
     },
   }));

@@ -171,7 +171,7 @@ export const ReasoningTrigger = memo(
     return (
       <CollapsibleTrigger
         className={cn(
-          "flex items-center gap-1.5 italic text-[11px] text-muted-foreground transition-colors hover:text-foreground",
+          "flex items-center gap-1.5 italic text-xs text-muted-foreground transition-colors hover:text-foreground",
           className,
         )}
         {...props}

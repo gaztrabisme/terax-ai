@@ -10,6 +10,8 @@ export function labelFor(t: Tab): string {
   if (t.kind === "editor") return t.title;
   if (t.kind === "markdown") return t.title;
   if (t.kind === "pi") return t.title;
+  if (t.kind === "board") return t.title;
+  if (t.kind === "run-graph") return t.title;
   if (t.kind === "agent-transcript") return t.title;
   if (t.kind === "git-diff") return t.title;
   if (t.kind === "git-history") return t.title;

@@ -1,8 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import { PI_MODULE_PREFS_DEFAULTS } from "@/modules/pi/lib/settingsSchema";
 import { currentWorkspaceEnv } from "@/modules/workspace";
-import { quoteShellArg } from "@/lib/shellQuote";
-import { useEffect, useState } from "react";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  boardListCommand,
+  parseBoard,
+  railTickets,
+  type BoardSnapshot,
+} from "../lib/board";
+import { ColumnStrip } from "./board/ColumnStrip";
+import { Kanban } from "./board/Kanban";
+import { TicketCard } from "./board/TicketCard";
+import { TicketSheet } from "./board/TicketSheet";
 
 type CommandOutput = {
   stdout: string;
@@ -14,46 +24,34 @@ type Props = {
   cwd?: string;
   /** Bumped by the parent after any board_ tool execution. */
   refreshKey?: number;
+  /** "rail" is the compact pane, "full" the kanban tab. */
+  mode?: BoardViewMode;
   /** Overrides the configured board CLI path. */
   boardBin?: string;
+  /** Overrides the harness agent path used for keystone actions. */
+  agentBin?: string;
 };
 
-// The binary is an absolute setting, not a cwd-relative lookup; --root points
-// it at the project whose .pi/board.db it should read while the shell keeps
-// the tab cwd as working directory.
-function quoteBin(boardBin: string): string {
-  return boardBin.startsWith("$HOME/")
-    ? `"$HOME"/${quoteShellArg(boardBin.slice("$HOME/".length))}`
-    : quoteShellArg(boardBin);
-}
+export type BoardViewMode = "rail" | "full";
 
-export function boardListCommand(boardBin: string, root: string): string {
-  return `${quoteBin(boardBin)} --root ${quoteShellArg(root)} board`;
-}
+const POLL_MS = 10000;
 
-export function boardShowCommand(
-  boardBin: string,
-  root: string,
-  ticketId: string,
-): string {
-  return `${quoteBin(boardBin)} --root ${quoteShellArg(root)} show ${quoteShellArg(ticketId)}`;
-}
-
-// The board is read through <cwd>/bin/board via the existing one-shot shell
-// command; text output only, no SQLite dependency.
-export function BoardPane({
+export function BoardView({
   cwd,
   refreshKey = 0,
+  mode = "rail",
   boardBin = PI_MODULE_PREFS_DEFAULTS.boardBin,
+  agentBin,
 }: Props) {
-  const [lines, setLines] = useState<string[]>([]);
+  const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [detail, setDetail] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [filter, setFilter] = useState<string | null>(null);
+  const loadSeq = useRef(0);
 
-  useEffect(() => {
+  const refresh = useCallback(() => {
     if (!cwd) return;
-    let alive = true;
+    const seq = ++loadSeq.current;
     invoke<CommandOutput>("shell_run_command", {
       command: boardListCommand(boardBin, cwd),
       cwd,
@@ -61,86 +59,106 @@ export function BoardPane({
       workspace: currentWorkspaceEnv(),
     })
       .then((out) => {
-        if (!alive) return;
+        if (seq !== loadSeq.current) return;
         if (out.exit_code !== 0 && out.stdout.trim() === "") {
           setError(out.stderr.trim() || `board exited ${out.exit_code}`);
-          setLines([]);
           return;
         }
-        setError(null);
-        setLines(out.stdout.split("\n").filter((l) => l.trim().length > 0));
+        try {
+          setSnapshot(parseBoard(out.stdout));
+          setError(null);
+        } catch {
+          setError(
+            out.stderr.trim() || "board printed unparseable output",
+          );
+        }
       })
       .catch((e: unknown) => {
-        if (alive) setError(e instanceof Error ? e.message : String(e));
+        if (seq === loadSeq.current) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
       });
-    return () => {
-      alive = false;
-    };
-  }, [cwd, refreshKey]);
+  }, [cwd, boardBin]);
 
-  const openTicket = (id: string) => {
-    if (!cwd) return;
-    setSelected(id);
-    setDetail(null);
-    void invoke<CommandOutput>("shell_run_command", {
-      command: boardShowCommand(boardBin, cwd, id),
-      cwd,
-      timeoutSecs: 15,
-      workspace: currentWorkspaceEnv(),
-    })
-      .then((out) => setDetail(out.stdout.trim() || out.stderr.trim()))
-      .catch((e: unknown) =>
-        setDetail(e instanceof Error ? e.message : String(e)),
-      );
-  };
+  // Refresh on mount, on refreshKey bumps, and every 10s while the document
+  // is visible; the interval is cleared on unmount or when the deps change.
+  useEffect(() => {
+    refresh();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [refresh, refreshKey]);
+
+  const tickets = snapshot
+    ? railTickets(
+        snapshot,
+        snapshot.states.includes(filter ?? "") ? filter : null,
+      )
+    : [];
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border-t border-border/60">
-      <div className="flex h-7 shrink-0 items-center gap-2 px-2 text-[10px] font-medium uppercase text-muted-foreground">
+      <div className="flex h-7 shrink-0 items-center gap-2 px-2 text-[12px] font-medium uppercase text-muted-foreground">
         <span>board</span>
         <span className="flex-1" />
         {error ? (
           <span className="normal-case text-destructive">offline</span>
         ) : null}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 text-[11px]">
-        {error ? <div className="text-muted-foreground">{error}</div> : null}
-        {!error && lines.length === 0 ? (
-          <div className="text-muted-foreground">No board output.</div>
-        ) : null}
-        {lines.map((line, i) => {
-          const id = line.match(/[a-zA-Z0-9]+-[0-9]+/)?.[0];
-          return (
-            <button
-              key={i}
-              type="button"
-              onClick={() => id && openTicket(id)}
-              className={`block w-full truncate rounded px-1 py-0.5 text-left font-mono hover:bg-accent hover:text-foreground ${
-                selected && id === selected ? "bg-accent text-foreground" : ""
-              }`}
-              title={line}
-            >
-              {line}
-            </button>
-          );
-        })}
-        {detail ? (
-          <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-accent/40 p-1.5 font-mono text-[10px]">
-            {detail}
+
+      {error ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+          <div className="text-[14px] text-destructive">Board offline</div>
+          <pre className="mt-1 whitespace-pre-wrap font-mono text-[12px] text-muted-foreground">
+            {error}
           </pre>
-        ) : null}
-      </div>
+        </div>
+      ) : !snapshot ? (
+        <div className="min-h-0 flex-1 space-y-1.5 px-2 pb-2">
+          <Skeleton className="h-5 w-full rounded-md" />
+          <Skeleton className="h-9 w-full rounded-md" />
+          <Skeleton className="h-9 w-full rounded-md" />
+          <Skeleton className="h-9 w-3/4 rounded-md" />
+        </div>
+      ) : snapshot.tickets.length === 0 ? (
+        <div className="flex min-h-0 flex-1 items-start px-2 pb-2 text-[14px] text-muted-foreground">
+          No tickets yet
+        </div>
+      ) : mode === "full" ? (
+        <Kanban snapshot={snapshot} onOpen={setSelectedId} />
+      ) : (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <ColumnStrip snapshot={snapshot} filter={filter} onFilter={setFilter} />
+          <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-2 pb-2">
+            {tickets.length === 0 ? (
+              <div className="text-[12px] text-muted-foreground">
+                No tickets
+              </div>
+            ) : (
+              tickets.map((ticket) => (
+                <TicketCard
+                  key={ticket.id}
+                  ticket={ticket}
+                  dense
+                  onOpen={setSelectedId}
+                />
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      <TicketSheet
+        cwd={cwd}
+        boardBin={boardBin}
+        agentBin={agentBin}
+        ticketId={selectedId}
+        onOpenChange={(open) => {
+          if (!open) setSelectedId(null);
+        }}
+        onRefresh={refresh}
+      />
     </div>
   );
-}
-
-export type BoardViewMode = "rail" | "full";
-
-// Layout seam: the rail shows the compact pane, the full tab the same data
-// with room for columns. Both modes render BoardPane until the kanban lands.
-export function BoardView({
-  mode: _mode = "rail",
-  ...props
-}: Props & { mode?: BoardViewMode }) {
-  return <BoardPane {...props} />;
 }

@@ -30,11 +30,11 @@ export function ImageRenderer({ part }: PiPartRendererProps) {
 
   const name = path.split(/[\\/]/).pop() ?? path;
   return (
-    <div className="my-1 flex items-center gap-2 rounded border border-border/60 px-2 py-1 text-[11px] text-muted-foreground">
+    <div className="my-1 flex items-center gap-2 rounded border border-border/60 px-2 py-1 text-xs text-muted-foreground">
       <span className="font-medium text-foreground">{name}</span>
       {stat ? <span>{stat.size.toLocaleString()} bytes</span> : null}
       {missing ? <span>file missing</span> : null}
-      <span className="truncate font-mono text-[10px]">{path}</span>
+      <span className="truncate font-mono text-xs">{path}</span>
     </div>
   );
 }

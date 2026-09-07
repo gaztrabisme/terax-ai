@@ -56,7 +56,7 @@ export function registerPartRenderer(
 
 // Graceful fallback for unregistered content types and tools.
 export const FallbackPartRenderer: PiPartRenderer = ({ part }) => (
-  <div className="my-1 rounded border border-dashed border-border/60 px-2 py-1 text-[11px] text-muted-foreground">
+  <div className="my-1 rounded border border-dashed border-border/60 px-2 py-1 text-xs text-muted-foreground">
     no renderer for content type "{part.type}"
   </div>
 );
@@ -68,7 +68,7 @@ export function rendererForPart(type: string): PiPartRenderer {
 export const FallbackToolPanel: ComponentType<{ block: PiToolBlock }> = ({
   block,
 }) => (
-  <div className="my-1 rounded border border-dashed border-border/60 px-2 py-1 text-[11px] text-muted-foreground">
+  <div className="my-1 rounded border border-dashed border-border/60 px-2 py-1 text-xs text-muted-foreground">
     no renderer registered for tool "{block.toolName}"
   </div>
 );

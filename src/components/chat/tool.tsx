@@ -88,14 +88,14 @@ const ToolImpl = ({
         />
         <span className="shrink-0 font-medium text-foreground">{toolName}</span>
         {summary ? (
-          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+          <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">
             {summary}
           </span>
         ) : (
           <span className="flex-1" />
         )}
         {isError && (
-          <span className="shrink-0 text-[10px] font-medium text-destructive">
+          <span className="shrink-0 text-xs font-medium text-destructive">
             failed
           </span>
         )}
@@ -129,7 +129,7 @@ export function ToolInput({ input }: { input: unknown }) {
   if (input == null) return null;
   return (
     <div className="space-y-1">
-      <div className="text-[10px] font-medium text-muted-foreground">Input</div>
+      <div className="text-xs font-medium text-muted-foreground">Input</div>
       <CodeBlockMini
         code={typeof input === "string" ? input : JSON.stringify(input, null, 2)}
         language="json"
@@ -148,8 +148,8 @@ function ToolOutput({
   if (errorText) {
     return (
       <div className="space-y-1">
-        <div className="text-[10px] font-medium text-destructive">Error</div>
-        <div className="rounded bg-destructive/10 px-2 py-1.5 font-mono text-[11px] whitespace-pre-wrap text-destructive">
+        <div className="text-xs font-medium text-destructive">Error</div>
+        <div className="rounded bg-destructive/10 px-2 py-1.5 font-mono text-xs whitespace-pre-wrap text-destructive">
           {errorText}
         </div>
       </div>
@@ -166,7 +166,7 @@ function ToolOutput({
 
   return (
     <div className="space-y-1">
-      <div className="text-[10px] font-medium text-muted-foreground">
+      <div className="text-xs font-medium text-muted-foreground">
         Output
       </div>
       {body}
@@ -179,7 +179,7 @@ function CodeBlockMini({ code }: { code: string; language: string }) {
   // file content is shown in the editor diff. Highlighting here is not worth
   // the parser hop.
   return (
-    <pre className="max-h-60 overflow-auto rounded bg-muted/40 p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-foreground">
+    <pre className="max-h-60 overflow-auto rounded bg-muted/40 p-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground">
       {code}
     </pre>
   );
