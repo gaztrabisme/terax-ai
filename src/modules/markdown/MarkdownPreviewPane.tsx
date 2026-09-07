@@ -1,4 +1,4 @@
-import { MarkdownCode } from "@/components/ai-elements/markdown-code";
+import { MarkdownCode } from "@/components/chat/markdown-code";
 import { cn } from "@/lib/utils";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";

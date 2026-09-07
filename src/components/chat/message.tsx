@@ -11,7 +11,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ArrowLeft01Icon, ArrowRight01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { UIMessage } from "ai";
+import type { MessageRole } from "./types"
 import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
 import {
   createContext,
@@ -27,7 +27,7 @@ import { ChatStreamingProvider } from "./chat-code";
 import { MarkdownCode } from "./markdown-code";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
-  from: UIMessage["role"];
+  from: MessageRole;
 };
 
 export const Message = ({ className, from, ...props }: MessageProps) => (

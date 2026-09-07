@@ -3,21 +3,18 @@ import { WindowControls } from "@/components/WindowControls";
 import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import type { SettingsTab } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+
 import {
-  AiScanIcon,
   InformationCircleIcon,
+  KeyboardIcon,
   PaintBoardIcon,
   Settings01Icon,
-  UserMultiple02Icon,
-  KeyboardIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { JSX, useEffect, useState } from "react";
 import { AboutSection } from "./sections/AboutSection";
-import { AgentsSection } from "./sections/AgentsSection";
 import { GeneralSection } from "./sections/GeneralSection";
-import { ModelsSection } from "./sections/ModelsSection";
 import { ShortcutsSection } from "./sections/ShortcutsSection";
 import { ThemesSection } from "./sections/ThemesSection";
 
@@ -26,8 +23,6 @@ const TABS: { id: SettingsTab; label: string; icon: typeof Settings01Icon, compo
     { id: "general", label: "General", icon: Settings01Icon, component: GeneralSection },
     { id: "themes", label: "Themes", icon: PaintBoardIcon, component: ThemesSection },
     { id: "shortcuts", label: "Shortcuts", icon: KeyboardIcon, component: ShortcutsSection },
-    { id: "models", label: "Models", icon: AiScanIcon, component: ModelsSection },
-    { id: "agents", label: "Agents", icon: UserMultiple02Icon, component: AgentsSection },
     { id: "about", label: "About", icon: InformationCircleIcon, component: AboutSection },
   ];
 
@@ -35,8 +30,6 @@ const VALID_TABS: SettingsTab[] = [
   "general",
   "themes",
   "shortcuts",
-  "models",
-  "agents",
   "about",
 ];
 
@@ -44,8 +37,6 @@ function readInitialTab(): SettingsTab {
   if (typeof window === "undefined") return "general";
   const url = new URL(window.location.href);
   const t = url.searchParams.get("tab");
-  // Back-compat: legacy "ai" / "connections" → "models".
-  if (t === "ai" || t === "connections") return "models";
   if (t && (VALID_TABS as string[]).includes(t)) return t as SettingsTab;
   return "general";
 }
@@ -61,10 +52,6 @@ export function SettingsApp() {
 
   useEffect(() => {
     const apply = (detail: string) => {
-      if (detail === "ai" || detail === "connections") {
-        setActive("models");
-        return;
-      }
       if ((VALID_TABS as string[]).includes(detail)) {
         setActive(detail as SettingsTab);
       }

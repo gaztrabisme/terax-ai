@@ -1,10 +1,9 @@
 import { cn } from "@/lib/utils";
 import type { PiTab as PiTabData, Tab } from "@/modules/tabs";
 import { useEffect, useRef, useState } from "react";
-import { BoardPane } from "./components/BoardPane";
-import { Composer } from "./components/Composer";
+import { BoardView } from "./components/BoardPane";
+import { ChatPane } from "./components/ChatPane";
 import { RunGraph } from "./components/RunGraph";
-import { Transcript } from "./components/Transcript";
 import { useChildStore } from "./lib/childStore";
 import { usePiStore } from "./lib/piStore";
 import { watchTranscripts } from "./lib/rpc-client";
@@ -39,28 +38,6 @@ export function PiStack({ tabs, activeId, onOpenChild }: StackProps) {
   );
 }
 
-function statusLabel(
-  status: string,
-  exited: boolean,
-  exitCode: number | null,
-): string {
-  if (exited) return `exited (${exitCode ?? "signal"})`;
-  switch (status) {
-    case "idle":
-      return "idle";
-    case "thinking":
-      return "thinking";
-    case "tool":
-      return "running tool";
-    case "awaiting-ask":
-      return "waiting for answer";
-    case "done":
-      return "done";
-    default:
-      return status;
-  }
-}
-
 export function PiTab({
   tabId,
   cwd,
@@ -74,11 +51,6 @@ export function PiTab({
 }) {
   const entry = usePiStore((s) => s.tabs[tabId]);
   const openSession = usePiStore((s) => s.openSession);
-  const sendPrompt = usePiStore((s) => s.sendPrompt);
-  const answerAsk = usePiStore((s) => s.answerAsk);
-  const dismissAsk = usePiStore((s) => s.dismissAsk);
-  const kill = usePiStore((s) => s.kill);
-  const [sendError, setSendError] = useState<string | null>(null);
   const [boardTick, setBoardTick] = useState(0);
   const seenBoardTool = useRef(false);
 
@@ -128,93 +100,11 @@ export function PiTab({
     }
   }, [blocks]);
 
-  const submit = (markdown: string) => {
-    if (!entry?.session || entry.exited) return;
-    setSendError(null);
-    sendPrompt(tabId, markdown).catch((e) => {
-      setSendError(e instanceof Error ? e.message : String(e));
-    });
-  };
-
-  const state = entry?.state;
-  const busy = state?.status === "thinking" || state?.status === "tool";
 
   return (
     <div className="flex h-full min-h-0 gap-2">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/60 bg-card">
-        <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-xs text-muted-foreground">
-          <span
-            className={cn(
-              "size-1.5 shrink-0 rounded-full",
-              entry?.exited
-                ? "bg-destructive"
-                : state?.status === "awaiting-ask"
-                  ? "bg-yellow-500"
-                  : busy
-                    ? "animate-pulse bg-blue-500"
-                    : "bg-muted-foreground/40",
-            )}
-          />
-          <span className="font-medium text-foreground">pi</span>
-          <span>
-            {statusLabel(
-              state?.status ?? "idle",
-              entry?.exited ?? false,
-              entry?.exitCode ?? null,
-            )}
-          </span>
-          {state?.sessionId ? (
-            <span className="truncate font-mono text-[10px]">
-              {state.sessionId.slice(0, 8)}
-            </span>
-          ) : null}
-          {state?.tokens ? (
-            <span>{state.tokens.totalTokens.toLocaleString()} tok</span>
-          ) : null}
-          <span className="flex-1" />
-          {!entry?.exited && entry?.session ? (
-            <button
-              type="button"
-              onClick={() => void kill(tabId)}
-              className="rounded px-1.5 py-0.5 hover:bg-accent hover:text-foreground"
-            >
-              Kill
-            </button>
-          ) : null}
-        </div>
-
-        {entry?.error ? (
-          <div className="mx-3 mt-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
-            {entry.error}
-          </div>
-        ) : null}
-        {sendError ? (
-          <div className="mx-3 mt-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
-            {sendError}
-          </div>
-        ) : null}
-
-        <Transcript
-          blocks={blocks}
-          onAnswer={(requestId, answers) =>
-            void answerAsk(tabId, requestId, answers)
-          }
-          onDismiss={(requestId) => void dismissAsk(tabId, requestId)}
-        />
-
-        <Composer
-          tabId={tabId}
-          cwd={cwd}
-          disabled={!entry?.session || entry.exited}
-          placeholder={
-            entry?.session
-              ? "Message pi (markdown, Enter sends)"
-              : entry?.exited
-                ? "Session exited"
-                : "Waiting for pi..."
-          }
-          onSubmit={submit}
-        />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/60">
+        <ChatPane tabId={tabId} cwd={cwd} onOpenChild={onOpenChild} />
       </div>
 
       <div className="flex h-full min-h-0 w-72 shrink-0 flex-col overflow-hidden rounded-lg border border-border/60 bg-card">
@@ -222,7 +112,7 @@ export function PiTab({
           <RunGraph tabId={tabId} onOpenChild={onOpenChild} />
         </div>
         <div className="h-56 shrink-0">
-          <BoardPane cwd={cwd} refreshKey={boardTick} />
+          <BoardView cwd={cwd} refreshKey={boardTick} mode="rail" />
         </div>
       </div>
     </div>

@@ -15,29 +15,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
-import { AgentNotificationsBridge } from "@/modules/agents";
-import { firePendingReviewForSession } from "@/modules/agents/lib/review";
-import { useManagedAgentsStore } from "@/modules/agents/store/managedAgentsStore";
+import { native } from "@/lib/native";
 import { Toaster } from "@/components/ui/sonner";
 import {
-  AgentRunBridge,
-  AiInputBar,
-  AiInputBarConnect,
-  AiMiniWindow,
-  getAllKeys,
-  getAllCustomEndpointKeys,
-  hasAnyKey,
-  LocalAgentNotificationsBridge,
-  SelectionAskAi,
-  useChatStore,
-} from "@/modules/ai";
-import { AiComposerProvider } from "@/modules/ai/lib/composer";
-import { redactSensitive } from "@/modules/ai/lib/redact";
-import { native } from "@/modules/ai/lib/native";
-import { useAgentsStore } from "@/modules/ai/store/agentsStore";
-import { useSnippetsStore } from "@/modules/ai/store/snippetsStore";
-import {
-  AiDiffStack,
   EditorStack,
   GitDiffStack,
   NewEditorDialog,
@@ -64,13 +44,9 @@ import {
 } from "@/modules/header";
 import { MarkdownStack } from "@/modules/markdown";
 import { AgentTranscriptStack, PiStack } from "@/modules/pi";
-import { PreviewStack, type PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import {
-  onKeysChanged,
-  setThemeId as persistThemeId,
-} from "@/modules/settings/store";
+import { setThemeId as persistThemeId } from "@/modules/settings/store";
 import {
   ShortcutsDialog,
   useGlobalShortcuts,
@@ -90,8 +66,6 @@ import {
   leafIds,
   respawnSession,
   TerminalStack,
-  whenSessionReady,
-  writeToSession,
   type TerminalPaneHandle,
   useTerminalFileDrop,
 } from "@/modules/terminal";
@@ -108,7 +82,6 @@ import {
   themeFilePath,
   writeThemeFile,
 } from "@/modules/theme/themeFiles";
-import { UpdaterDialog } from "@/modules/updater";
 import {
   currentWorkspaceEnv,
   getWslHome,
@@ -120,25 +93,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { SearchAddon } from "@xterm/addon-search";
-import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
-
-type TuiWaitResult = "ready" | "gone" | "timeout";
-
-async function waitForClaudeTuiReady(
-  readBuf: () => string | null,
-  timeoutMs = 8000,
-): Promise<TuiWaitResult> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const buf = readBuf();
-    if (buf === null) return "gone";
-    if (buf.includes("shortcuts") || buf.includes("? for")) return "ready";
-    await new Promise((r) => setTimeout(r, 120));
-  }
-  return "timeout";
-}
 
 function dirname(path: string | null): string | null {
   if (!path) return null;
@@ -189,16 +145,12 @@ export default function App() {
     activeId,
     setActiveId,
     newTab,
-    newAgentTab,
     newPrivateTab,
     openFileTab,
     pinTab,
-    newPreviewTab,
     newMarkdownTab,
     newPiTab,
     openAgentTranscriptTab,
-    openAiDiffTab,
-    closeAiDiffTab,
     openGitDiffTab,
     openCommitHistoryTab,
     openCommitFileDiffTab,
@@ -231,7 +183,6 @@ export default function App() {
   const searchInlineRef = useRef<SearchInlineHandle | null>(null);
   const terminalRefs = useRef<Map<number, TerminalPaneHandle>>(new Map());
   const editorRefs = useRef<Map<number, EditorPaneHandle>>(new Map());
-  const previewRefs = useRef<Map<number, PreviewPaneHandle>>(new Map());
   const [activeEditorHandle, setActiveEditorHandle] =
     useState<EditorPaneHandle | null>(null);
   const [gitHistoryHandle, setGitHistoryHandle] =
@@ -390,7 +341,6 @@ export default function App() {
       searchAddons.current.clear();
       terminalRefs.current.clear();
       editorRefs.current.clear();
-      previewRefs.current.clear();
       setActiveSearchAddon(null);
       setActiveEditorHandle(null);
       setWorkspaceEnv(env.kind === "local" ? LOCAL_WORKSPACE : env);
@@ -425,121 +375,20 @@ export default function App() {
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [newEditorOpen, setNewEditorOpen] = useState(false);
-  const miniOpen = useChatStore((s) => s.mini.open);
-  const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const openMini = useChatStore((s) => s.openMini);
-  const focusInput = useChatStore((s) => s.focusInput);
-  const openPanel = useChatStore((s) => s.openPanel);
-  const panelOpen = useChatStore((s) => s.panelOpen);
-  const apiKeys = useChatStore((s) => s.apiKeys);
-  const setApiKeys = useChatStore((s) => s.setApiKeys);
-  const setCustomEndpointKeys = useChatStore((s) => s.setCustomEndpointKeys);
-  const setSelectedModelId = useChatStore((s) => s.setSelectedModelId);
-  const setLive = useChatStore((s) => s.setLive);
-  const respondToApproval = useChatStore((s) => s.respondToApproval);
-
-  useEffect(() => {
-    if (activeSessionId) firePendingReviewForSession(activeSessionId);
-  }, [activeSessionId]);
-  const lmstudioModelId = usePreferencesStore((s) => s.lmstudioModelId);
-  const lmstudioBaseURL = usePreferencesStore((s) => s.lmstudioBaseURL);
-  const mlxModelId = usePreferencesStore((s) => s.mlxModelId);
-  const mlxBaseURL = usePreferencesStore((s) => s.mlxBaseURL);
-  const ollamaModelId = usePreferencesStore((s) => s.ollamaModelId);
-  const ollamaBaseURL = usePreferencesStore((s) => s.ollamaBaseURL);
-  const openaiCompatibleModelId = usePreferencesStore(
-    (s) => s.openaiCompatibleModelId,
-  );
-  const openaiCompatibleBaseURL = usePreferencesStore(
-    (s) => s.openaiCompatibleBaseURL,
-  );
-  const customEndpoints = usePreferencesStore((s) => s.customEndpoints);
-  const hasLocalModel =
-    (lmstudioBaseURL.trim().length > 0 && lmstudioModelId.trim().length > 0) ||
-    (mlxBaseURL.trim().length > 0 && mlxModelId.trim().length > 0) ||
-    (ollamaBaseURL.trim().length > 0 && ollamaModelId.trim().length > 0) ||
-    (openaiCompatibleBaseURL.trim().length > 0 &&
-      openaiCompatibleModelId.trim().length > 0) ||
-    customEndpoints.some(
-      (e) => e.baseURL.trim().length > 0 && e.modelId.trim().length > 0,
-    );
-  const hasComposer = hasAnyKey(apiKeys) || hasLocalModel;
-
-  const prefsHydrated = usePreferencesStore((s) => s.hydrated);
-  const [keysLoaded, setKeysLoaded] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    const reload = () => {
-      void getAllKeys().then((keys) => {
-        if (!alive) return;
-        setApiKeys(keys);
-        setKeysLoaded(true);
-      });
-      if (!prefsHydrated) return;
-      void getAllCustomEndpointKeys(
-        usePreferencesStore.getState().customEndpoints,
-      ).then((epKeys) => {
-        if (!alive) return;
-        setCustomEndpointKeys(epKeys);
-      });
-    };
-    reload();
-    const unlistenP = onKeysChanged(reload);
-    return () => {
-      alive = false;
-      void unlistenP.then((fn) => fn());
-    };
-  }, [setApiKeys, setCustomEndpointKeys, prefsHydrated]);
-
-  // Hydrate the cross-window preference store and mirror the default model
-  // into chatStore so the dropdown reflects what the user picked in Settings.
+  // Hydrate the cross-window preference store (theme, editor, terminal prefs).
   const initPrefs = usePreferencesStore((s) => s.init);
-  const prefDefaultModel = usePreferencesStore((s) => s.defaultModelId);
   useEffect(() => {
     void initPrefs();
   }, [initPrefs]);
-  useEffect(() => {
-    if (!prefsHydrated) return;
-    setSelectedModelId(prefDefaultModel);
-  }, [prefsHydrated, prefDefaultModel, setSelectedModelId]);
-
-  const hydrateSessions = useChatStore((s) => s.hydrateSessions);
-  useEffect(() => {
-    void hydrateSessions();
-    void useAgentsStore.getState().hydrate();
-    void useSnippetsStore.getState().hydrate();
-  }, [hydrateSessions]);
-
   const activeTab = tabs.find((t) => t.id === activeId);
   const isTerminalTab = activeTab?.kind === "terminal";
   const isEditorTab = activeTab?.kind === "editor";
-  const isPreviewTab = activeTab?.kind === "preview";
   const isMarkdownTab = activeTab?.kind === "markdown";
   const isPiTab = activeTab?.kind === "pi";
   const isAgentTranscriptTab = activeTab?.kind === "agent-transcript";
-  const isAiDiffTab = activeTab?.kind === "ai-diff";
   const isGitDiffTab =
     activeTab?.kind === "git-diff" || activeTab?.kind === "git-commit-file";
   const isGitHistoryTab = activeTab?.kind === "git-history";
-
-  // When an AI diff is approved (write_file applied to disk), reload any
-  // open editor tabs for that path so the user sees the new content. We
-  // track which approvalIds we've already handled to fire the reload only
-  // once per applied diff.
-  const appliedDiffsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    for (const t of tabs) {
-      if (t.kind !== "ai-diff") continue;
-      if (t.status !== "approved") continue;
-      if (appliedDiffsRef.current.has(t.approvalId)) continue;
-      appliedDiffsRef.current.add(t.approvalId);
-      for (const e of tabs) {
-        if (e.kind !== "editor") continue;
-        if (e.path !== t.path) continue;
-        editorRefs.current.get(e.id)?.reload();
-      }
-    }
-  }, [tabs]);
 
   useEffect(() => {
     type FileWrittenPayload = { path: string; source?: string };
@@ -687,8 +536,6 @@ export default function App() {
       // Terminal-leaf-keyed maps (terminalRefs/searchAddons) are pruned by
       // the effect below as the pane tree changes; only the tab-id-keyed
       // handles need explicit cleanup here.
-      editorRefs.current.delete(id);
-      previewRefs.current.delete(id);
       closeTab(id);
     },
     [closeTab],
@@ -754,120 +601,6 @@ export default function App() {
     },
     [tabs, activeId, setActiveId],
   );
-
-  const captureActiveSelection = useCallback((): string | null => {
-    const t = tabs.find((x) => x.id === activeId);
-    if (!t) return null;
-    if (t.kind === "terminal") {
-      const lid = t.activeLeafId;
-      return terminalRefs.current.get(lid)?.getSelection() ?? null;
-    }
-    if (t.kind === "editor") {
-      return editorRefs.current.get(activeId)?.getSelection() ?? null;
-    }
-    return null;
-  }, [tabs, activeId]);
-
-  const togglePanelAndFocus = useCallback(() => {
-    if (!hasComposer) {
-      void openSettingsWindow("models");
-      return;
-    }
-    if (panelOpen) {
-      useChatStore.getState().closePanel();
-    } else {
-      openPanel();
-      focusInput(null);
-    }
-  }, [hasComposer, panelOpen, openPanel, focusInput]);
-
-  const attachSelection = useChatStore((s) => s.attachSelection);
-
-  const handleAttachFileToAgent = useCallback(
-    (path: string) => {
-      if (!hasComposer) {
-        void openSettingsWindow("models");
-        return;
-      }
-      // Dispatch a window event the composer listens for. Same pattern as
-      // selections — keeps file-explorer decoupled from the AI module.
-      window.dispatchEvent(
-        new CustomEvent<string>("terax:ai-attach-file", { detail: path }),
-      );
-      openPanel();
-      focusInput(null);
-    },
-    [hasComposer, openPanel, focusInput],
-  );
-
-  const askFromSelection = useCallback(() => {
-    if (!hasComposer) {
-      void openSettingsWindow("models");
-      return;
-    }
-    const selection = captureActiveSelection();
-    if (!selection || !selection.trim()) {
-      focusInput(null);
-      return;
-    }
-    const source: "terminal" | "editor" =
-      activeTab?.kind === "editor" ? "editor" : "terminal";
-    attachSelection(selection, source);
-  }, [
-    hasComposer,
-    captureActiveSelection,
-    focusInput,
-    attachSelection,
-    activeTab,
-  ]);
-
-  const [askPopup, setAskPopup] = useState<{ x: number; y: number } | null>(
-    null,
-  );
-
-  useEffect(() => {
-    const isInsideAi = (t: EventTarget | null) => {
-      const el = t as HTMLElement | null;
-      if (!el) return false;
-      return !!(
-        el.closest("[data-selection-ask-ai]") ||
-        el.closest("[data-ai-input-bar]") ||
-        el.closest("[data-ai-mini-window]")
-      );
-    };
-
-    const onDown = (e: MouseEvent) => {
-      if (isInsideAi(e.target)) return;
-      setAskPopup(null);
-    };
-    const onUp = (e: MouseEvent) => {
-      if (isInsideAi(e.target)) return;
-      const el = e.target as HTMLElement | null;
-      const inContentArea = el?.closest?.(".xterm, .cm-editor");
-      if (!inContentArea) return;
-      // Defer one tick so xterm/CodeMirror finalize the selection.
-      setTimeout(() => {
-        const text = captureActiveSelection();
-        if (text && text.trim().length > 0) {
-          setAskPopup({ x: e.clientX, y: e.clientY });
-        } else {
-          setAskPopup(null);
-        }
-      }, 0);
-    };
-
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("mouseup", onUp);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("mouseup", onUp);
-    };
-  }, [captureActiveSelection]);
-
-  const onAskFromSelection = useCallback(() => {
-    askFromSelection();
-    setAskPopup(null);
-  }, [askFromSelection]);
 
   const openNewTab = useCallback(() => {
     newTab(inheritedCwdForNewTab());
@@ -1056,18 +789,6 @@ export default function App() {
     sourceControlContextPath,
   ]);
 
-  const openPreviewTab = useCallback(
-    (url: string) => {
-      const id = newPreviewTab(url);
-      // Focus the address bar if the URL is empty so the user can type.
-      if (!url) {
-        setTimeout(() => previewRefs.current.get(id)?.focusAddressBar(), 0);
-      }
-      return id;
-    },
-    [newPreviewTab],
-  );
-
   const openMarkdownPreview = useCallback(
     (path: string) => {
       newMarkdownTab(path);
@@ -1099,7 +820,6 @@ export default function App() {
     () => ({
       "tab.new": openNewTab,
       "tab.newPrivate": openNewPrivateTab,
-      "tab.newPreview": () => openPreviewTab(""),
       "tab.newEditor": () => setNewEditorOpen(true),
       "tab.close": handleCloseTabOrPane,
       "tab.next": () => cycleTab(1),
@@ -1114,8 +834,6 @@ export default function App() {
         clearFocusedTerminal();
       },
       "search.focus": () => searchInlineRef.current?.focus(),
-      "ai.toggle": togglePanelAndFocus,
-      "ai.askSelection": askFromSelection,
       "shortcuts.open": () => setShortcutsOpen((v) => !v),
       "settings.open": () => void openSettingsWindow(),
       "sidebar.toggle": toggleSidebar,
@@ -1133,13 +851,10 @@ export default function App() {
       handleCloseTabOrPane,
       openNewTab,
       openNewPrivateTab,
-      openPreviewTab,
       selectByIndex,
       splitActivePaneInActiveTab,
       focusNextPaneInTab,
       toggleSourceControl,
-      togglePanelAndFocus,
-      askFromSelection,
       toggleSidebar,
       toggleExplorerFocus,
       zoomIn,
@@ -1152,16 +867,6 @@ export default function App() {
     (id: ShortcutId, e: KeyboardEvent) => {
       if (id === "editor.undo" || id === "editor.redo") {
         return activeTab?.kind !== "editor";
-      }
-      if (id === "ai.askSelection") {
-        const target =
-          (e.target as HTMLElement | null) ?? document.activeElement;
-        const inTerminal = !!(target as HTMLElement | null)?.closest?.(
-          ".xterm",
-        );
-        if (!inTerminal) return false;
-        const sel = captureActiveSelection();
-        return !sel || !sel.trim();
       }
       if (id === "terminal.clear") {
         // Only intercept ⌘K while a terminal is focused; elsewhere let the key
@@ -1194,19 +899,6 @@ export default function App() {
     [activeId],
   );
 
-  const registerPreviewHandle = useCallback(
-    (id: number, h: PreviewPaneHandle | null) => {
-      if (h) previewRefs.current.set(id, h);
-      else previewRefs.current.delete(id);
-    },
-    [],
-  );
-
-  const handlePreviewUrl = useCallback(
-    (id: number, url: string) => updateTab(id, { url }),
-    [updateTab],
-  );
-
   const authorizedCwds = useRef(new Set<string>());
   const handleTerminalCwd = useCallback(
     (leafId: number, cwd: string) => {
@@ -1225,19 +917,6 @@ export default function App() {
     (tabId: number, leafId: number) => focusPane(tabId, leafId),
     [focusPane],
   );
-
-  const onActivateAgent = useCallback(
-    (tabId: number, leafId: number) => {
-      setActiveId(tabId);
-      focusPane(tabId, leafId);
-    },
-    [setActiveId, focusPane],
-  );
-
-  const onActivateLocalAgent = useCallback(() => {
-    openPanel();
-    focusInput(null);
-  }, [openPanel, focusInput]);
 
   const handleLeafExit = useCallback(
     (leafId: number, _code: number) => {
@@ -1298,117 +977,6 @@ export default function App() {
     gitHistoryHandle,
   ]);
 
-  const activeCwd = activeTerminalLeafCwd;
-
-  useEffect(() => {
-    const findCwd = () => {
-      const active = tabs.find((x) => x.id === activeId);
-      if (active?.kind === "terminal") {
-        return (
-          findLeafCwd(active.paneTree, active.activeLeafId) ??
-          active.cwd ??
-          null
-        );
-      }
-      for (let i = tabs.length - 1; i >= 0; i--) {
-        const t = tabs[i];
-        if (t.kind !== "terminal") continue;
-        const cwd = findLeafCwd(t.paneTree, t.activeLeafId) ?? t.cwd;
-        if (cwd) return cwd;
-      }
-      return explorerRoot ?? launchCwd ?? home ?? null;
-    };
-
-    setLive({
-      getCwd: findCwd,
-      getTerminalContext: () => {
-        const t = tabs.find((x) => x.id === activeId);
-        if (t?.kind !== "terminal") return null;
-        if (t.private) return null;
-        const buf = terminalRefs.current.get(t.activeLeafId)?.getBuffer(300);
-        return buf ? redactSensitive(buf) : null;
-      },
-      isActiveTerminalPrivate: () => {
-        const t = tabs.find((x) => x.id === activeId);
-        return t?.kind === "terminal" && t.private === true;
-      },
-      injectIntoActivePty: (text) => {
-        const t = tabs.find((x) => x.id === activeId);
-        if (t?.kind !== "terminal") return false;
-        const term = terminalRefs.current.get(t.activeLeafId);
-        if (!term) return false;
-        term.write(text);
-        term.focus();
-        return true;
-      },
-      getWorkspaceRoot: () => explorerRoot ?? launchCwd ?? home ?? null,
-      getActiveFile: () => {
-        const t = tabs.find((x) => x.id === activeId);
-        return t?.kind === "editor" ? t.path : null;
-      },
-      openPreview: (url: string) => {
-        openPreviewTab(url);
-        return true;
-      },
-      spawnManagedAgent: (prompt: string, sessionId: string) => {
-        const trimmed = prompt.trim();
-        if (!trimmed) return null;
-        const oneLine = trimmed.replace(/\s*\r?\n\s*/g, " ");
-        const cwd = findCwd();
-        const short =
-          oneLine.length > 32 ? `${oneLine.slice(0, 32)}…` : oneLine;
-        const { tabId, leafId } = newAgentTab(
-          cwd ?? undefined,
-          `claude · ${short}`,
-        );
-        useManagedAgentsStore
-          .getState()
-          .register({ leafId, tabId, sessionId, task: oneLine, cwd });
-        const hooksReady = invoke("agent_enable_claude_hooks").catch(() => {});
-        void (async () => {
-          await Promise.all([whenSessionReady(leafId), hooksReady]);
-          if (!writeToSession(leafId, "claude\r")) {
-            useManagedAgentsStore.getState().remove(leafId);
-            return;
-          }
-          const readBuf = () => {
-            const term = terminalRefs.current.get(leafId);
-            return term ? term.getBuffer(120) : null;
-          };
-          const result = await waitForClaudeTuiReady(readBuf);
-          if (result !== "ready") {
-            if (result === "timeout") {
-              console.warn(
-                "[terax] Claude TUI did not appear in time; aborting prompt send",
-              );
-            }
-            useManagedAgentsStore.getState().remove(leafId);
-            return;
-          }
-          if (!writeToSession(leafId, `\x1b[200~${trimmed}\x1b[201~`)) {
-            useManagedAgentsStore.getState().remove(leafId);
-            return;
-          }
-          setTimeout(() => writeToSession(leafId, "\r"), 120);
-          useManagedAgentsStore.getState().setPhase(leafId, "working");
-        })();
-        return { tabId, leafId };
-      },
-      readLeafBuffer: (leafId: number) => {
-        const buf = terminalRefs.current.get(leafId)?.getBuffer(300);
-        return buf ? redactSensitive(buf) : null;
-      },
-    });
-  }, [
-    setLive,
-    activeId,
-    tabs,
-    explorerRoot,
-    launchCwd,
-    home,
-    openPreviewTab,
-    newAgentTab,
-  ]);
 
   const workspaceSurface = (
     <div className="relative h-full min-h-0">
@@ -1447,20 +1015,6 @@ export default function App() {
       <div
         className={cn(
           "absolute inset-0 px-3 pt-2 pb-2",
-          !isPreviewTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isPreviewTab}
-      >
-        <PreviewStack
-          tabs={tabs}
-          activeId={activeId}
-          registerHandle={registerPreviewHandle}
-          onUrlChange={handlePreviewUrl}
-        />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
           !isMarkdownTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isMarkdownTab}
@@ -1492,20 +1046,6 @@ export default function App() {
       <div
         className={cn(
           "absolute inset-0 px-3 pt-2 pb-2",
-          !isAiDiffTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isAiDiffTab}
-      >
-        <AiDiffStack
-          tabs={tabs}
-          activeId={activeId}
-          onAccept={(id) => respondToApproval(id, true)}
-          onReject={(id) => respondToApproval(id, false)}
-        />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
           !isGitDiffTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isGitDiffTab}
@@ -1529,6 +1069,8 @@ export default function App() {
     </div>
   );
 
+  const activeCwd = activeTerminalLeafCwd;
+
   const shell = (
     <ThemeProvider>
       <TooltipProvider>
@@ -1540,7 +1082,6 @@ export default function App() {
               onSelect={setActiveId}
               onNew={openNewTab}
               onNewPrivate={openNewPrivateTab}
-              onNewPreview={() => openPreviewTab("")}
               onNewEditor={() => setNewEditorOpen(true)}
               onNewPi={openNewPiTab}
               onNewGitGraph={openGitGraphFromContext}
@@ -1553,8 +1094,6 @@ export default function App() {
                 activeTerminalTab !== null &&
                 leafIds(activeTerminalTab.paneTree).length < MAX_PANES_PER_TAB
               }
-              onActivateAgent={onActivateAgent}
-              onActivateLocalAgent={onActivateLocalAgent}
               onOpenSettings={() => void openSettingsWindow()}
               searchTarget={searchTarget}
               searchRef={searchInlineRef}
@@ -1588,7 +1127,6 @@ export default function App() {
                         onPathRenamed={handlePathRenamed}
                         onPathDeleted={handlePathDeleted}
                         onRevealInTerminal={cdInNewTab}
-                        onAttachToAgent={handleAttachFileToAgent}
                         onOpenMarkdownPreview={openMarkdownPreview}
                       />
                     ) : (
@@ -1614,27 +1152,6 @@ export default function App() {
                     {workspaceSurface}
                   </div>
 
-                  {keysLoaded ? (
-                    <motion.div
-                      data-ai-input-bar
-                      initial={false}
-                      animate={{
-                        height: panelOpen ? "auto" : 0,
-                        opacity: panelOpen ? 1 : 0,
-                      }}
-                      transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-                      className="overflow-hidden"
-                      aria-hidden={!panelOpen}
-                    >
-                      {hasComposer ? (
-                        <AiInputBar />
-                      ) : (
-                        <AiInputBarConnect
-                          onAdd={() => void openSettingsWindow("models")}
-                        />
-                      )}
-                    </motion.div>
-                  ) : null}
                 </div>
               </ResizablePanel>
             </ResizablePanelGroup>
@@ -1647,43 +1164,13 @@ export default function App() {
               home={home}
               onCd={sendCd}
               onWorkspaceChange={switchWorkspace}
-              onOpenMini={openMini}
-              hasComposer={hasComposer}
               privateActive={
                 activeTab?.kind === "terminal" && activeTab.private === true
               }
             />
           )}
 
-          <AgentNotificationsBridge
-            tabs={tabs}
-            activeId={activeId}
-            onActivate={onActivateAgent}
-          />
           <Toaster position="bottom-right" />
-
-          {hasComposer ? (
-            <>
-              <AgentRunBridge
-                openAiDiffTab={openAiDiffTab}
-                closeAiDiffTab={closeAiDiffTab}
-              />
-              <LocalAgentNotificationsBridge />
-            </>
-          ) : null}
-
-          <AnimatePresence>
-            {miniOpen && hasComposer ? <AiMiniWindow key="ai-mini" /> : null}
-            {askPopup ? (
-              <SelectionAskAi
-                key="ask-ai-popup"
-                x={askPopup.x}
-                y={askPopup.y}
-                onAsk={onAskFromSelection}
-                onDismiss={() => setAskPopup(null)}
-              />
-            ) : null}
-          </AnimatePresence>
 
           <ShortcutsDialog
             open={shortcutsOpen}
@@ -1696,8 +1183,6 @@ export default function App() {
             rootPath={explorerRoot ?? home}
             onCreated={(path) => openFileTab(path)}
           />
-
-          <UpdaterDialog />
 
           <AlertDialog
             open={pendingCloseTab !== null}
@@ -1790,5 +1275,5 @@ export default function App() {
     </ThemeProvider>
   );
 
-  return <AiComposerProvider>{shell}</AiComposerProvider>;
+  return shell;
 }

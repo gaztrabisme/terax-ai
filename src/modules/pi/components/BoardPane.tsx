@@ -133,3 +133,14 @@ export function BoardPane({
     </div>
   );
 }
+
+export type BoardViewMode = "rail" | "full";
+
+// Layout seam: the rail shows the compact pane, the full tab the same data
+// with room for columns. Both modes render BoardPane until the kanban lands.
+export function BoardView({
+  mode: _mode = "rail",
+  ...props
+}: Props & { mode?: BoardViewMode }) {
+  return <BoardPane {...props} />;
+}

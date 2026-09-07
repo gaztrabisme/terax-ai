@@ -15,7 +15,6 @@ import {
 } from "@/modules/shortcuts/shortcuts";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
-import { NotificationBell } from "@/modules/agents";
 import {
   GridViewIcon,
   LayoutTwoColumnIcon,
@@ -37,7 +36,6 @@ type Props = {
   onSelect: (id: number) => void;
   onNew: () => void;
   onNewPrivate: () => void;
-  onNewPreview: () => void;
   onNewEditor: () => void;
   onNewPi: () => void;
   onNewGitGraph: () => void;
@@ -50,8 +48,6 @@ type Props = {
   onSplit: (dir: "row" | "col") => void;
   /** Active tab is a terminal and below the per-tab pane cap. */
   canSplit: boolean;
-  onActivateAgent: (tabId: number, leafId: number) => void;
-  onActivateLocalAgent: () => void;
   onOpenSettings: () => void;
   searchTarget: SearchTarget;
   searchRef: RefObject<SearchInlineHandle | null>;
@@ -65,7 +61,6 @@ export function Header({
   onSelect,
   onNew,
   onNewPrivate,
-  onNewPreview,
   onNewEditor,
   onNewPi,
   onNewGitGraph,
@@ -75,8 +70,6 @@ export function Header({
   onToggleSidebar,
   onSplit,
   canSplit,
-  onActivateAgent,
-  onActivateLocalAgent,
   onOpenSettings,
   searchTarget,
   searchRef,
@@ -180,12 +173,6 @@ export function Header({
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {!IS_MAC && (
-          <NotificationBell
-            onActivate={onActivateAgent}
-            onActivateLocal={onActivateLocalAgent}
-          />
-        )}
       </div>
 
       {!IS_MAC && <span className="mx-1 h-5 w-px shrink-0 bg-border" />}
@@ -202,7 +189,6 @@ export function Header({
           onSelect={onSelect}
           onNew={onNew}
           onNewPrivate={onNewPrivate}
-          onNewPreview={onNewPreview}
           onNewEditor={onNewEditor}
           onNewPi={onNewPi}
           onNewGitGraph={onNewGitGraph}
@@ -218,10 +204,6 @@ export function Header({
 
       {IS_MAC && (
         <>
-          <NotificationBell
-            onActivate={onActivateAgent}
-            onActivateLocal={onActivateLocalAgent}
-          />
           {settingsButton}
         </>
       )}

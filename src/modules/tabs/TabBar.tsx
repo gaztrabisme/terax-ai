@@ -23,7 +23,6 @@ import {
   ComputerTerminal02Icon,
   GitBranchIcon,
   GitCompareIcon,
-  Globe02Icon,
   IncognitoIcon,
   PencilEdit02Icon,
   PlusSignIcon,
@@ -39,7 +38,6 @@ type Props = {
   onSelect: (id: number) => void;
   onNew: () => void;
   onNewPrivate: () => void;
-  onNewPreview: () => void;
   onNewEditor: () => void;
   onNewPi: () => void;
   onNewGitGraph: () => void;
@@ -57,7 +55,6 @@ export function TabBar({
   onSelect,
   onNew,
   onNewPrivate,
-  onNewPreview,
   onNewEditor,
   onNewPi,
   onNewGitGraph,
@@ -278,13 +275,6 @@ export function TabBar({
               <HugeiconsIcon icon={AiChat02Icon} size={14} strokeWidth={1.75} />
               <span className="flex-1">Pi</span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onNewPreview()}>
-              <HugeiconsIcon icon={Globe02Icon} size={14} strokeWidth={1.75} />
-              <span className="flex-1">Preview</span>
-              <span className="text-xs text-muted-foreground">
-                {fmtShortcut(MOD_KEY, "P")}
-              </span>
-            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onNewGitGraph()}>
               <HugeiconsIcon
                 icon={GitBranchIcon}
@@ -304,26 +294,6 @@ function TabIcon({ tab }: { tab: Tab }) {
   if (tab.kind === "editor" || tab.kind === "markdown") {
     const url = fileIconUrl(tab.title);
     return url ? <img src={url} alt="" className="size-3.5 shrink-0" /> : null;
-  }
-  if (tab.kind === "preview") {
-    return (
-      <HugeiconsIcon
-        icon={Globe02Icon}
-        size={14}
-        strokeWidth={2}
-        className="shrink-0"
-      />
-    );
-  }
-  if (tab.kind === "ai-diff") {
-    return (
-      <HugeiconsIcon
-        icon={GitCompareIcon}
-        size={14}
-        strokeWidth={2}
-        className="shrink-0"
-      />
-    );
   }
   if (tab.kind === "terminal" && tab.private) {
     return (

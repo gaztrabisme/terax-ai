@@ -5,15 +5,12 @@ export {
   type Tab,
   type TerminalTab,
   type EditorTab,
-  type PreviewTab,
   type MarkdownTab,
   type PiTab,
   type AgentTranscriptTab,
-  type AiDiffTab,
   type GitDiffTab,
   type GitHistoryTab,
   type GitCommitFileDiffTab,
-  type AiDiffStatus,
   type TabPatch,
 } from "./lib/useTabs";
 export { useWorkspaceCwd } from "./lib/useWorkspaceCwd";

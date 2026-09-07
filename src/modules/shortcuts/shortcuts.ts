@@ -7,7 +7,6 @@ import { IS_MAC, MOD_PROP } from "@/lib/platform";
 export type ShortcutId =
   | "tab.new"
   | "tab.newPrivate"
-  | "tab.newPreview"
   | "tab.newEditor"
   | "tab.close"
   | "tab.next"
@@ -26,8 +25,6 @@ export type ShortcutId =
   | "view.zoomOut"
   | "view.zoomReset"
   | "view.zenMode"
-  | "ai.toggle"
-  | "ai.askSelection"
   | "shortcuts.open"
   | "settings.open"
   | "sidebar.toggle"
@@ -40,7 +37,6 @@ export type ShortcutGroup =
   | "Panes"
   | "Terminal"
   | "Search"
-  | "AI"
   | "View"
   | "Editor";
 
@@ -84,12 +80,6 @@ export const SHORTCUTS: Shortcut[] = [
     label: "New private terminal",
     group: "Tabs",
     defaultBindings: [{ [MOD_PROP]: true, key: "r" }],
-  },
-  {
-    id: "tab.newPreview",
-    label: "New preview tab",
-    group: "Tabs",
-    defaultBindings: [{ [MOD_PROP]: true, key: "p" }],
   },
   {
     id: "tab.newEditor",
@@ -173,18 +163,6 @@ export const SHORTCUTS: Shortcut[] = [
     defaultBindings: [{ [MOD_PROP]: true, key: "f" }],
   },
   {
-    id: "ai.toggle",
-    label: "Toggle AI agent",
-    group: "AI",
-    defaultBindings: [{ [MOD_PROP]: true, key: "i" }],
-  },
-  {
-    id: "ai.askSelection",
-    label: "Ask AI about selection",
-    group: "AI",
-    defaultBindings: [{ [MOD_PROP]: true, key: "j" }],
-  },
-  {
     id: "sidebar.toggle",
     label: "Toggle file explorer",
     group: "View",
@@ -254,7 +232,6 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "Terminal",
   "View",
   "Search",
-  "AI",
   "Editor",
 ];
 

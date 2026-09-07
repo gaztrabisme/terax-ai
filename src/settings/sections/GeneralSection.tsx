@@ -20,8 +20,6 @@ import type { ThemePref } from "@/modules/settings/store";
 import {
   TERMINAL_FONT_SIZES,
   TERMINAL_SCROLLBACK_PRESETS,
-  setAgentNotifications,
-  setAutostart,
   setEditorAutoSave,
   setEditorAutoSaveDelay,
   setRestoreWindowState,
@@ -41,7 +39,6 @@ import {
   Sun03Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { useEffect, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
 import { SettingRow } from "../components/SettingRow";
@@ -67,7 +64,6 @@ const AUTO_SAVE_MAX = 60000;
 export function GeneralSection() {
   const { mode, setMode } = useTheme();
 
-  const autostart = usePreferencesStore((s) => s.autostart);
   const restoreWindowState = usePreferencesStore((s) => s.restoreWindowState);
   const vimMode = usePreferencesStore((s) => s.vimMode);
   const editorAutoSave = usePreferencesStore((s) => s.editorAutoSave);
@@ -83,32 +79,6 @@ export function GeneralSection() {
   const terminalFontSize = usePreferencesStore((s) => s.terminalFontSize);
   const terminalScrollback = usePreferencesStore((s) => s.terminalScrollback);
   const zoomLevel = usePreferencesStore((s) => s.zoomLevel);
-  const agentNotifications = usePreferencesStore((s) => s.agentNotifications);
-
-  useEffect(() => {
-    let alive = true;
-    void isEnabled()
-      .then((on) => {
-        if (!alive) return;
-        if (on !== usePreferencesStore.getState().autostart) {
-          void setAutostart(on);
-        }
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  const onToggleAutostart = async (next: boolean) => {
-    try {
-      if (next) await enable();
-      else await disable();
-      await setAutostart(next);
-    } catch (e) {
-      console.error("autostart toggle failed", e);
-    }
-  };
 
   return (
     <div className="flex flex-col gap-6">
@@ -318,30 +288,8 @@ export function GeneralSection() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Agents</Label>
-        <SettingRow
-          title="Coding agent notifications"
-          description="Alert when Claude Code or Codex running in a terminal needs your input or finishes. Desktop notification when Terax is unfocused, in-app otherwise."
-        >
-          <Switch
-            checked={agentNotifications}
-            onCheckedChange={(v) => void setAgentNotifications(v)}
-          />
-        </SettingRow>
-      </div>
-
-      <div className="flex flex-col gap-2">
         <Label>Startup</Label>
         <div className="flex flex-col gap-2">
-          <SettingRow
-            title="Launch at login"
-            description="Open Terax automatically when you sign in."
-          >
-            <Switch
-              checked={autostart}
-              onCheckedChange={(v) => void onToggleAutostart(v)}
-            />
-          </SettingRow>
           <SettingRow
             title="Restore window position & size"
             description="Reopen the main window where you left it. Applies on next launch."
