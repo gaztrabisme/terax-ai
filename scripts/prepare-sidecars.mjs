@@ -26,6 +26,8 @@ const DEFAULT_AGENT_DIR = "$HOME/Documents/Work/Lab/efficient-pi/pi-home/agent";
 const PI_TRIPLE = "aarch64-apple-darwin";
 
 const AGENT_DIR_EXCLUDES = new Set([
+  // skills are symlinks from skills-bridge into the developer's ~/.claude; the app ships none.
+  "skills",
   "models.json",
   "mcp.json",
   "auth.json",
@@ -156,6 +158,7 @@ function copyAgentDir(src, dest) {
     // Returning false prunes files and whole directories (sessions/).
     filter: (src) => !isAgentDirExcluded(src),
   });
+  mkdirSync(path.join(dest, "skills"), { recursive: true });
 }
 
 function copyBinary(src, dest) {
