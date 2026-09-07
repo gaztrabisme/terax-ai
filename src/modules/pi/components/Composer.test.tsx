@@ -1,7 +1,26 @@
 // @vitest-environment jsdom
 import { Editor } from "@tiptap/react";
-import { describe, expect, it } from "vitest";
-import { autolinkable, composerExtensions } from "./Composer";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  appendPendingImage,
+  autolinkable,
+  base64Bytes,
+  composerExtensions,
+  imageEncoder,
+  MAX_ATTACHMENTS,
+  MAX_TOTAL_IMAGE_BYTES,
+  type EncodedImage,
+  type PendingImage,
+} from "./Composer";
+
+const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+
+// The composer's draft calls must resolve without Tauri; fs_read_file answers
+// with a seedable draft so tests can put text into the editor headlessly.
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+
+import { Composer } from "./Composer";
 
 // @tiptap/core is not a direct dependency, but @tiptap/react re-exports it
 // (the same route editorSchema.test.ts uses for getSchema), so Editor here is
@@ -71,5 +90,233 @@ describe("composerExtensions autolink", () => {
       editor.destroy();
       element.remove();
     }
+  });
+});
+
+/// ---------------------------------------------------------------------------
+/// Image attachments
+/// ---------------------------------------------------------------------------
+
+let encodeCalls = 0;
+const realEncode = imageEncoder.encode;
+
+beforeEach(() => {
+  encodeCalls = 0;
+  // ProseMirror's own drop/paste handlers probe coordinates; jsdom has no
+  // layout, so the probe reports "no element" and the handler bails.
+  document.elementFromPoint = () => null;
+  invokeMock.mockReset();
+  invokeMock.mockImplementation(async () => ({ kind: "text", content: "" }));
+  // jsdom has no canvas: stand in for the downscale and re-encode.
+  imageEncoder.encode = async (blob: Blob) => {
+    encodeCalls += 1;
+    const name = (blob as File).name || `img-${encodeCalls}`;
+    return {
+      mediaType: "image/png",
+      data: btoa(`encoded-${name}`),
+      bytes: 1000,
+    };
+  };
+});
+
+afterEach(() => {
+  imageEncoder.encode = realEncode;
+  cleanup();
+});
+
+function imageFile(name: string): File {
+  return new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], name, {
+    type: "image/png",
+  });
+}
+
+function pasteFiles(el: Element, files: File[]): void {
+  fireEvent.paste(el, {
+    clipboardData: {
+      // ProseMirror's paste rules read getData even when only image items ride
+      // on the clipboard.
+      getData: () => "",
+      items: files.map((f) => ({
+        kind: "file",
+        type: f.type,
+        getAsFile: () => f,
+      })),
+    },
+  } as unknown as ClipboardEventInit);
+}
+
+function renderComposer(
+  onSubmit = vi.fn(),
+  props: Partial<Parameters<typeof Composer>[0]> = {},
+) {
+  const utils = render(
+    <Composer tabId={7} onSubmit={onSubmit} {...props} />,
+  );
+  const pm = utils.container.querySelector(
+    "[aria-label='pi composer']",
+  ) as Element;
+  return { ...utils, onSubmit, pm };
+}
+
+describe("composer image chips", () => {
+  it("turns a pasted image into a thumbnail chip", async () => {
+    const { container, onSubmit } = renderComposer();
+    pasteFiles(container.querySelector("[aria-label='pi composer']")!, [
+      imageFile("shot.png"),
+    ]);
+    const chip = await waitFor(() => {
+      const img = container.querySelector("img[alt='shot.png']");
+      expect(img).toBeTruthy();
+      return img as HTMLImageElement;
+    });
+    expect(chip.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("drops image files from a drag onto chips", async () => {
+    const { container } = renderComposer();
+    const composer = container.querySelector("[aria-label='pi composer']")!;
+    fireEvent.drop(composer, {
+      dataTransfer: {
+        getData: () => "",
+        files: [imageFile("dropped.png")],
+      },
+    } as unknown as DragEventInit);
+    await waitFor(() => {
+      expect(container.querySelector("img[alt='dropped.png']")).toBeTruthy();
+    });
+  });
+
+  it("removes a chip from its remove control", async () => {
+    const { container } = renderComposer();
+    pasteFiles(container.querySelector("[aria-label='pi composer']")!, [
+      imageFile("a.png"),
+      imageFile("b.png"),
+    ]);
+    await waitFor(() => {
+      expect(container.querySelectorAll("img")).toHaveLength(2);
+    });
+    fireEvent.click(container.querySelector("button[aria-label='Remove a.png']")!);
+    expect(container.querySelectorAll("img")).toHaveLength(1);
+    expect(container.querySelector("img[alt='b.png']")).toBeTruthy();
+    expect(
+      container.querySelector("button[aria-label='Remove a.png']"),
+    ).toBeNull();
+  });
+
+  it("shows the cap notice past the fifth image and adds no chip", async () => {
+    const { container } = renderComposer();
+    pasteFiles(container.querySelector("[aria-label='pi composer']")!, [
+      imageFile("i1.png"),
+      imageFile("i2.png"),
+      imageFile("i3.png"),
+      imageFile("i4.png"),
+      imageFile("i5.png"),
+      imageFile("i6.png"),
+    ]);
+    await waitFor(() => {
+      expect(container.querySelectorAll("img")).toHaveLength(MAX_ATTACHMENTS);
+    });
+    expect(container.textContent).toContain(
+      `Attachment limit is ${MAX_ATTACHMENTS} images`,
+    );
+    expect(container.querySelectorAll("img")).toHaveLength(MAX_ATTACHMENTS);
+  });
+
+  it("warns when the model may not accept images and stays sendable", () => {
+    const { container } = renderComposer(vi.fn(), {
+      modelAcceptsImages: false,
+    });
+    expect(container.textContent).toContain("may not accept images");
+    expect(container.querySelector("button[aria-label='Attach images']")).toBeTruthy();
+  });
+});
+
+describe("composer send with images", () => {
+  it("passes text and encoded images to onSubmit and clears the chips", async () => {
+    // Draft restore is the headless way to put text into the editor.
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "fs_read_file"
+        ? { kind: "text", content: "what is this" }
+        : { kind: "ok" },
+    );
+    const { container, onSubmit } = renderComposer(vi.fn(), {
+      cwd: "/tmp/proj",
+    });
+    const composer = container.querySelector("[aria-label='pi composer']")!;
+    await waitFor(() => {
+      expect(composer.textContent).toContain("what is this");
+    });
+    pasteFiles(composer, [imageFile("shot.png")]);
+    await waitFor(() => {
+      expect(container.querySelector("img[alt='shot.png']")).toBeTruthy();
+    });
+
+    fireEvent.click(
+      Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "Send",
+      )!,
+    );
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith("what is this", [
+      {
+        mediaType: "image/png",
+        data: btoa("encoded-shot.png"),
+      },
+    ]);
+    await waitFor(() => {
+      expect(container.querySelectorAll("img")).toHaveLength(0);
+    });
+  });
+});
+
+describe("appendPendingImage caps", () => {
+  const encoded: EncodedImage = {
+    mediaType: "image/png",
+    data: "AAAA",
+    bytes: 10,
+  };
+
+  it("rejects the sixth image with the count notice", () => {
+    let chips: PendingImage[] = [];
+    for (let i = 0; i < MAX_ATTACHMENTS; i++) {
+      const result = appendPendingImage(chips, encoded, `i${i}.png`);
+      expect(result.notice).toBeNull();
+      chips = result.images;
+    }
+    expect(chips).toHaveLength(MAX_ATTACHMENTS);
+    const over = appendPendingImage(chips, encoded, "i6.png");
+    expect(over.images).toBe(chips);
+    expect(over.notice).toBe(`Attachment limit is ${MAX_ATTACHMENTS} images`);
+  });
+
+  it("rejects images past the 4 MB encoded budget with a notice", () => {
+    const first = appendPendingImage(
+      [],
+      { ...encoded, bytes: MAX_TOTAL_IMAGE_BYTES },
+      "big.png",
+    );
+    expect(first.notice).toBeNull();
+    expect(first.images).toHaveLength(1);
+    const second = appendPendingImage(
+      first.images,
+      { ...encoded, bytes: 1 },
+      "one.png",
+    );
+    expect(second.images).toBe(first.images);
+    expect(second.notice).toBe(
+      "Attachments would exceed the 4 MB image budget",
+    );
+  });
+});
+
+describe("base64Bytes", () => {
+  it("counts decoded bytes including padding", () => {
+    expect(base64Bytes("QQ==")).toBe(1);
+    expect(base64Bytes("QQ=")).toBe(1);
+    expect(base64Bytes("QQ")).toBe(1);
+    expect(base64Bytes("AAAA")).toBe(3);
+    expect(base64Bytes("")).toBe(0);
   });
 });

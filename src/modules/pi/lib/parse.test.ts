@@ -250,3 +250,65 @@ describe("protocol hygiene", () => {
     });
   });
 });
+
+describe("promptLine images", () => {
+  const png = { mediaType: "image/png", data: "AAAA" };
+  const jpeg = { mediaType: "image/jpeg", data: "/9j/4AA" };
+
+  it("emits no images field for zero images", () => {
+    expect(promptLine("hi")).toBe('{"type":"prompt","message":"hi"}');
+    expect(promptLine("hi", [])).toBe('{"type":"prompt","message":"hi"}');
+    expect(promptLine("hi", undefined)).toBe(
+      '{"type":"prompt","message":"hi"}',
+    );
+  });
+
+  it("wraps one image in pi's exact item shape", () => {
+    // pi's rpc.rs parse_prompt_images reads exactly these key names:
+    // items[].type = "image", items[].source.type = "base64",
+    // items[].source.mediaType, items[].source.data.
+    expect(promptLine("hi", [png])).toBe(
+      JSON.stringify({
+        type: "prompt",
+        message: "hi",
+        images: [
+          {
+            type: "image",
+            source: { type: "base64", mediaType: "image/png", data: "AAAA" },
+          },
+        ],
+      }),
+    );
+    const parsed = JSON.parse(promptLine("hi", [png])) as {
+      images: { type: string; source: Record<string, string> }[];
+    };
+    expect(Object.keys(parsed.images[0])).toEqual(["type", "source"]);
+    expect(Object.keys(parsed.images[0].source)).toEqual([
+      "type",
+      "mediaType",
+      "data",
+    ]);
+  });
+
+  it("carries two images in order", () => {
+    const parsed = JSON.parse(promptLine("two", [png, jpeg])) as {
+      type: string;
+      message: string;
+      images: {
+        type: string;
+        source: { type: string; mediaType: string; data: string };
+      }[];
+    };
+    expect(parsed.type).toBe("prompt");
+    expect(parsed.message).toBe("two");
+    expect(parsed.images).toHaveLength(2);
+    expect(parsed.images[0].source.mediaType).toBe("image/png");
+    expect(parsed.images[0].source.data).toBe("AAAA");
+    expect(parsed.images[1].source.mediaType).toBe("image/jpeg");
+    expect(parsed.images[1].source.data).toBe("/9j/4AA");
+    for (const image of parsed.images) {
+      expect(image.type).toBe("image");
+      expect(image.source.type).toBe("base64");
+    }
+  });
+});

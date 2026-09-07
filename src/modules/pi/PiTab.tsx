@@ -187,14 +187,14 @@ export function PiTab({
   return (
     <ResizablePanelGroup
       orientation="horizontal"
-      className="min-h-0 flex-1 gap-0"
+      className="min-h-0 flex-1 gap-2"
     >
       <ResizablePanel id={`pi-chat-${tabId}`} minSize="20%">
         <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border/60">
           <ChatPane tabId={tabId} cwd={cwd} onOpenChild={onOpenChild} />
         </div>
       </ResizablePanel>
-      <ResizableHandle withHandle />
+      <ResizableHandle withHandle className="bg-transparent" />
       <ResizablePanel
         id={`pi-rail-${tabId}`}
         panelRef={railRef}
@@ -203,7 +203,7 @@ export function PiTab({
         collapsible
         onResize={handleRailResize}
       >
-        <ResizablePanelGroup orientation="vertical" className="min-h-0">
+        <ResizablePanelGroup orientation="vertical" className="min-h-0 gap-2">
           <ResizablePanel
             id={`pi-graph-${tabId}`}
             panelRef={graphRef}
@@ -223,7 +223,7 @@ export function PiTab({
               <RunGraph tabId={tabId} onOpenChild={onOpenChild} />
             </RailPane>
           </ResizablePanel>
-          <ResizableHandle withHandle />
+          <ResizableHandle withHandle className="bg-transparent" />
           <ResizablePanel
             id={`pi-board-${tabId}`}
             panelRef={boardRef}

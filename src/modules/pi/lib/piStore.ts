@@ -11,6 +11,7 @@ import {
   promptLine,
   resetAsk as resetAskIn,
   type PiAskAnswer,
+  type PiImageAttachment,
   type PiSessionState,
 } from "./parse";
 import { piSpawnEnv, resolvePiPrefs, type PiRuntimePrefs } from "./providers";
@@ -43,7 +44,11 @@ type PiTabEntry = {
 type PiStore = {
   tabs: Record<number, PiTabEntry>;
   openSession: (tabId: number, opts: PiOpenOptions) => Promise<void>;
-  sendPrompt: (tabId: number, text: string) => Promise<void>;
+  sendPrompt: (
+    tabId: number,
+    text: string,
+    images?: PiImageAttachment[],
+  ) => Promise<void>;
   answerAsk: (
     tabId: number,
     requestId: string,
@@ -175,10 +180,10 @@ export const usePiStore = create<PiStore>()((set, get) => ({
     }
   },
 
-  sendPrompt: async (tabId, text) => {
+  sendPrompt: async (tabId, text, images) => {
     const session = get().tabs[tabId]?.session;
     if (!session) return;
-    await session.send(promptLine(text));
+    await session.send(promptLine(text, images));
   },
 
   answerAsk: async (tabId, requestId, answers) => {

@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { PiImageAttachment, PiFeedItem } from "../lib/parse";
 import { usePiStore } from "../lib/piStore";
 import { Composer } from "./Composer";
 import { Transcript } from "./Transcript";
@@ -49,6 +50,48 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
 
   const blocks = entry?.state.blocks ?? [];
   const state = entry?.state;
+
+  // Sent thumbnails are local turn state: pi's session file may not echo the
+  // image bytes back, so each queued set binds FIFO to the next user message
+  // block that arrives. Turn.key is that block id (turns.ts groupBlocks).
+  const [turnImages, setTurnImages] = useState<
+    Record<string, PiImageAttachment[]>
+  >({});
+  const pendingImagesRef = useRef<PiImageAttachment[][]>([]);
+  const boundUserIdsRef = useRef<Set<string>>(new Set());
+
+  // A new session restarts the block feed: drop bound and queued thumbnails.
+  useEffect(() => {
+    if (blocks.length > 0) return;
+    if (boundUserIdsRef.current.size === 0 && pendingImagesRef.current.length === 0)
+      return;
+    boundUserIdsRef.current.clear();
+    pendingImagesRef.current = [];
+    setTurnImages({});
+  }, [blocks]);
+
+  useEffect(() => {
+    if (pendingImagesRef.current.length === 0) return;
+    const arrivals = blocks.filter(
+      (b): b is Extract<PiFeedItem, { kind: "message" }> =>
+        b.kind === "message" &&
+        b.role === "user" &&
+        !boundUserIdsRef.current.has(b.id),
+    );
+    if (arrivals.length === 0) return;
+    const additions: Record<string, PiImageAttachment[]> = {};
+    let added = false;
+    for (const block of arrivals) {
+      boundUserIdsRef.current.add(block.id);
+      const images = pendingImagesRef.current.shift();
+      if (images && images.length > 0) {
+        additions[block.id] = images;
+        added = true;
+      }
+    }
+    if (added) setTurnImages((prev) => ({ ...prev, ...additions }));
+  }, [blocks]);
+
   const status = state?.status ?? "idle";
   const exited = entry?.exited === true;
   // Stop only while the session is actively working; New session takes over
@@ -74,10 +117,15 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
   const roles = entry?.roles;
   const chipModel = roles?.model || model;
 
-  const submit = (markdown: string) => {
+  const submit = (markdown: string, images: PiImageAttachment[]) => {
     if (!entry?.session || entry.exited) return;
     setSendError(null);
-    sendPrompt(tabId, markdown).catch((e) => {
+    if (images.length > 0) pendingImagesRef.current.push(images);
+    sendPrompt(tabId, markdown, images).catch((e) => {
+      // The send failed, so unbind: the queued set must not attach to a
+      // later user message.
+      const idx = pendingImagesRef.current.indexOf(images);
+      if (idx !== -1) pendingImagesRef.current.splice(idx, 1);
       setSendError(e instanceof Error ? e.message : String(e));
     });
   };
@@ -151,6 +199,7 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
 
       <Transcript
         blocks={blocks}
+        turnImages={turnImages}
         onAnswer={(requestId, answers) =>
           void answerAsk(tabId, requestId, answers)
         }

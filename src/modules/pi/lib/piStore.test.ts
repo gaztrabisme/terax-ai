@@ -48,4 +48,27 @@ describe("piStore", () => {
     expect(usePiStore.getState().tabs[4]?.exited).toBe(true);
     expect(usePiStore.getState().tabs[4]?.session).toBeNull();
   });
+
+  it("sendPrompt carries images in pi's prompt shape", async () => {
+    await usePiStore.getState().openSession(5, { cwd: "/tmp/p" });
+    await usePiStore.getState().sendPrompt(5, "look", [
+      { mediaType: "image/png", data: "AAAA" },
+      { mediaType: "image/jpeg", data: "/9j/4AA" },
+    ]);
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toEqual({
+      type: "prompt",
+      message: "look",
+      images: [
+        {
+          type: "image",
+          source: { type: "base64", mediaType: "image/png", data: "AAAA" },
+        },
+        {
+          type: "image",
+          source: { type: "base64", mediaType: "image/jpeg", data: "/9j/4AA" },
+        },
+      ],
+    });
+  });
 });

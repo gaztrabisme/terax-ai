@@ -25,6 +25,7 @@ import {
   type PiAskAnswer,
   type PiErrorBlock,
   type PiFeedItem,
+  type PiImageAttachment,
   type PiToolBlock,
 } from "@/modules/pi/lib/parse";
 import {
@@ -49,6 +50,9 @@ type Props = {
   cwd?: string;
   /** Opens a child transcript tab from a subagent step. */
   onOpenChild?: (path: string) => void;
+  /** Images sent with each turn, keyed by turn key (the user block id).
+   *  Local state from the composer: the session file may not echo the bytes. */
+  turnImages?: Record<string, PiImageAttachment[]>;
 };
 
 /** Markdown stripped down to the text a reader sees, for plain Copy. */
@@ -360,6 +364,7 @@ function AnswerActions({
 
 function TurnView({
   turn,
+  images,
   open,
   onToggle,
   cwd,
@@ -368,6 +373,7 @@ function TurnView({
   onDismiss,
 }: {
   turn: Turn;
+  images?: PiImageAttachment[];
   open: boolean;
   onToggle: () => void;
   cwd?: string;
@@ -380,6 +386,18 @@ function TurnView({
       {turn.user ? (
         <div className="flex justify-end">
           <div className="max-w-[65%] rounded-md bg-muted/70 px-3.5 py-2 text-[14px] leading-relaxed whitespace-pre-wrap text-foreground">
+            {images && images.length > 0 ? (
+              <div className="mb-2 flex flex-wrap justify-end gap-1.5">
+                {images.map((img, i) => (
+                  <img
+                    key={i}
+                    src={`data:${img.mediaType};base64,${img.data}`}
+                    alt={`attached image ${i + 1}`}
+                    className="max-h-32 rounded-md border border-border/60 object-contain"
+                  />
+                ))}
+              </div>
+            ) : null}
             {turn.user}
           </div>
         </div>
@@ -429,6 +447,7 @@ export function Transcript({
   emptyHint = "Enter sends, Shift+Enter newline",
   cwd,
   onOpenChild,
+  turnImages,
 }: Props) {
   // Error blocks render as their own cards attached to the turn that failed,
   // so the turn model never sees them.
@@ -460,6 +479,7 @@ export function Transcript({
               <TurnView
                 key={turn.key}
                 turn={turn}
+                images={turnImages?.[turn.key]}
                 open={openTurns[turn.key] ?? false}
                 onToggle={() => toggle(turn.key)}
                 cwd={cwd}

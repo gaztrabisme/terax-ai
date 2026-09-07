@@ -182,8 +182,38 @@ export function effectiveQuestionId(
   return question.id ?? String(index);
 }
 
-export function promptLine(message: string): string {
-  return JSON.stringify({ type: "prompt", message });
+/** One image attachment as the composer holds it: encoded bytes, base64. */
+export type PiImageAttachment = {
+  /** IANA media type of the bytes in `data` ("image/png" or "image/jpeg"). */
+  mediaType: string;
+  /** Base64 payload without the data-url header. */
+  data: string;
+};
+
+/** The exact image item pi's RPC prompt accepts (rpc.rs parse_prompt_images). */
+export type PiPromptImage = {
+  type: "image";
+  source: { type: "base64"; mediaType: string; data: string };
+};
+
+/** Wraps attachments in pi's item shape; undefined when there are none. */
+export function toPromptImages(
+  images?: PiImageAttachment[],
+): PiPromptImage[] | undefined {
+  if (!images || images.length === 0) return undefined;
+  return images.map((image) => ({
+    type: "image",
+    source: { type: "base64", mediaType: image.mediaType, data: image.data },
+  }));
+}
+
+export function promptLine(
+  message: string,
+  images?: PiImageAttachment[],
+): string {
+  const wire = toPromptImages(images);
+  if (!wire) return JSON.stringify({ type: "prompt", message });
+  return JSON.stringify({ type: "prompt", message, images: wire });
 }
 
 export function askResponseLine(
