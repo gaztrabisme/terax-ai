@@ -27,6 +27,7 @@ function mountAsk(tabId: number, requestId: string) {
     tabs: {
       ...s.tabs,
       [tabId]: {
+        gen: 0,
         state,
         session: fakeSession,
         exited: false,

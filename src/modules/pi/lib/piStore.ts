@@ -21,6 +21,8 @@ export type PiOpenOptions = {
 };
 
 type PiTabEntry = {
+  /** Open generation; a later open for the same tab supersedes this one. */
+  gen: number;
   state: PiSessionState;
   session: PiSessionHandle | null;
   exited: boolean;
@@ -42,23 +44,30 @@ type PiStore = {
   close: (tabId: number) => void;
 };
 
+// Returns a store partial, not the map: zustand merges what `set` returns
+// into the root state, so returning the map would write entries beside
+// `tabs` and leave `tabs` untouched.
 function patchEntry(
   tabs: Record<number, PiTabEntry>,
   tabId: number,
   patch: (entry: PiTabEntry) => PiTabEntry,
-): Record<number, PiTabEntry> {
+): { tabs: Record<number, PiTabEntry> } {
   const entry = tabs[tabId];
-  if (!entry) return tabs;
-  return { ...tabs, [tabId]: patch(entry) };
+  if (!entry) return { tabs };
+  return { tabs: { ...tabs, [tabId]: patch(entry) } };
 }
+
+let openGen = 0;
 
 export const usePiStore = create<PiStore>()((set, get) => ({
   tabs: {},
 
   openSession: async (tabId, opts) => {
-    // React strict mode mounts effects twice: a second open replaces the
-    // first, and a stale in-flight open is killed the moment it resolves.
+    // A second open for the same tab replaces the first; the stale in-flight
+    // open is killed the moment it resolves.
+    const gen = ++openGen;
     const entry: PiTabEntry = {
+      gen,
       state: initialPiSessionState(),
       session: null,
       exited: false,
@@ -86,7 +95,9 @@ export const usePiStore = create<PiStore>()((set, get) => ({
             })),
           ),
       });
-      if (get().tabs[tabId] !== entry) {
+      // Events may have patched the entry before open resolved, so compare
+      // the generation, not the object.
+      if (get().tabs[tabId]?.gen !== gen) {
         void session.kill();
         return;
       }
