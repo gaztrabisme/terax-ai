@@ -1,4 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// K11b: layoutStore delegates persistence to the ui-state store, which
+// reaches the fs commands and the workspace env through Tauri seams.
+const invoke = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@/modules/workspace", () => ({
+  currentWorkspaceEnv: () => ({ kind: "local" }),
+}));
+
+import { resetUiStateForTests, useUiStateStore } from "@/modules/state/uiState";
 import {
   DEFAULT_PI_LAYOUT,
   loadLayouts,
@@ -25,6 +35,7 @@ beforeEach(() => {
   usePiLayoutStore.setState({ layouts: {} });
   backing = fakeStorage();
   setLayoutStorageForTests(backing);
+  resetUiStateForTests();
 });
 
 describe("layoutStore", () => {
@@ -164,5 +175,26 @@ describe("view preferences", () => {
     expect(old.sessionsQuery).toBe("");
     expect(old).not.toHaveProperty("visible");
     expect(old).not.toHaveProperty("view");
+  });
+});
+
+describe("K11b ui-state delegation", () => {
+  it("hands widths, the query and rail collapse to the ui-state store", () => {
+    const { update } = usePiLayoutStore.getState();
+    update("/a", { views: { board: { widthCss: 360 } }, sessionsQuery: "q" });
+    update("/a", { railCollapsed: true });
+
+    const doc = useUiStateStore.getState().docs["/a"];
+    expect(doc.views.board).toEqual({ widthCss: 360 });
+    expect(doc.sessionsQuery).toBe("q");
+    expect(doc.sidebarVisible).toBe(false);
+  });
+
+  it("delegates nothing for percentage geometry and leaves visibility alone", () => {
+    const { update } = usePiLayoutStore.getState();
+    update("/a", { rail: 50, graph: 60, graphCollapsed: true });
+
+    expect(useUiStateStore.getState().docs["/a"]).toBeUndefined();
+    expect(loadLayouts()["/a"].rail).toBe(50);
   });
 });

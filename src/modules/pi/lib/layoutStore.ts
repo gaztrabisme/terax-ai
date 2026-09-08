@@ -1,9 +1,19 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { create } from "zustand";
+import {
+  loadUiState,
+  PI_LAYOUT_STORAGE_KEY,
+  recordUiLayout,
+  type UiStatePatch,
+} from "@/modules/state/uiState";
 import { CHAT_VIEWS, type ChatView } from "./viewMachine";
 
-/** localStorage bucket holding per-cwd pi layouts. */
-export const PI_LAYOUT_STORAGE_KEY = "terax.pi.layout.v1";
+/**
+ * localStorage bucket holding per-cwd pi layouts. Since K11b it is only a
+ * cache: the committed copy lives in <project>/.pi/ui-state.json and the
+ * bucket is imported into it once per profile (uiState.ts).
+ */
+export { PI_LAYOUT_STORAGE_KEY };
 
 export type PiLayout = {
   views: Record<ChatView, { widthCss: number | null }>;
@@ -134,6 +144,24 @@ export type PiLayoutPatch = Partial<Omit<PiLayout, "views">> & {
   views?: Partial<PiLayout["views"]>;
 };
 
+/**
+ * K11b delegation: the file-backed ui-state store owns the subset the
+ * ui-state.json schema holds. Panel widths and the sessions query map
+ * directly; the rail collapse flips into sidebarVisible for observability.
+ * The percentage geometry (rail, graph, collapses) stays localStorage-only.
+ */
+function toUiStatePatch(patch: PiLayoutPatch): UiStatePatch {
+  const mapped: UiStatePatch = {};
+  if (patch.views) mapped.views = patch.views;
+  if (patch.sessionsQuery !== undefined) {
+    mapped.sessionsQuery = patch.sessionsQuery;
+  }
+  if (patch.railCollapsed !== undefined) {
+    mapped.sidebarVisible = !patch.railCollapsed;
+  }
+  return mapped;
+}
+
 type PiLayoutStore = {
   layouts: Record<string, PiLayout>;
   update: (cwd: string, patch: PiLayoutPatch) => void;
@@ -151,6 +179,8 @@ export const usePiLayoutStore = create<PiLayoutStore>()((set) => ({
       };
       const layouts = { ...s.layouts, [cwd]: next };
       persistLayouts(layouts);
+      // K11b: with a project cwd the ui-state file is the persistence owner.
+      recordUiLayout(cwd, toUiStatePatch(patch));
       return { layouts };
     }),
 }));
@@ -160,6 +190,11 @@ export function usePiLayout(cwd?: string) {
   const [localLayout, setLocalLayout] = useState(DEFAULT_PI_LAYOUT);
   const layouts = usePiLayoutStore((s) => s.layouts);
   const update = usePiLayoutStore((s) => s.update);
+  // K11b: opening the project (a pi tab with a cwd) loads its ui-state file,
+  // which runs the one-time localStorage import on the first open.
+  useEffect(() => {
+    if (cwd) void loadUiState(cwd);
+  }, [cwd]);
   const layout =
     cwd === undefined ? localLayout : (layouts[cwd] ?? DEFAULT_PI_LAYOUT);
   const updateLayout = useCallback(

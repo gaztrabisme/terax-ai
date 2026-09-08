@@ -69,6 +69,8 @@ export type Preferences = {
   terminalFontSize: number;
   terminalScrollback: number;
   lastWslDistro: string | null;
+  recentProjects: string[];
+  lastProject: string | null;
   zoomLevel: number;
   agentNotifications: boolean;
   shortcuts: Record<ShortcutId, KeyBinding[]>;
@@ -105,6 +107,8 @@ const KEY_TERMINAL_LETTER_SPACING = "terminalLetterSpacing";
 const KEY_TERMINAL_FONT_SIZE = "terminalFontSize";
 const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
 const KEY_LAST_WSL_DISTRO = "lastWslDistro";
+const KEY_RECENT_PROJECTS = "recentProjects";
+const KEY_LAST_PROJECT = "lastProject";
 const KEY_ZOOM_LEVEL = "zoomLevel";
 const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
 const KEY_SHORTCUTS = "shortcuts";
@@ -114,6 +118,9 @@ const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
 export const TERMINAL_FONT_SIZE_DEFAULT = 14;
 export const TERMINAL_FONT_SIZE_MIN = 8;
 export const TERMINAL_FONT_SIZE_MAX = 32;
+
+/** Cap on the recent-project list (most recent first), per design.md 3.4. */
+export const MAX_RECENT_PROJECTS = 10;
 
 export const TERMINAL_FONT_SIZES = [
   10, 12, 13, 14, 15, 16, 18, 20, 22, 24,
@@ -156,6 +163,10 @@ export const DEFAULT_PREFERENCES: Preferences = {
   terminalFontSize: TERMINAL_FONT_SIZE_DEFAULT,
   terminalScrollback: TERMINAL_SCROLLBACK_DEFAULT,
   lastWslDistro: null,
+  // K11b: recent projects let a dock launch reopen without a project
+  // argument; entries are references, never global chat history.
+  recentProjects: [],
+  lastProject: null,
   zoomLevel: 1.0,
   agentNotifications: true,
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
@@ -205,12 +216,9 @@ export async function loadPreferences(): Promise<Preferences> {
       DEFAULT_PREFERENCES.restoreWindowState,
     piLauncherDir:
       get<string>(KEY_PI_LAUNCHER_DIR) ?? DEFAULT_PREFERENCES.piLauncherDir,
-    piBoardBin:
-      get<string>(KEY_PI_BOARD_BIN) ?? DEFAULT_PREFERENCES.piBoardBin,
-    piAgentBin:
-      get<string>(KEY_PI_AGENT_BIN) ?? DEFAULT_PREFERENCES.piAgentBin,
-    piAgentDir:
-      get<string>(KEY_PI_AGENT_DIR) ?? DEFAULT_PREFERENCES.piAgentDir,
+    piBoardBin: get<string>(KEY_PI_BOARD_BIN) ?? DEFAULT_PREFERENCES.piBoardBin,
+    piAgentBin: get<string>(KEY_PI_AGENT_BIN) ?? DEFAULT_PREFERENCES.piAgentBin,
+    piAgentDir: get<string>(KEY_PI_AGENT_DIR) ?? DEFAULT_PREFERENCES.piAgentDir,
     piProvider: get<string>(KEY_PI_PROVIDER) ?? DEFAULT_PREFERENCES.piProvider,
     piModel: get<string>(KEY_PI_MODEL) ?? DEFAULT_PREFERENCES.piModel,
     piThinking: ((): PiThinkingLevel => {
@@ -221,8 +229,7 @@ export async function loadPreferences(): Promise<Preferences> {
         : DEFAULT_PREFERENCES.piThinking;
     })(),
     piSmol: get<string>(KEY_PI_SMOL) ?? DEFAULT_PREFERENCES.piSmol,
-    piBppcHost:
-      get<string>(KEY_PI_BPPC_HOST) ?? DEFAULT_PREFERENCES.piBppcHost,
+    piBppcHost: get<string>(KEY_PI_BPPC_HOST) ?? DEFAULT_PREFERENCES.piBppcHost,
     vimMode: get<boolean>(KEY_VIM_MODE) ?? DEFAULT_PREFERENCES.vimMode,
     showHidden:
       get<boolean>(KEY_SHOW_HIDDEN) ??
@@ -250,6 +257,9 @@ export async function loadPreferences(): Promise<Preferences> {
     lastWslDistro:
       get<string | null>(KEY_LAST_WSL_DISTRO) ??
       DEFAULT_PREFERENCES.lastWslDistro,
+    recentProjects: sanitizeRecentProjects(get<unknown>(KEY_RECENT_PROJECTS)),
+    lastProject:
+      get<string | null>(KEY_LAST_PROJECT) ?? DEFAULT_PREFERENCES.lastProject,
     zoomLevel: get<number>(KEY_ZOOM_LEVEL) ?? DEFAULT_PREFERENCES.zoomLevel,
     agentNotifications:
       get<boolean>(KEY_AGENT_NOTIFICATIONS) ??
@@ -258,8 +268,7 @@ export async function loadPreferences(): Promise<Preferences> {
       get<Record<ShortcutId, KeyBinding[]>>(KEY_SHORTCUTS) ??
       DEFAULT_PREFERENCES.shortcuts,
     editorAutoSave:
-      get<boolean>(KEY_EDITOR_AUTO_SAVE) ??
-      DEFAULT_PREFERENCES.editorAutoSave,
+      get<boolean>(KEY_EDITOR_AUTO_SAVE) ?? DEFAULT_PREFERENCES.editorAutoSave,
     editorAutoSaveDelay: clampAutoSaveDelay(
       get<number>(KEY_EDITOR_AUTO_SAVE_DELAY) ??
         DEFAULT_PREFERENCES.editorAutoSaveDelay,
@@ -289,11 +298,21 @@ function clampBlur(v: number): number {
   return Math.min(64, Math.max(0, Math.round(v)));
 }
 
+/** Only string paths survive, stored order kept, capped at the maximum. */
+function sanitizeRecentProjects(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === "string")
+    .slice(0, MAX_RECENT_PROJECTS);
+}
+
 export async function setBackgroundKind(value: BackgroundKind): Promise<void> {
   await writePref(KEY_BG_KIND, value);
 }
 
-export async function setBackgroundImageId(value: string | null): Promise<void> {
+export async function setBackgroundImageId(
+  value: string | null,
+): Promise<void> {
   await writePref(KEY_BG_IMAGE_ID, value);
 }
 
@@ -304,7 +323,6 @@ export async function setBackgroundOpacity(value: number): Promise<void> {
 export async function setBackgroundBlur(value: number): Promise<void> {
   await writePref(KEY_BG_BLUR, clampBlur(value));
 }
-
 
 export async function setPiLauncherDir(value: string): Promise<void> {
   await writePref(KEY_PI_LAUNCHER_DIR, value);
@@ -375,7 +393,9 @@ export async function setTerminalFontFamily(value: string): Promise<void> {
 }
 
 export async function setTerminalLetterSpacing(value: number): Promise<void> {
-  const clamped = Number.isFinite(value) ? Math.max(-10, Math.min(10, Math.round(value))) : 0;
+  const clamped = Number.isFinite(value)
+    ? Math.max(-10, Math.min(10, Math.round(value)))
+    : 0;
   await writePref(KEY_TERMINAL_LETTER_SPACING, clamped);
 }
 
@@ -403,6 +423,26 @@ export async function setTerminalScrollback(value: number): Promise<void> {
 
 export async function setLastWslDistro(value: string | null): Promise<void> {
   await writePref(KEY_LAST_WSL_DISTRO, value);
+}
+
+export async function setRecentProjects(value: string[]): Promise<void> {
+  await writePref(KEY_RECENT_PROJECTS, value.slice(0, MAX_RECENT_PROJECTS));
+}
+
+export async function setLastProject(value: string | null): Promise<void> {
+  await writePref(KEY_LAST_PROJECT, value);
+}
+
+/**
+ * K11b: called when a pi tab opens on a project cwd. Keeps the most recent
+ * project first and capped, and records lastProject so a dock launch can
+ * reopen without a project argument.
+ */
+export async function recordProjectOpen(cwd: string): Promise<void> {
+  const { recentProjects } = await loadPreferences();
+  const recent = [cwd, ...recentProjects.filter((entry) => entry !== cwd)];
+  await writePref(KEY_RECENT_PROJECTS, recent.slice(0, MAX_RECENT_PROJECTS));
+  await writePref(KEY_LAST_PROJECT, cwd);
 }
 
 export async function setZoomLevel(value: number): Promise<void> {
@@ -470,6 +510,8 @@ export async function onPreferencesChange(
     [KEY_TERMINAL_FONT_SIZE]: "terminalFontSize",
     [KEY_TERMINAL_SCROLLBACK]: "terminalScrollback",
     [KEY_LAST_WSL_DISTRO]: "lastWslDistro",
+    [KEY_RECENT_PROJECTS]: "recentProjects",
+    [KEY_LAST_PROJECT]: "lastProject",
     [KEY_ZOOM_LEVEL]: "zoomLevel",
     [KEY_AGENT_NOTIFICATIONS]: "agentNotifications",
     [KEY_SHORTCUTS]: "shortcuts",

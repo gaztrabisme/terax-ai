@@ -255,3 +255,21 @@ export const UAT_IDS_K6: UatIdEntry[] = [
   { id: "view-fullscreen", file: "src/modules/pi/components/ChatView.tsx" },
   { id: "view-back", file: "src/modules/pi/components/ChatView.tsx" },
 ];
+
+/**
+ * K11b stateful ids: the storage-error banner renders only while a ui-state
+ * write is failing, with Retry re-flushing the pending write. No `saved`
+ * state stands while the banner is up (design.md section 3.5).
+ */
+export const UAT_IDS_K11_STATEFUL: UatStatefulEntry[] = [
+  {
+    id: "storage-error",
+    file: "src/modules/pi/PiTab.tsx",
+    state: "a ui-state write failure standing (storage error banner visible)",
+  },
+  {
+    id: "storage-retry",
+    file: "src/modules/pi/PiTab.tsx",
+    state: "a ui-state write failure standing (storage error banner visible)",
+  },
+];

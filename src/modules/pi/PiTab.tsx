@@ -1,3 +1,4 @@
+import { recordProjectOpen } from "@/modules/settings/store";
 import {
   useEffect,
   useLayoutEffect,
@@ -30,9 +31,11 @@ import {
 } from "./lib/viewMachine";
 import { RunGraph } from "./components/RunGraph";
 import { SessionSearch, scrollToSnippet } from "./components/SessionSearch";
+import { viewButtonClass } from "./components/ModeStrip";
 import type { PiSessionHit } from "./lib/sessions";
 import { useChildStore } from "./lib/childStore";
 import { detectArtifacts, type ArtifactDoc } from "./lib/artifacts";
+import { uiStatePath, useUiStateStore } from "@/modules/state/uiState";
 import { usePiLayout } from "./lib/layoutStore";
 import { messageBlocks } from "./lib/parse";
 import { usePiStore } from "./lib/piStore";
@@ -119,6 +122,10 @@ export function PiTab({
       ).length,
   );
   const { layout, update } = usePiLayout(cwd);
+  // K11b: the ui-state file is the persistence owner; a failed write stands
+  // until Retry flushes it (no saved state while the banner shows).
+  const storageError = useUiStateStore((s) => s.error);
+  const retryStorage = useUiStateStore((s) => s.retry);
   const [viewState, dispatch] = useReducer(viewReducer, CLOSED_VIEW);
   const rootRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<HTMLElement>(null);
@@ -226,6 +233,7 @@ export function PiTab({
 
   useEffect(() => {
     void openSession(tabId, { cwd, launcherDir });
+    if (cwd) void recordProjectOpen(cwd);
     return () => {
       usePiStore.getState().close(tabId);
     };
@@ -344,6 +352,28 @@ export function PiTab({
 
   const view = viewState.view;
   const fullscreen = view !== null && viewState.mode === "fullscreen";
+  const storageBanner =
+    cwd && storageError && storageError.path === uiStatePath(cwd) ? (
+      <div
+        data-uat="storage-error"
+        role="status"
+        className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-destructive/10 px-2 text-xs font-medium text-destructive"
+      >
+        <span className="min-w-0 flex-1 truncate">
+          Storage error: {storageError.path}
+        </span>
+        <button
+          type="button"
+          data-uat="storage-retry"
+          aria-label="Retry save"
+          title="Retry save"
+          onClick={() => void retryStorage()}
+          className={viewButtonClass}
+        >
+          Retry
+        </button>
+      </div>
+    ) : null;
   return (
     <div
       ref={rootRef}
@@ -351,7 +381,7 @@ export function PiTab({
       data-uat-key={String(tabId)}
       aria-hidden={!active}
       inert={!active}
-      className="relative flex h-full min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg border border-border/60"
+      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/60"
       onFocusCapture={(event) => {
         lastFocus.current = event.target;
       }}
@@ -371,82 +401,85 @@ export function PiTab({
         transition({ type: view ? "escape" : "close", narrow });
       }}
     >
-      <div
-        data-pi-chat={tabId}
-        hidden={fullscreen}
-        inert={fullscreen}
-        className={cn("min-h-0 min-w-0 flex-1", fullscreen && "hidden")}
-      >
-        <ChatPane tabId={tabId} cwd={cwd} onOpenChild={onOpenChild} />
-      </div>
-      {view && (
-        <ChatView
-          key={view}
-          view={view}
-          mode={viewState.mode}
-          width={panelWidth(layout.views[view].widthCss, contentWidth ?? 800)}
-          contentWidth={contentWidth ?? 800}
-          popoverTop={buttons.current.sessions?.offsetTop ?? 80}
-          viewRef={viewRef}
-          onClose={() => transition({ type: "close" })}
-          onBack={() => transition({ type: "back", narrow })}
-          onFullscreen={() => transition({ type: "fullscreen" })}
-          onExpand={() => transition({ type: "expand", narrow })}
-          onOpenTab={
-            view === "board" && cwd && onOpenBoard
-              ? () => onOpenBoard(cwd)
-              : view === "graph" && onOpenRunGraph
-                ? () => onOpenRunGraph(cwd, tabId)
-                : undefined
-          }
-          onWidthCommit={(widthCss) =>
-            update({ views: { [view]: { widthCss } } })
-          }
+      {storageBanner}
+      <div className="flex min-h-0 min-w-0 flex-1">
+        <div
+          data-pi-chat={tabId}
+          hidden={fullscreen}
+          inert={fullscreen}
+          className={cn("min-h-0 min-w-0 flex-1", fullscreen && "hidden")}
         >
-          {view === "board" && (
-            <BoardView
-              cwd={cwd}
-              data={boardData}
-              framed
-              active={active}
-              mode={viewState.mode === "fullscreen" ? "full" : "rail"}
-            />
-          )}
-          {view === "graph" && active && (
-            <RunGraph tabId={tabId} onOpenChild={onOpenChild} />
-          )}
-          {view === "artifact" && (
-            <ArtifactPane doc={selectedArtifact} cwd={cwd} />
-          )}
-          {view === "sessions" && (
-            <SessionSearch
-              tabId={tabId}
-              cwd={cwd}
-              query={cwd ? layout.sessionsQuery : undefined}
-              onQueryChange={(sessionsQuery) => update({ sessionsQuery })}
-              inputRef={searchRef}
-              onActivate={(hit) => {
-                if (
-                  !entry?.state.sessionId ||
-                  !hit.path.endsWith(`_${entry.state.sessionId}.jsonl`)
-                ) {
-                  setPendingHit(hit);
-                } else {
-                  transition({ type: "dismiss-popover" });
-                }
-              }}
-            />
-          )}
-        </ChatView>
-      )}
-      <ModeStrip
-        view={view}
-        hasArtifact={selectedArtifact !== null}
-        boardCount={awaitingDecisionCount(boardData.snapshot)}
-        graphCount={runningChildren}
-        buttons={buttons}
-        onToggle={toggle}
-      />
+          <ChatPane tabId={tabId} cwd={cwd} onOpenChild={onOpenChild} />
+        </div>
+        {view && (
+          <ChatView
+            key={view}
+            view={view}
+            mode={viewState.mode}
+            width={panelWidth(layout.views[view].widthCss, contentWidth ?? 800)}
+            contentWidth={contentWidth ?? 800}
+            popoverTop={buttons.current.sessions?.offsetTop ?? 80}
+            viewRef={viewRef}
+            onClose={() => transition({ type: "close" })}
+            onBack={() => transition({ type: "back", narrow })}
+            onFullscreen={() => transition({ type: "fullscreen" })}
+            onExpand={() => transition({ type: "expand", narrow })}
+            onOpenTab={
+              view === "board" && cwd && onOpenBoard
+                ? () => onOpenBoard(cwd)
+                : view === "graph" && onOpenRunGraph
+                  ? () => onOpenRunGraph(cwd, tabId)
+                  : undefined
+            }
+            onWidthCommit={(widthCss) =>
+              update({ views: { [view]: { widthCss } } })
+            }
+          >
+            {view === "board" && (
+              <BoardView
+                cwd={cwd}
+                data={boardData}
+                framed
+                active={active}
+                mode={viewState.mode === "fullscreen" ? "full" : "rail"}
+              />
+            )}
+            {view === "graph" && active && (
+              <RunGraph tabId={tabId} onOpenChild={onOpenChild} />
+            )}
+            {view === "artifact" && (
+              <ArtifactPane doc={selectedArtifact} cwd={cwd} />
+            )}
+            {view === "sessions" && (
+              <SessionSearch
+                tabId={tabId}
+                cwd={cwd}
+                query={cwd ? layout.sessionsQuery : undefined}
+                onQueryChange={(sessionsQuery) => update({ sessionsQuery })}
+                inputRef={searchRef}
+                onActivate={(hit) => {
+                  if (
+                    !entry?.state.sessionId ||
+                    !hit.path.endsWith(`_${entry.state.sessionId}.jsonl`)
+                  ) {
+                    setPendingHit(hit);
+                  } else {
+                    transition({ type: "dismiss-popover" });
+                  }
+                }}
+              />
+            )}
+          </ChatView>
+        )}
+        <ModeStrip
+          view={view}
+          hasArtifact={selectedArtifact !== null}
+          boardCount={awaitingDecisionCount(boardData.snapshot)}
+          graphCount={runningChildren}
+          buttons={buttons}
+          onToggle={toggle}
+        />
+      </div>
     </div>
   );
 }
