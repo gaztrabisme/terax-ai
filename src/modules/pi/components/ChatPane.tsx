@@ -1,11 +1,8 @@
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  retryPendingLabel,
-  type PiImageAttachment,
-  type PiFeedItem,
-} from "../lib/parse";
+import { retryPendingLabel, type PiImageAttachment } from "../lib/parse";
 import { modelAcceptsImages } from "../lib/providers";
+import { bindPendingImages } from "../lib/turnImages";
 import { usePiStore } from "../lib/piStore";
 import { Composer } from "./Composer";
 import { formatCost, Transcript } from "./Transcript";
@@ -79,25 +76,12 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
   }, [blocks]);
 
   useEffect(() => {
-    if (pendingImagesRef.current.length === 0) return;
-    const arrivals = blocks.filter(
-      (b): b is Extract<PiFeedItem, { kind: "message" }> =>
-        b.kind === "message" &&
-        b.role === "user" &&
-        !boundUserIdsRef.current.has(b.id),
+    const additions = bindPendingImages(
+      blocks,
+      boundUserIdsRef.current,
+      pendingImagesRef.current,
     );
-    if (arrivals.length === 0) return;
-    const additions: Record<string, PiImageAttachment[]> = {};
-    let added = false;
-    for (const block of arrivals) {
-      boundUserIdsRef.current.add(block.id);
-      const images = pendingImagesRef.current.shift();
-      if (images && images.length > 0) {
-        additions[block.id] = images;
-        added = true;
-      }
-    }
-    if (added) setTurnImages((prev) => ({ ...prev, ...additions }));
+    if (additions) setTurnImages((prev) => ({ ...prev, ...additions }));
   }, [blocks]);
 
   const status = state?.status ?? "idle";
