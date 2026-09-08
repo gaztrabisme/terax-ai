@@ -19,9 +19,11 @@ import {
   type CheckStatus,
   type PiHealthMap,
   type PiHealthResult,
+  type PiLocalKeyStatus,
   type PiRoles,
 } from "@/modules/pi/lib/firstRun";
 import {
+  expandHomePath,
   parseModelsJsonTmpl,
   parsePiProviders,
   PI_OPEN_CWDS_EVENT,
@@ -31,6 +33,7 @@ import {
   type PiResolvedPaths,
   type PiRuntimePrefs,
 } from "@/modules/pi/lib/providers";
+import { omlxSettingsFallback } from "@/modules/pi/lib/secrets";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   Alert02Icon,
@@ -167,6 +170,62 @@ async function loadCloudEnvPresence(): Promise<Record<string, boolean>> {
   }
 }
 
+/** The app home dir; a failed resolve leaves $HOME unexpanded and unreadable. */
+async function loadHomeDir(): Promise<string | null> {
+  try {
+    return await invoke<string | null>("pi_home_dir");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when the launcher's own ~/.omlx/settings.json carries a non-empty
+ * auth.api_key, the same read and parse the Pi section's endpoints badge
+ * uses; anything unreadable or malformed counts as absent.
+ */
+async function loadOmlxSettingsFallback(home: string | null): Promise<boolean> {
+  try {
+    const res = await native.readFile(
+      expandHomePath("$HOME/.omlx/settings.json", home),
+    );
+    return res.kind === "text" && omlxSettingsFallback(JSON.parse(res.content));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Key source per local endpoint as a session would see it: omlx counts the
+ * app's stored key, then the ~/.omlx/settings.json fallback, then a real key
+ * rendered into models.json.tmpl; bppc only has the template. A __...__
+ * placeholder in the template is not a key.
+ */
+async function loadLocalKeySources(
+  endpoints: PiEndpointView[] | null,
+  storedOmlx: boolean,
+  home: string | null,
+): Promise<Record<string, PiLocalKeyStatus>> {
+  const templateKey = (id: string): boolean => {
+    const apiKey = endpoints?.find((ep) => ep.id === id)?.apiKey.trim() ?? "";
+    return apiKey.length > 0 && !/^__.+__$/.test(apiKey);
+  };
+  const omlxTemplate = templateKey("omlx");
+  const bppcTemplate = templateKey("bppc");
+  const fallback =
+    !storedOmlx && (await loadOmlxSettingsFallback(home));
+  return {
+    omlx: storedOmlx
+      ? "stored"
+      : fallback
+        ? "fallback"
+        : omlxTemplate
+          ? "template"
+          : "none",
+    bppc: bppcTemplate ? "template" : "none",
+  };
+}
+
 export function PiFirstRun({
   onFocusPaths,
   onFocusRoles,
@@ -246,14 +305,26 @@ export function PiFirstRun({
       // read there, not from the launcher dir.
       const runtimeDir = paths.runtimeAgentDir.path;
       const ready = !!runtimeDir && !runtimeDir.startsWith("$HOME");
-      const [authEntries, endpoints, providerList, storedKeys, envPresence] =
-        await Promise.all([
-          loadAuthEntries(runtimeDir, ready),
-          loadEndpoints(runtimeDir, ready),
-          loadProviderList(paths.pi.path, runtimeDir, ready),
-          loadStoredCloudKeys(),
-          loadCloudEnvPresence(),
-        ]);
+      const [
+        authEntries,
+        endpoints,
+        providerList,
+        storedKeys,
+        envPresence,
+        homeDir,
+      ] = await Promise.all([
+        loadAuthEntries(runtimeDir, ready),
+        loadEndpoints(runtimeDir, ready),
+        loadProviderList(paths.pi.path, runtimeDir, ready),
+        loadStoredCloudKeys(),
+        loadCloudEnvPresence(),
+        loadHomeDir(),
+      ]);
+      const local = await loadLocalKeySources(
+        endpoints,
+        storedKeys.omlx === true,
+        homeDir,
+      );
       const probes: Probe[] = chosenLocalEndpoints(roles).map((id) => ({
         id,
         url: probeUrlFor(endpoints, id, piBppcHost),
@@ -272,7 +343,7 @@ export function PiFirstRun({
           endpoints,
           health,
           rolesScope: scope,
-          cloudKeys: { stored: storedKeys, env: envPresence },
+          cloudKeys: { stored: storedKeys, env: envPresence, local },
         }),
       );
     } catch (e) {

@@ -267,6 +267,48 @@ describe("providerRows", () => {
     expect(stored[1].detail).toBe("omlx: stored key");
   });
 
+  it("is ok when omlx falls back to the launcher's settings.json key", () => {
+    const rows = providerRows(
+      { provider: "bppc", smol: "omlx/m" },
+      null,
+      [],
+      "global",
+      { local: { omlx: "fallback" } },
+    );
+    expect(rows[1].status).toBe("ok");
+    expect(rows[1].detail).toBe("omlx: key from ~/.omlx/settings.json");
+  });
+
+  it("asks a local endpoint with no key anywhere to add one", () => {
+    const rows = providerRows(
+      { provider: "bppc", smol: "omlx/m" },
+      null,
+      [],
+      "global",
+      { local: { omlx: "none" } },
+    );
+    expect(rows[1].status).toBe("missing");
+    expect(rows[1].detail).toBe("omlx: not set (add one under Cloud keys)");
+    expect(rows[1].action).toEqual({
+      label: "Add key",
+      kind: "add-key",
+      provider: "omlx",
+    });
+  });
+
+  it("is ok when a local endpoint carries a real key in the template", () => {
+    const rows = providerRows(
+      { provider: "bppc", smol: "omlx/m" },
+      null,
+      [],
+      "global",
+      { local: { bppc: "template", omlx: "stored" } },
+    );
+    expect(rows[0].status).toBe("ok");
+    expect(rows[0].detail).toBe("bppc: key in models.json.tmpl");
+    expect(rows[1].detail).toBe("omlx: key stored in the app");
+  });
+
   it("labels the role rows global by default and with the passed scope", () => {
     const rows = providerRows({ provider: "bppc", smol: "omlx/m" }, null, []);
     expect(rows[0].label).toBe("Orchestrator provider (global)");

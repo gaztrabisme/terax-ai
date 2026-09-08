@@ -49,13 +49,13 @@ export function PiStack({
           aria-hidden={t.id !== activeId}
           className={cn(
             "absolute inset-0",
-            t.id !== activeId &&
-              "invisible pointer-events-none [&_.react-flow__node]:invisible!",
+            t.id !== activeId && "invisible pointer-events-none",
           )}
         >
           <PiTab
             tabId={t.id}
             cwd={t.cwd}
+            active={t.id === activeId}
             onOpenChild={onOpenChild}
             onOpenBoard={onOpenBoard}
             onOpenRunGraph={onOpenRunGraph}
@@ -69,6 +69,7 @@ export function PiStack({
 export function PiTab({
   tabId,
   cwd,
+  active,
   onOpenChild,
   onOpenBoard,
   onOpenRunGraph,
@@ -76,6 +77,8 @@ export function PiTab({
 }: {
   tabId: number;
   cwd?: string;
+  /** Whether this tab is the visible one; only it mounts the run graph. */
+  active: boolean;
   onOpenChild: (path: string) => void;
   onOpenBoard?: (cwd: string) => void;
   onOpenRunGraph?: (cwd: string | undefined, piTabId: number) => void;
@@ -326,7 +329,9 @@ export function PiTab({
                 onOpenRunGraph ? () => onOpenRunGraph(cwd, tabId) : undefined
               }
             >
-              <RunGraph tabId={tabId} onOpenChild={onOpenChild} />
+              {active ? (
+                <RunGraph tabId={tabId} onOpenChild={onOpenChild} />
+              ) : null}
             </RailPane>
           </ResizablePanel>
           <ResizableHandle withHandle className="bg-transparent" />

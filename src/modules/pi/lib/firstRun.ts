@@ -38,6 +38,9 @@ export type CheckRow = {
 /** The two role values the panel checks: prefs.provider and prefs.smol. */
 export type PiRoles = { provider: string; smol: string };
 
+/** Where a local endpoint's key would come from at spawn time. */
+export type PiLocalKeyStatus = "stored" | "fallback" | "template" | "none";
+
 /**
  * Stored-key and env-var presence per provider, the shapes pi_secret_status
  * (already mapped to booleans) and pi_secret_env_status answer. Optional so
@@ -46,6 +49,11 @@ export type PiRoles = { provider: string; smol: string };
 export type PiCloudKeyInputs = {
   stored?: Record<string, boolean>;
   env?: Record<string, boolean>;
+  /**
+   * Key source per local endpoint id (omlx, bppc) as a session would see it.
+   * Absent entries fall back to the cloud and auth.json checks.
+   */
+  local?: Record<string, PiLocalKeyStatus>;
 };
 
 /** Twin of the Rust pi_health response (health.rs HealthResult). */
@@ -190,12 +198,15 @@ export function rolesScopeLabel(cwd: string | null): string {
 
 /**
  * One row per role (orchestrator, subagent), each labeled with the scope the
- * roles were resolved for. Cloud providers go through cloudKeyStatus: the
- * app's stored key or an env var the spawn would carry counts as green, an
- * auth.json entry still counts, and "not set" offers Add key, which focuses
- * the Cloud keys group. Non-cloud providers are green when they hold a key
- * or OAuth token, or need no auth.json entry at all: endpoint providers like
- * bppc and omlx carry their key in models.json.tmpl.
+ * roles were resolved for. Local endpoints (bppc, omlx) resolve from the
+ * caller's local map first: a stored key, the ~/.omlx/settings.json fallback
+ * or a real key in models.json.tmpl is green, an explicit "none" offers Add
+ * key, and without an entry the checks below decide as before. Cloud
+ * providers go through cloudKeyStatus: the app's stored key or an env var the
+ * spawn would carry counts as green, an auth.json entry still counts, and
+ * "not set" offers Add key, which focuses the Cloud keys group. Remaining
+ * non-cloud providers are green when they hold a key or OAuth token, or need
+ * no auth.json entry at all.
  */
 export function providerRows(
   roles: PiRoles,
@@ -227,6 +238,46 @@ export function providerRows(
       };
     }
     const auth = authStatus(authEntries, provider);
+    // Local endpoints report what a session would actually use: omlx reaches
+    // this row both through the cloud table and the launcher's own key
+    // fallback, so the local map is checked before the cloud branch, which
+    // would otherwise report omlx "not set" whenever no key is stored here.
+    if ((PI_LOCAL_ENDPOINTS as readonly string[]).includes(provider)) {
+      const local = cloudKeys.local?.[provider];
+      if (local === "stored") {
+        return {
+          id,
+          label,
+          status: "ok",
+          detail: `${provider}: key stored in the app`,
+        };
+      }
+      if (local === "fallback") {
+        return {
+          id,
+          label,
+          status: "ok",
+          detail: `${provider}: key from ~/.omlx/settings.json`,
+        };
+      }
+      if (local === "template") {
+        return {
+          id,
+          label,
+          status: "ok",
+          detail: `${provider}: key in models.json.tmpl`,
+        };
+      }
+      if (local === "none") {
+        return {
+          id,
+          label,
+          status: "missing",
+          detail: `${provider}: not set (add one under Cloud keys)`,
+          action: { label: "Add key", kind: "add-key", provider },
+        };
+      }
+    }
     if (cloudProvider(provider)) {
       const status = cloudKeyStatus(
         provider,
