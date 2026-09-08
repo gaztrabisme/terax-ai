@@ -1,3 +1,5 @@
+import { usePreferencesStore } from "@/modules/settings/preferences";
+import { setTerminalComposer } from "@/modules/settings/store";
 import { useTheme } from "@/modules/theme";
 import type { SearchAddon } from "@xterm/addon-search";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
@@ -41,10 +43,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
     const { resolvedMode, themeId, customThemes } = useTheme();
-    // The terminalComposer preference defaults to on. The settings store is
-    // owned by another unit this slice, so until it gains the key the toggle
-    // lives on the pane and starts on for every pane.
-    const [composerEnabled, setComposerEnabled] = useState(true);
+    // Route A: the composer is opt-in (default false). The pane button and
+    // the Settings row are two views of the one persisted preference, so
+    // every mounted pane follows the committed value, including updates
+    // written from another window.
+    const composerEnabled = usePreferencesStore((s) => s.terminalComposer);
     const [blockStore, setBlockStore] = useState<BlockStore | null>(null);
 
     const session = useTerminalSession({
@@ -97,7 +100,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
         <BlockChrome leafId={leafId} store={blockStore} />
         <button
           type="button"
-          onClick={() => setComposerEnabled((v) => !v)}
+          onClick={() => void setTerminalComposer(!composerEnabled)}
           aria-pressed={composerEnabled}
           title={composerEnabled ? "Hide composer" : "Show composer"}
           className="absolute right-2 top-1 z-20 rounded-md border border-border/60 bg-background/80 px-2 py-0.5 text-[11px] text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"

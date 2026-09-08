@@ -28,6 +28,7 @@ import {
   setTerminalLetterSpacing,
   setTerminalFontSize,
   setTerminalScrollback,
+  setTerminalComposer,
   setTerminalWebglEnabled,
   setVimMode,
   setZoomLevel,
@@ -69,6 +70,7 @@ export function GeneralSection() {
   const editorAutoSave = usePreferencesStore((s) => s.editorAutoSave);
   const editorAutoSaveDelay = usePreferencesStore((s) => s.editorAutoSaveDelay);
   const showHidden = usePreferencesStore((s) => s.showHidden);
+  const terminalComposer = usePreferencesStore((s) => s.terminalComposer);
   const terminalWebglEnabled = usePreferencesStore(
     (s) => s.terminalWebglEnabled,
   );
@@ -177,6 +179,15 @@ export function GeneralSection() {
 
       <div className="flex flex-col gap-2">
         <Label>Terminal</Label>
+        <SettingRow
+          title="Terminal composer"
+          description="Single-line editor under the terminal. Off: the shell's own line editor handles Tab completion and history."
+        >
+          <Switch
+            checked={terminalComposer}
+            onCheckedChange={(v) => void setTerminalComposer(v)}
+          />
+        </SettingRow>
         <SettingRow
           title={
             <span className="inline-flex items-center gap-1.5">
