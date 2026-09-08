@@ -177,6 +177,11 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
     state: "a block with a known command's hover action row",
   },
   {
+    id: "block-send-to-chat",
+    file: "src/modules/terminal/components/BlockChrome.tsx",
+    state: "a completed command block decorated inside the live emulator",
+  },
+  {
     id: "graph-node-orchestrator",
     file: "src/modules/pi/components/RunGraph.tsx",
     state:

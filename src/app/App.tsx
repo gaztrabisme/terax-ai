@@ -62,6 +62,13 @@ import {
   PI_OPEN_CWDS_QUERY_EVENT,
 } from "@/modules/pi/lib/providers";
 import { pickPiSessionFolder } from "@/modules/pi/lib/newSession";
+import {
+  chooseChatTab,
+  INSERT_DRAFT_EVENT,
+  SEND_TO_CHAT_EVENT,
+  type InsertDraftDetail,
+  type SendToChatDetail,
+} from "@/modules/pi/lib/sendToChat";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
@@ -523,6 +530,59 @@ export default function App() {
     window.addEventListener("pi:open-file", handler);
     return () => window.removeEventListener("pi:open-file", handler);
   }, [openFileTab]);
+
+  // Send to chat (K8): a terminal block hands its quotation to the shell
+  // through pi:send-to-chat; this picks the target chat tab (active pi tab,
+  // else a pi tab on the terminal's cwd, else the first pi tab, else a fresh
+  // pi session that is retried once mounted), switches to it and forwards
+  // pi:insert-draft with the tab id. The composer appends to its draft and
+  // never sends.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<SendToChatDetail>).detail;
+      if (!detail || typeof detail.text !== "string") return;
+      if (typeof detail.source?.terminalId !== "number") return;
+      const current = tabsRef.current;
+      let termCwd: string | null | undefined = null;
+      for (const t of current) {
+        if (t.kind === "terminal" && hasLeaf(t.paneTree, detail.source.terminalId)) {
+          termCwd =
+            findLeafCwd(t.paneTree, detail.source.terminalId) ?? t.cwd ?? null;
+          break;
+        }
+      }
+      const targetId = chooseChatTab(current, activeId, termCwd);
+      if (targetId === null) {
+        const tabId = newPiTab(termCwd ?? undefined);
+        const forward = (attempt: number) => {
+          window.setTimeout(() => {
+            const mounted = tabsRef.current.some(
+              (t) => t.id === tabId && t.kind === "pi",
+            );
+            if (!mounted) {
+              if (attempt < 5) forward(attempt + 1);
+              return;
+            }
+            window.dispatchEvent(
+              new CustomEvent<InsertDraftDetail>(INSERT_DRAFT_EVENT, {
+                detail: { ...detail, tabId },
+              }),
+            );
+          }, 80);
+        };
+        forward(0);
+        return;
+      }
+      setActiveId(targetId);
+      window.dispatchEvent(
+        new CustomEvent<InsertDraftDetail>(INSERT_DRAFT_EVENT, {
+          detail: { ...detail, tabId: targetId },
+        }),
+      );
+    };
+    window.addEventListener(SEND_TO_CHAT_EVENT, handler);
+    return () => window.removeEventListener(SEND_TO_CHAT_EVENT, handler);
+  }, [activeId, newPiTab, setActiveId]);
 
   // pi module bridge: run a command in a fresh terminal tab (Tauri event,
   // may originate from the backend or another window). Waits for the pty to

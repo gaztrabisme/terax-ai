@@ -7,9 +7,20 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { native } from "@/lib/native";
-import { clearDraft, loadDraft, saveDraft } from "@/modules/pi/lib/drafts";
+import {
+  clearDraft,
+  loadDraft,
+  loadDraftMeta,
+  saveDraft,
+  saveDraftMeta,
+  type DraftMeta,
+} from "@/modules/pi/lib/drafts";
 import type { PiImageAttachment } from "@/modules/pi/lib/parse";
 import { usePiStore } from "@/modules/pi/lib/piStore";
+import {
+  INSERT_DRAFT_EVENT,
+  type InsertDraftDetail,
+} from "@/modules/pi/lib/sendToChat";
 import {
   completeSlashLine,
   filterPrompts,
@@ -609,6 +620,58 @@ export function Composer({
     return () => {
       editor.off("update", onUpdate);
       window.clearTimeout(timer);
+    };
+  }, [editor, cwd, tabId]);
+
+  // Send to chat (K8): App forwards a terminal block's quotation to this tab
+  // through pi:insert-draft. The text appends after the existing content with
+  // a blank line between; inserting at the document end keeps the existing
+  // text and its trailing whitespace untouched (no re-parse). The draft and
+  // its source sidecar save at once, never debounced, and nothing sends.
+  useEffect(() => {
+    if (!editor || !cwd) return;
+    let alive = true;
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<InsertDraftDetail>).detail;
+      if (!detail || detail.tabId !== tabId) return;
+      if (typeof detail.text !== "string" || detail.text.length === 0) return;
+      const existing = editor.getMarkdown();
+      if (existing.length === 0) {
+        editor.commands.setContent(detail.text, { contentType: "markdown" });
+        editor.commands.focus("end");
+      } else {
+        // Appending as a sibling block (no separator in the payload) is what
+        // keeps the serialized draft at one blank line between the existing
+        // text and the quotation; the serializer adds it between blocks.
+        const atEnd = editor.state.doc.content.size;
+        editor
+          .chain()
+          .focus("end")
+          .insertContentAt(atEnd, detail.text, { contentType: "markdown" })
+          .run();
+      }
+      if (!alive) return;
+      void saveDraft(cwd, tabId, editor.getMarkdown());
+      void loadDraftMeta(cwd, tabId)
+        .then((meta): DraftMeta => meta ?? { v: 1, sources: [] })
+        .then((meta) => {
+          meta.sources.push({
+            blockId: detail.source.blockId,
+            terminalId: detail.source.terminalId,
+            sha256: detail.source.sha256,
+            insertedAt: new Date().toISOString(),
+          });
+          return saveDraftMeta(cwd, tabId, meta);
+        })
+        .catch(() => {
+          // The sidecar is evidence, not load-bearing: a failed write still
+          // leaves the quotation in the draft.
+        });
+    };
+    window.addEventListener(INSERT_DRAFT_EVENT, handler);
+    return () => {
+      alive = false;
+      window.removeEventListener(INSERT_DRAFT_EVENT, handler);
     };
   }, [editor, cwd, tabId]);
 

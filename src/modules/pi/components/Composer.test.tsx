@@ -41,6 +41,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialogOpenMock }));
 
 import { usePiStore } from "@/modules/pi/lib/piStore";
+import type { InsertDraftDetail } from "@/modules/pi/lib/sendToChat";
 import { Composer } from "./Composer";
 
 // @tiptap/core is not a direct dependency, but @tiptap/react re-exports it
@@ -547,5 +548,179 @@ describe("composer rejected draft restore", () => {
     expect(usePiStore.getState().tabs[7]?.rejectedDraft?.text).toBe(
       "second look",
     );
+  });
+});
+
+/// ---------------------------------------------------------------------------
+/// Send to chat (K8): pi:insert-draft appends to the draft, saves at once
+/// (never debounced, never sent), and records the source sidecar.
+/// ---------------------------------------------------------------------------
+
+const QUOTE = "```\nls -la\n\nfile1\nfile2\n```\nFrom terminal block 3";
+
+function insertDraft(detail: Partial<InsertDraftDetail>): void {
+  window.dispatchEvent(
+    new CustomEvent<InsertDraftDetail>("pi:insert-draft", {
+      detail: {
+        text: QUOTE,
+        tabId: 7,
+        source: { blockId: 3, terminalId: 2, sha256: "deadbeef" },
+        ...detail,
+      },
+    }),
+  );
+}
+
+function writeCalls(): { path: string; content: string }[] {
+  return invokeMock.mock.calls
+    .filter(([cmd]) => cmd === "fs_write_file")
+    .map(([, args]) => args as { path: string; content: string });
+}
+
+/** Backs the fs bridge with an in-memory map so load-then-save round trips
+ *  (the sidecar read before each append) behave like the real bridge. */
+function useMemoryFs(): Map<string, string> {
+  const files = new Map<string, string>();
+  invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+    const { path = "", content } = (args ?? {}) as {
+      path?: string;
+      content?: string;
+    };
+    if (cmd === "fs_create_dir") return undefined;
+    if (cmd === "fs_write_file") {
+      files.set(path, content ?? "");
+      return undefined;
+    }
+    if (cmd === "fs_read_file") {
+      return { kind: "text", content: files.get(path) ?? "" };
+    }
+    if (cmd === "fs_delete") {
+      files.delete(path);
+      return undefined;
+    }
+    return { kind: "ok" };
+  });
+  return files;
+}
+
+// ProseMirror scrolls the focused selection into view after the insert; the
+// scroll-parent walk ends at window, which has no layout in jsdom. Zero rects
+// keep that math finite. Installed for the whole file because the focus
+// command defers to a requestAnimationFrame that can land after a test ends.
+const zeroRect = {
+  top: 0,
+  bottom: 0,
+  left: 0,
+  right: 0,
+  width: 0,
+  height: 0,
+  x: 0,
+  y: 0,
+} as DOMRect;
+const rectsOf = () => [zeroRect] as unknown as DOMRectList;
+const win = window as unknown as Record<string, unknown>;
+Element.prototype.getClientRects = rectsOf;
+win.getClientRects = rectsOf;
+win.getBoundingClientRect = () => zeroRect;
+// The coords walk also measures DOM Ranges, which jsdom leaves without rects.
+const rangeProto = Object.getPrototypeOf(
+  document.createRange(),
+) as unknown as Record<string, unknown>;
+rangeProto.getClientRects = rectsOf;
+rangeProto.getBoundingClientRect = () => zeroRect;
+
+describe("composer pi:insert-draft", () => {
+  it("appends the quotation into an empty draft, focuses and saves at once", async () => {
+    const { container } = renderComposer(vi.fn(), { cwd: "/tmp/proj" });
+    const pm = container.querySelector("[aria-label='pi composer']")!;
+    insertDraft({});
+    await waitFor(() => {
+      expect(pm.textContent).toContain("From terminal block 3");
+    });
+    // tiptap defers the DOM focus to a requestAnimationFrame.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(pm);
+    });
+
+    const draft = writeCalls().find((w) => w.path === "/tmp/proj/.pi/drafts/7.md");
+    expect(draft).toBeTruthy();
+    expect(draft!.content).toContain("From terminal block 3");
+
+    const sidecar = writeCalls().find(
+      (w) => w.path === "/tmp/proj/.pi/drafts/7.md.json",
+    );
+    expect(sidecar).toBeTruthy();
+    const meta = JSON.parse(sidecar!.content) as {
+      v: number;
+      sources: {
+        blockId: number;
+        terminalId: number;
+        sha256: string;
+        insertedAt: string;
+      }[];
+    };
+    expect(meta.v).toBe(1);
+    expect(meta.sources).toEqual([
+      {
+        blockId: 3,
+        terminalId: 2,
+        sha256: "deadbeef",
+        insertedAt: expect.any(String),
+      },
+    ]);
+  });
+
+  it("keeps existing text and its trailing whitespace, one blank line between", async () => {
+    const files = useMemoryFs();
+    files.set("/tmp/proj/.pi/drafts/7.md", "hello  ");
+    const { container } = renderComposer(vi.fn(), { cwd: "/tmp/proj" });
+    const pm = container.querySelector("[aria-label='pi composer']")!;
+    await waitFor(() => {
+      expect(pm.textContent).toContain("hello");
+    });
+    insertDraft({});
+    await waitFor(() => {
+      expect(pm.textContent).toContain("From terminal block 3");
+    });
+    const drafts = writeCalls().filter(
+      (w) => w.path === "/tmp/proj/.pi/drafts/7.md",
+    );
+    const draft = drafts[drafts.length - 1];
+    expect(draft!.content).toMatch(/^hello  \n\n```/);
+    expect(draft!.content).toContain("From terminal block 3");
+  });
+
+  it("appends a second quotation without dropping the first", async () => {
+    useMemoryFs();
+    renderComposer(vi.fn(), { cwd: "/tmp/proj" });
+    insertDraft({});
+    await waitFor(() => {
+      expect(writeCalls().some((w) => w.path.endsWith("7.md"))).toBe(true);
+    });
+    insertDraft({
+      text: "```\nsecond\n```\nFrom terminal block 4",
+      source: { blockId: 4, terminalId: 2, sha256: "feedface" },
+    });
+    await waitFor(() => {
+      expect(
+        writeCalls().some((w) => w.content.includes("From terminal block 4")),
+      ).toBe(true);
+    });
+    const drafts = writeCalls().filter((w) => w.path.endsWith("7.md"));
+    const draft = drafts[drafts.length - 1];
+    expect(draft.content).toContain("From terminal block 3");
+    expect(draft.content).toContain("From terminal block 4");
+    const sidecars = writeCalls().filter((w) => w.path.endsWith("7.md.json"));
+    const sidecar = sidecars[sidecars.length - 1];
+    const meta = JSON.parse(sidecar.content) as {
+      sources: { blockId: number }[];
+    };
+    expect(meta.sources.map((s) => s.blockId)).toEqual([3, 4]);
+  });
+
+  it("ignores transfers addressed to another tab", () => {
+    renderComposer(vi.fn(), { cwd: "/tmp/proj" });
+    insertDraft({ tabId: 8 });
+    expect(writeCalls()).toHaveLength(0);
   });
 });

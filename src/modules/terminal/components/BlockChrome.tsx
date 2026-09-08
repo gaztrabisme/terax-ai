@@ -15,6 +15,10 @@ import {
 } from "../lib/blocks";
 import { getSlotForLeaf, type Slot } from "../lib/rendererPool";
 import { writeToSession } from "../lib/useTerminalSession";
+import {
+  SEND_TO_CHAT_EVENT,
+  type SendToChatDetail,
+} from "@/modules/pi/lib/sendToChat";
 
 /**
  * Block chrome for one pane (philosophy 9): one decoration pair per block
@@ -295,7 +299,96 @@ function buildActionRow(
       ),
     );
   }
+
+  row.appendChild(
+    makeSendToChatButton(leafId, block, () => {
+      // The same captured, ANSI-stripped text the Copy button produces; the
+      // button callback has already checked the marker is live.
+      const buf = term.buffer.active;
+      const start = block.marker?.line ?? 0;
+      const end = nextBlockStartLine(store.getBlocks(), block, buf.length);
+      return extractBlockText((y) => buf.getLine(y), start, end);
+    }),
+  );
   return row;
+}
+
+/** Output lines carried into a transfer quotation before truncation. */
+export const SEND_TO_CHAT_MAX_LINES = 200;
+
+/**
+ * The quotation a "Send to chat" click builds (K8): a bare fenced block
+ * holding the command line, a blank line and the captured output (capped at
+ * SEND_TO_CHAT_MAX_LINES lines with a trailing counter when longer), and
+ * below the fence one line naming the source block.
+ */
+export function buildQuotation(
+  command: string | null,
+  output: string,
+  blockId: number,
+): string {
+  const lines = output.length === 0 ? [] : output.split("\n");
+  let body = lines;
+  if (lines.length > SEND_TO_CHAT_MAX_LINES) {
+    body = [
+      ...lines.slice(0, SEND_TO_CHAT_MAX_LINES),
+      `(output truncated, ${lines.length} lines)`,
+    ];
+  }
+  return [
+    "```",
+    command ?? "",
+    "",
+    ...body,
+    "```",
+    `From terminal block ${blockId}`,
+  ].join("\n");
+}
+
+/** Hex SHA-256 over the raw output text (Web Crypto subtle.digest). */
+export async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * The K8 button: builds the quotation from the block's captured output and
+ * hands {text, source:{blockId, terminalId, sha256}} to the shell through the
+ * window CustomEvent "pi:send-to-chat". App retargets it to a chat tab whose
+ * composer appends it to the draft; nothing here ever sends.
+ */
+export function makeSendToChatButton(
+  leafId: number,
+  block: Block,
+  getRawOutput: () => string,
+): HTMLButtonElement {
+  const btn = makeButton(
+    "Send to chat",
+    () => {
+      if (!liveMarker(block.marker)) return;
+      const raw = getRawOutput();
+      void sha256Hex(raw)
+        .catch(() => "")
+        .then((sha256) => {
+          const detail: SendToChatDetail = {
+            text: buildQuotation(block.command, raw, block.id),
+            source: { blockId: block.id, terminalId: leafId, sha256 },
+          };
+          window.dispatchEvent(
+            new CustomEvent<SendToChatDetail>(SEND_TO_CHAT_EVENT, { detail }),
+          );
+        });
+    },
+    "block-send-to-chat",
+    block.id,
+  );
+  btn.setAttribute("aria-label", "Send to chat");
+  return btn;
 }
 
 /** Right-anchored duration label, shown once the block has closed. */
