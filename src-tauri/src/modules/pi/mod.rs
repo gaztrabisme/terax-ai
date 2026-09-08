@@ -1,10 +1,12 @@
 pub mod health;
 pub mod auth;
 pub mod attachments;
+pub mod artifacts;
 mod launch;
 mod launcher;
 mod manifest;
 pub mod prompts;
+pub mod runtime;
 pub mod secrets;
 mod session;
 pub mod sessions;
@@ -33,6 +35,17 @@ fn grant_agent_artifacts(app: &tauri::AppHandle, agent_dir: &Path) {
     let artifacts = agent_dir.join("tool-output-artifacts");
     if grant_asset_scope(app, &artifacts) {
         log::info!("pi asset scope granted: {}", artifacts.display());
+    }
+}
+
+/// launch.rs PathSource as the lowercase label the runtime report records for
+/// the resolved binary's source.
+fn path_source_label(source: launch::PathSource) -> &'static str {
+    match source {
+        launch::PathSource::Pref => "pref",
+        launch::PathSource::Bundled => "bundled",
+        launch::PathSource::Checkout => "checkout",
+        launch::PathSource::Missing => "missing",
     }
 }
 
@@ -96,6 +109,37 @@ pub async fn pi_open(
             e
         })?;
     let mut env = launch::expand_env_homes(&env.unwrap_or_default());
+    // K14 project overrides (design 3.4 "Project overrides"): the launch
+    // resolver reads and validates `.pi/terax.json` before anything spawns.
+    // An unknown key (or malformed file) fails the launch visibly with the
+    // key name; the allowed Pi keys merge over the global preferences the
+    // caller resolved into the env. The values keep the same shape the
+    // frontend's merge produces, so a normally-launched session is
+    // unaffected and this layer stays authoritative for the spawn.
+    let overrides = runtime::read_project_overrides(canonical.as_deref().map(Path::new))?;
+    let override_home = launch::home_dir();
+    let overlay = |env: &mut HashMap<String, String>, key: &str, value: &Option<String>| {
+        if let Some(value) = value.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            env.insert(
+                key.to_string(),
+                launch::expand_home(value, override_home.as_deref()),
+            );
+        }
+    };
+    overlay(
+        &mut env,
+        "EFFICIENT_PI_PROVIDER",
+        &overrides.provider,
+    );
+    overlay(&mut env, "EFFICIENT_PI_MODEL", &overrides.model);
+    overlay(&mut env, "EFFICIENT_PI_THINKING", &overrides.thinking);
+    overlay(&mut env, "EFFICIENT_PI_SMOL", &overrides.smol);
+    overlay(&mut env, "EFFICIENT_PI_BPPC_HOST", &overrides.bppc_host);
+    overlay(&mut env, "PI_CODING_AGENT_DIR", &overrides.agent_dir);
+    let launcher_dir = match launcher_dir.as_deref().map(str::trim) {
+        Some(dir) if !dir.is_empty() => launcher_dir,
+        _ => overrides.launcher_dir.clone(),
+    };
     // Cloud keys (Settings > Pi) ride into the spawn env on both spawn paths:
     // stored values fill any spawn env var the caller left unset, the oMLX
     // key among them, so the models.json render below sees the store too. The
@@ -111,6 +155,18 @@ pub async fn pi_open(
     // (injected above), then the bash launcher's own default
     // (~/.omlx/settings.json) so a checkout-less machine renders models.json.
     let home = launch::home_dir();
+    // The runtime agent dir's source for the runtime report: an env value the
+    // caller resolved (a pref or the project override) beats the seeded
+    // app-data copy the launcher defaults to.
+    let agent_dir_source = if env
+        .get("PI_CODING_AGENT_DIR")
+        .map(|dir| !dir.trim().is_empty())
+        .unwrap_or(false)
+    {
+        "pref"
+    } else {
+        "bundled"
+    };
     let session_agent_dir = launch::resolve_agent_dir(
         env.get("PI_CODING_AGENT_DIR").map(String::as_str),
         home.as_deref(),
@@ -131,6 +187,15 @@ pub async fn pi_open(
         thinking: env_var("EFFICIENT_PI_THINKING"),
         smol: env_var("EFFICIENT_PI_SMOL"),
     };
+    // Where each role value came from, per the design 3.6 order: the project
+    // override, the global preference the caller resolved into the env, or
+    // the packaged default. An explicit launch-environment override is
+    // indistinguishable from a global value at this layer and reports as
+    // "global"; runtime.rs documents the limitation.
+    let provider_source = runtime::role_source(overrides.provider.is_some(), &roles.provider);
+    let model_source = runtime::role_source(overrides.model.is_some(), &roles.model);
+    let thinking_source =
+        runtime::role_source(overrides.thinking.is_some(), &roles.thinking);
     let endpoints = launcher::PrepareEndpoints {
         bppc_host: env_var("EFFICIENT_PI_BPPC_HOST").trim().to_string(),
         omlx_key,
@@ -214,6 +279,19 @@ pub async fn pi_open(
                     } => {
                         log::info!("pi_open plan: direct pi={program} (source {source:?})");
                         args.extend_from_slice(&extra_args);
+                        // K14: what the runtime report records about the
+                        // resolution this spawn uses.
+                        let runtime_ctx = runtime::RuntimeContext {
+                            binary_path: program.clone(),
+                            binary_source: path_source_label(source).to_string(),
+                            agent_dir_source: agent_dir_source.to_string(),
+                            provider: roles.provider.clone(),
+                            provider_source: provider_source.to_string(),
+                            model: roles.model.clone(),
+                            model_source: model_source.to_string(),
+                            thinking: roles.thinking.clone(),
+                            thinking_source: thinking_source.to_string(),
+                        };
                         let input = launcher::PrepareInput {
                             app_version,
                             template_dir: bundled.resource_dir.join("pi-home").join("agent"),
@@ -224,8 +302,12 @@ pub async fn pi_open(
                             endpoints,
                             allow_any_dir: false,
                         };
-                        let spawn_env =
-                            session::prepare_direct(input, board_agent_bin.as_deref(), env)?;
+                        let spawn_env = session::prepare_direct(
+                            input,
+                            board_agent_bin.as_deref(),
+                            env,
+                            runtime_ctx,
+                        )?;
                         SpawnSpec {
                             program,
                             args,

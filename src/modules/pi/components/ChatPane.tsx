@@ -3,7 +3,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { retryPendingLabel, type PiImageAttachment } from "../lib/parse";
 import { modelAcceptsImages } from "../lib/providers";
 import { bindPendingImages } from "../lib/turnImages";
-import { usePiStore } from "../lib/piStore";
+import type { ArtifactFileRef } from "../lib/artifacts";
+import { usePiStore, type ComposerImage } from "../lib/piStore";
 import { Composer } from "./Composer";
 import { formatCost, Transcript } from "./Transcript";
 
@@ -11,6 +12,8 @@ type Props = {
   tabId: number;
   cwd?: string;
   onOpenChild: (path: string) => void;
+  /** Completed artifact files keyed by `<turnKey>/<n>` (K13 file-first). */
+  artifactFiles?: Record<string, ArtifactFileRef>;
 };
 
 function statusLabel(
@@ -40,9 +43,10 @@ function statusLabel(
 // The chat column of a pi tab: session header, transcript, composer. Owns no
 // session lifecycle beyond the header buttons; PiTab opens the session and
 // the layout owns the tab.
-export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
+export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
   const entry = usePiStore((s) => s.tabs[tabId]);
   const sendPrompt = usePiStore((s) => s.sendPrompt);
+  const retrySubmission = usePiStore((s) => s.retrySubmission);
   const removeQueued = usePiStore((s) => s.removeQueued);
   const answerAsk = usePiStore((s) => s.answerAsk);
   const dismissAsk = usePiStore((s) => s.dismissAsk);
@@ -84,6 +88,19 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
     );
     if (additions) setTurnImages((prev) => ({ ...prev, ...additions }));
   }, [blocks]);
+
+  // K13: a failed submission's thumbnail set leaves the pending queue, so a
+  // later plain send cannot own its images (bindPendingImages semantics
+  // stay; the failure is what must not rebind). The splice runs only while
+  // the failure stands, never on the "retrying" state.
+  const failedSubmission = entry?.failedSubmission ?? null;
+  useEffect(() => {
+    if (!failedSubmission || failedSubmission.state !== "failed") return;
+    const index = pendingImagesRef.current.indexOf(
+      failedSubmission.images as PiImageAttachment[],
+    );
+    if (index !== -1) pendingImagesRef.current.splice(index, 1);
+  }, [failedSubmission]);
 
   const status = state?.status ?? "idle";
   const exited = entry?.exited === true;
@@ -136,17 +153,29 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
     [modelRows, roles?.provider, chipModel],
   );
 
-  const submit = (markdown: string, images: PiImageAttachment[]) => {
+  const submit = (markdown: string, images: ComposerImage[]) => {
     if (!entry?.session || entry.exited) return;
     setSendError(null);
     if (images.length > 0) pendingImagesRef.current.push(images);
     sendPrompt(tabId, markdown, images).catch((e) => {
       // The send failed, so unbind: the queued set must not attach to a
-      // later user message.
+      // later user message. The store's failedSubmission carries the same
+      // array and the failed-submission effect splices it as well.
       const idx = pendingImagesRef.current.indexOf(images);
       if (idx !== -1) pendingImagesRef.current.splice(idx, 1);
       setSendError(e instanceof Error ? e.message : String(e));
     });
+  };
+
+  // K13 retry: the same submission id resends the same text and images.
+  // Thumbnails ride the pending queue again, FIFO, so only the retried
+  // send's own acknowledged turn can own them.
+  const retryFailed = (submissionId: string) => {
+    const failed = entry?.failedSubmission;
+    if (!failed || failed.submissionId !== submissionId) return;
+    setSendError(null);
+    pendingImagesRef.current.push(failed.images);
+    void retrySubmission(tabId, submissionId);
   };
 
   const newSession = () => {
@@ -155,6 +184,23 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
     void openSession(tabId, { cwd });
   };
   const stop = () => void kill(tabId);
+
+  // K14: a launch failure is an entry error with no session behind it (a
+  // failed preparation or spawn never produced a process). Errors that arrive
+  // mid-session keep the plain card below.
+  const launchFailed =
+    entry?.error != null && entry?.session == null && entry?.exited !== true;
+
+  // Open log opens the project's launcher.log in an editor tab through the
+  // same bridge the transcript's file links use (App listens for pi:open-file).
+  const openLauncherLog = () => {
+    if (!cwd) return;
+    window.dispatchEvent(
+      new CustomEvent("pi:open-file", {
+        detail: { path: `${cwd}/.pi/launcher.log` },
+      }),
+    );
+  };
 
   const headerBtn =
     "rounded-md border border-border/60 px-2 py-0.5 text-xs hover:bg-accent hover:text-foreground";
@@ -218,7 +264,29 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
         ) : null}
       </div>
 
-      {entry?.error ? (
+      {launchFailed ? (
+        <div
+          data-uat="launch-error"
+          role="alert"
+          className="mx-3 mt-3 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive"
+        >
+          <span className="min-w-0 flex-1" title={entry?.error ?? undefined}>
+            Launch failed: {entry?.error}
+          </span>
+          {cwd ? (
+            <button
+              type="button"
+              data-uat="open-launcher-log"
+              aria-label="Open log"
+              title="Open log"
+              onClick={openLauncherLog}
+              className="shrink-0 rounded-md border border-destructive/40 px-2 py-0.5 text-xs text-destructive hover:bg-destructive/20"
+            >
+              Open log
+            </button>
+          ) : null}
+        </div>
+      ) : entry?.error ? (
         <div className="mx-3 mt-3 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
           {entry.error}
         </div>
@@ -226,6 +294,14 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
       {sendError ? (
         <div className="mx-3 mt-3 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
           {sendError}
+        </div>
+      ) : null}
+      {entry?.bindError ? (
+        <div
+          role="status"
+          className="mx-3 mt-3 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive"
+        >
+          {entry.bindError}
         </div>
       ) : null}
 
@@ -239,6 +315,10 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
         }
         onDismiss={(requestId) => void dismissAsk(tabId, requestId)}
         cwd={cwd}
+        sessionId={state?.sessionId ?? null}
+        artifactFiles={artifactFiles}
+        failedSubmission={entry?.failedSubmission ?? null}
+        onRetrySubmission={retryFailed}
         onOpenChild={onOpenChild}
       />
 

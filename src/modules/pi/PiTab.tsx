@@ -34,7 +34,17 @@ import { SessionSearch, scrollToSnippet } from "./components/SessionSearch";
 import { viewButtonClass } from "./components/ModeStrip";
 import type { PiSessionHit } from "./lib/sessions";
 import { useChildStore } from "./lib/childStore";
-import { detectArtifacts, type ArtifactDoc } from "./lib/artifacts";
+import { invoke } from "@tauri-apps/api/core";
+import { currentWorkspaceEnv } from "@/modules/workspace";
+import {
+  artifactFileKey,
+  artifactIdFor,
+  artifactMime,
+  detectArtifacts,
+  type ArtifactDoc,
+  type ArtifactFileRef,
+} from "./lib/artifacts";
+import { sha256Hex } from "./lib/drafts";
 import { uiStatePath, useUiStateStore } from "@/modules/state/uiState";
 import { usePiLayout } from "./lib/layoutStore";
 import { messageBlocks } from "./lib/parse";
@@ -279,6 +289,7 @@ export function PiTab({
   // one. Streaming answers wait until the turn is done.
   const artifacts: ArtifactDoc[] = useMemo(() => {
     const docs: ArtifactDoc[] = [];
+    const sessionId = entry?.state.sessionId ?? null;
     for (const turn of groupTurns(messageBlocks(blocks))) {
       if (turn.status !== "done") continue;
       detectArtifacts(turn.answer).forEach((item, n) => {
@@ -288,21 +299,100 @@ export function PiTab({
           source: item.source,
           turn: turn.index,
           n,
+          turnKey: turn.key,
+          sessionId,
+          mime: artifactMime(item.kind),
         });
       });
     }
     return docs;
-  }, [blocks]);
+  }, [blocks, entry?.state.sessionId]);
+
+  // K13 file-first: detection alone opens nothing. Each detected document
+  // is written through pi_write_artifact (idempotent on an unchanged hash),
+  // and only a completed file under .pi/artifacts unlocks the viewer
+  // controls and the strip button.
+  const [artifactFiles, setArtifactFiles] = useState<
+    Record<string, ArtifactFileRef>
+  >({});
+  const artifactFilesRef = useRef<Record<string, ArtifactFileRef>>({});
+  const writtenHashesRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    if (!cwd) return;
+    let alive = true;
+    void (async () => {
+      for (const doc of artifacts) {
+        if (!alive) return;
+        const key = artifactFileKey(doc.turnKey ?? "", doc.n ?? 0);
+        const hash = await sha256Hex(doc.source);
+        if (!alive || writtenHashesRef.current[key] === hash) return;
+        if (artifactFilesRef.current[key]?.sha256 === hash) {
+          writtenHashesRef.current[key] = hash;
+          continue;
+        }
+        try {
+          const res = await invoke<{
+            path: string;
+            sha256: string;
+            reused: boolean;
+          }>("pi_write_artifact", {
+            cwd,
+            artifactId: await artifactIdFor(
+              doc.sessionId ?? null,
+              doc.turnKey ?? "",
+              doc.n ?? 0,
+            ),
+            sessionId: doc.sessionId ?? "",
+            turnId: doc.turnKey ?? "",
+            mime: doc.mime ?? "text/html",
+            content: doc.source,
+            workspace: currentWorkspaceEnv(),
+          });
+          if (!alive) return;
+          writtenHashesRef.current[key] = res.sha256;
+          artifactFilesRef.current = {
+            ...artifactFilesRef.current,
+            [key]: { path: res.path, sha256: res.sha256 },
+          };
+          setArtifactFiles(artifactFilesRef.current);
+        } catch {
+          // No file, no control: a later transcript change retries the write.
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [cwd, artifacts]);
+
+  // The viewer's authoritative input is an existing file: only file-backed
+  // documents reach the pane, the strip button and the open events.
+  const fileArtifacts: ArtifactDoc[] = useMemo(
+    () =>
+      (artifacts
+        .map((doc): ArtifactDoc | null => {
+          const file = artifactFiles[artifactFileKey(doc.turnKey ?? "", doc.n ?? 0)];
+          return file
+            ? {
+                ...doc,
+                path: `${(cwd ?? "").replace(/[\\/]+$/, "")}/${file.path}`,
+                sha256: file.sha256,
+              }
+            : null;
+        })
+        .filter((doc): doc is ArtifactDoc => doc !== null)),
+    [artifacts, artifactFiles, cwd],
+  );
 
   const selectedArtifact = useMemo(() => {
     if (artifactSel) {
-      const hit = artifacts.find(
+      const hit = fileArtifacts.find(
         (doc) => doc.turn === artifactSel.turn && doc.n === artifactSel.n,
       );
       if (hit) return hit;
     }
-    return artifacts[artifacts.length - 1] ?? null;
-  }, [artifacts, artifactSel]);
+    return fileArtifacts[fileArtifacts.length - 1] ?? null;
+  }, [fileArtifacts, artifactSel]);
 
   useEffect(() => {
     if (!active) return;
@@ -310,7 +400,7 @@ export function PiTab({
       const detail = (event as CustomEvent<{ turn?: unknown; n?: unknown }>)
         .detail;
       if (
-        !artifacts.some(
+        !fileArtifacts.some(
           (doc) => doc.turn === detail?.turn && doc.n === detail?.n,
         )
       )
@@ -320,7 +410,7 @@ export function PiTab({
     };
     window.addEventListener("pi:open-artifact", handler);
     return () => window.removeEventListener("pi:open-artifact", handler);
-  }, [active, artifacts, narrow, viewState]);
+  }, [active, fileArtifacts, narrow, viewState]);
 
   useEffect(() => {
     if (
@@ -409,7 +499,12 @@ export function PiTab({
           inert={fullscreen}
           className={cn("min-h-0 min-w-0 flex-1", fullscreen && "hidden")}
         >
-          <ChatPane tabId={tabId} cwd={cwd} onOpenChild={onOpenChild} />
+          <ChatPane
+            tabId={tabId}
+            cwd={cwd}
+            onOpenChild={onOpenChild}
+            artifactFiles={artifactFiles}
+          />
         </div>
         {view && (
           <ChatView

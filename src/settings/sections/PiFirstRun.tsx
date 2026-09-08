@@ -138,6 +138,154 @@ async function loadWorkspaceOverrides(cwd: string | null): Promise<unknown> {
 }
 
 /**
+ * Frontend twin of the Rust RuntimeReport (src-tauri
+ * src/modules/pi/runtime.rs, snake_case serde fields): the credential-free
+ * effective launch report `<project>/.pi/runtime.json` written before pi
+ * spawns. Steps keep the harness's verbatim names and statuses.
+ */
+export type RuntimeReportView = {
+  v: number;
+  steps: { name: string; status: string; detail: string }[];
+  agent_dir: string;
+  session_dir: string;
+  agent_hub_dir: string;
+  binary: { path: string; source: string };
+  agent_dir_source: string;
+  roles: {
+    orchestrator: {
+      provider: string;
+      model: string;
+      thinking: string;
+      endpoint: string | null;
+      source: string;
+    };
+  };
+  launched_at: string;
+};
+
+/**
+ * The parsed `<cwd>/.pi/runtime.json`; missing, unreadable or malformed
+ * resolves to null, so the rows fall back to the live resolution instead of
+ * describing a launch that never happened.
+ */
+async function loadRuntimeReport(
+  cwd: string | null,
+): Promise<RuntimeReportView | null> {
+  if (!cwd) return null;
+  try {
+    const res = await native.readFile(`${cwd}/.pi/runtime.json`);
+    if (res.kind !== "text" || !res.content) return null;
+    const parsed = JSON.parse(res.content) as RuntimeReportView;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!parsed.roles?.orchestrator || typeof parsed.agent_dir !== "string") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/** Row status for a verbatim harness step status (OK, WARN, FAIL, SKIPPED). */
+function stepStatus(status: string): CheckStatus {
+  if (status === "FAIL") return "missing";
+  if (status === "WARN") return "warn";
+  return "ok";
+}
+
+/**
+ * K14 rows from the last launch's runtime report: the effective binary, the
+ * runtime agent dir (the seeded dir pi ran from, never the template), the
+ * orchestrator provider, model, thinking and endpoint, each with the source
+ * the report records, plus the seed step's verbatim status (design 3.6:
+ * Settings shows resolved values and seed status for the active project).
+ * The endpoint row reflects the report endpoint's own probe: a failure names
+ * the endpoint and the error, and no other endpoint's success stands in for
+ * it (R2.2).
+ */
+export function runtimeReportRows(
+  report: RuntimeReportView,
+  health: PiHealthMap,
+): CheckRow[] {
+  const role = report.roles.orchestrator;
+  const rows: CheckRow[] = [
+    {
+      id: "runtime-binary",
+      label: "Effective binary",
+      status: report.binary.path.trim() ? "ok" : "missing",
+      detail: report.binary.path.trim()
+        ? `${report.binary.path} (${report.binary.source})`
+        : "no binary recorded",
+    },
+    {
+      id: "runtime-agent-dir",
+      label: "Runtime agent dir",
+      status: report.agent_dir.trim() ? "ok" : "missing",
+      detail: report.agent_dir.trim()
+        ? `${report.agent_dir} (${report.agent_dir_source})`
+        : "no runtime agent dir recorded",
+    },
+  ];
+  const seed = report.steps.find((step) => step.name === "seed");
+  if (seed) {
+    rows.push({
+      id: "runtime-seed",
+      label: "Seed",
+      status: stepStatus(seed.status),
+      detail: `${seed.status}: ${seed.detail}`,
+    });
+  }
+  rows.push(
+    {
+      id: "runtime-provider",
+      label: "Provider",
+      status: role.provider.trim() ? "ok" : "missing",
+      detail: role.provider.trim()
+        ? `${role.provider} (${role.source})`
+        : "none recorded",
+    },
+    {
+      id: "runtime-model",
+      label: "Model",
+      status: role.model.trim() ? "ok" : "missing",
+      detail: role.model.trim()
+        ? `${role.model} (${role.source})`
+        : "none recorded",
+    },
+    {
+      id: "runtime-thinking",
+      label: "Thinking",
+      status: role.thinking.trim() ? "ok" : "missing",
+      detail: role.thinking.trim()
+        ? `${role.thinking} (${role.source})`
+        : "none recorded",
+    },
+  );
+  if (role.endpoint) {
+    const result = health["runtime-endpoint"];
+    const why = result
+      ? (result.error ?? `HTTP ${result.status ?? "?"}`)
+      : "not probed";
+    rows.push({
+      id: "runtime-endpoint",
+      label: "Endpoint",
+      status: result?.ok ? "ok" : "missing",
+      detail: result?.ok
+        ? `${role.endpoint} answered in ${result.ms} ms (${role.source})`
+        : `${role.endpoint}: ${why} (${role.source})`,
+    });
+  } else {
+    rows.push({
+      id: "runtime-endpoint",
+      label: "Endpoint",
+      status: "warn",
+      detail: `no endpoint recorded for ${role.provider || "the session"}`,
+    });
+  }
+  return rows;
+}
+
+/**
  * Which cloud providers hold a key stored under the app data dir
  * (pi_secret_status answers "set"/"unset"; the key itself never leaves the
  * backend). A failed load degrades to empty, so the role rows just fall back
@@ -271,7 +419,9 @@ export function PiFirstRun({
     };
   }, []);
 
+  const runIdRef = useRef(0);
   const runCheck = useCallback(async () => {
+    const runId = ++runIdRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -309,6 +459,7 @@ export function PiFirstRun({
         storedKeys,
         envPresence,
         homeDir,
+        report,
       ] = await Promise.all([
         loadAuthStatus(runtimeDir, ready),
         loadEndpoints(runtimeDir, ready),
@@ -316,6 +467,7 @@ export function PiFirstRun({
         loadStoredCloudKeys(),
         loadCloudEnvPresence(),
         loadHomeDir(),
+        loadRuntimeReport(selectedCwd),
       ]);
       const local = await loadLocalKeySources(
         endpoints,
@@ -331,22 +483,47 @@ export function PiFirstRun({
       probes.forEach((probe, i) => {
         health[probe.id] = results[i];
       });
-      setRows(
-        buildRows({
-          paths,
-          roles,
-          authStatusMap,
-          providerList,
-          endpoints,
-          health,
-          rolesScope: scope,
-          cloudKeys: { stored: storedKeys, env: envPresence, local },
-        }),
-      );
+      // K14: the report endpoint is probed itself, exactly as recorded, so
+      // the row never reaches a different URL than the last launch did.
+      if (report?.roles.orchestrator.endpoint) {
+        health["runtime-endpoint"] = await invokeHealth({
+          id: "runtime-endpoint",
+          url: report.roles.orchestrator.endpoint,
+        });
+      }
+      let checkRows = buildRows({
+        paths,
+        roles,
+        authStatusMap,
+        providerList,
+        endpoints,
+        health,
+        rolesScope: scope,
+        cloudKeys: { stored: storedKeys, env: envPresence, local },
+      });
+      if (report) {
+        const provider = report.roles.orchestrator.provider.trim();
+        // The report's endpoint row is the effective one: the generic row
+        // for the same provider stands down, so a fallback endpoint cannot
+        // show success while the recorded one is down (R2.2).
+        checkRows = checkRows.filter(
+          (row) =>
+            !(
+              report.roles.orchestrator.endpoint &&
+              row.id === `endpoint-${provider}`
+            ),
+        );
+        checkRows = [...checkRows, ...runtimeReportRows(report, health)];
+      }
+      // A newer run (another project selected, another click) supersedes
+      // this one: its rows never reach the panel.
+      if (runId !== runIdRef.current) return;
+      setRows(checkRows);
     } catch (e) {
+      if (runId !== runIdRef.current) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (runId === runIdRef.current) setLoading(false);
     }
   }, [
     piAgentBin,
@@ -363,7 +540,8 @@ export function PiFirstRun({
 
   // Runs on mount and whenever the project selector changes, so the rows
   // never describe a project other than the selected one; every other later
-  // run comes from the Run check button.
+  // run comes from the Run check button. The run id keeps a slow earlier
+  // run (previous selection) from overwriting the selected one's rows.
   const runRef = useRef(runCheck);
   runRef.current = runCheck;
   useEffect(() => {

@@ -1,24 +1,15 @@
-import { Download01Icon, PlayIcon } from "@hugeicons/core-free-icons";
+import { Refresh01Icon, CopyIcon, FileEditIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { currentWorkspaceEnv } from "@/modules/workspace";
-import {
-  artifactFileName,
-  htmlDataUrl,
-  viewerDocument,
-  type ArtifactDoc,
-} from "../lib/artifacts";
+import { viewerDocument, type ArtifactDoc, type ArtifactDocKind } from "../lib/artifacts";
 
-/** Sandbox for the artifact iframe by default: forms and downloads only.
- *  No allow-scripts (nothing executes until the user consents per artifact)
- *  and no allow-same-origin (the document keeps an opaque origin). */
+/** Sandbox for the artifact iframe: forms and downloads only. K13 removed
+ *  execution and save-before-view semantics; no allow-scripts, no
+ *  allow-same-origin (the document keeps an opaque origin). */
 export const ARTIFACT_SANDBOX = "allow-forms allow-downloads";
-/** Sandbox after the consent: scripts may run, still without same-origin.
- *  The document's own meta CSP keeps the network on data: and blob: only. */
-export const ARTIFACT_SANDBOX_SCRIPTS =
-  "allow-forms allow-downloads allow-scripts";
 
 /** Saved-path display relative to the workspace root. */
 export function relativePath(path: string, cwd: string): string {
@@ -27,6 +18,37 @@ export function relativePath(path: string, cwd: string): string {
   if (path.startsWith(`${base}\\`)) return path.slice(base.length + 1);
   return path;
 }
+
+/** Reply shape of `pi_read_artifact`. */
+type ReadArtifactReply = {
+  mime: string;
+  sha256: string;
+  content: string | null;
+  base64: string | null;
+};
+
+/** The document kind the viewer builds from a file's mime and extension. */
+function kindForReply(reply: ReadArtifactReply, path: string): ArtifactDocKind {
+  switch (reply.mime) {
+    case "text/html":
+      return "html";
+    case "image/svg+xml":
+      return "svg";
+    case "text/markdown":
+      return "md";
+    default:
+      if (reply.mime.startsWith("image/")) return "image";
+      return path.endsWith(".md") || path.endsWith(".txt") ? "md" : "html";
+  }
+}
+
+/** The file-backed document the pane renders: the file is the truth. */
+type LoadedArtifact = {
+  kind: ArtifactDocKind;
+  title: string;
+  source: string;
+  sha256: string;
+};
 
 type Props = {
   doc: ArtifactDoc | null;
@@ -37,159 +59,151 @@ const toolbarBtn =
   "flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground";
 
 /**
- * The artifact viewer: a sandboxed iframe over the document, a per-artifact
- * scripts consent, and a Save that lands the artifact as a project file
- * under .pi/artifacts. The file is the truth; the iframe is only a view.
+ * The artifact viewer over an existing file (K13): the authoritative input
+ * is the file plus its path and hash, read back through pi_read_artifact on
+ * every selection and every refresh. The path links to the editor, Copy
+ * path copies the absolute path, and a missing or unreadable file shows a
+ * path-bearing error. Opening the viewer causes no save operation.
  */
 export function ArtifactPane({ doc, cwd }: Props) {
-  const [scriptsAllowed, setScriptsAllowed] = useState(false);
-  const [consentOpen, setConsentOpen] = useState(false);
-  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState<LoadedArtifact | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const absolute = doc?.path ?? null;
 
-  // Consent is per artifact: a new document turns scripts back off.
-  useEffect(() => {
-    setScriptsAllowed(false);
-    setConsentOpen(false);
-    setSavedPath(doc?.path ?? null);
-    setError(null);
-  }, [doc]);
-
-  const save = useCallback(async () => {
-    if (!doc || !cwd || doc.path || doc.kind === "image") return;
-    setError(null);
-    const dir = `${cwd.replace(/[\\/]+$/, "")}/.pi/artifacts`;
-    try {
-      await invoke("fs_create_dir", {
-        path: dir,
-        workspace: currentWorkspaceEnv(),
-      });
-    } catch {
-      // The artifacts dir already existing is the normal steady state.
+  const read = useCallback(async () => {
+    if (!absolute) {
+      setLoaded(null);
+      setError(null);
+      return;
     }
     try {
-      const path = `${dir}/${artifactFileName(doc.turn ?? 0, doc.n ?? 0, doc.kind)}`;
-      await invoke("fs_write_file", {
-        path,
-        content: doc.source,
+      const reply = await invoke<ReadArtifactReply>("pi_read_artifact", {
+        cwd: cwd ?? "",
+        path: absolute,
         workspace: currentWorkspaceEnv(),
       });
-      setSavedPath(path);
+      setError(null);
+      setLoaded({
+        kind: kindForReply(reply, absolute),
+        title: doc?.title ?? absolute.split(/[\\/]/).pop() ?? absolute,
+        source:
+          reply.content ??
+          `data:${reply.mime};base64,${reply.base64 ?? ""}`,
+        sha256: reply.sha256,
+      });
     } catch (e) {
+      setLoaded(null);
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [cwd, doc]);
+  }, [absolute, cwd, doc?.title]);
 
-  if (!doc) {
+  // The file is read on selection; Refresh re-reads it, and a changed hash
+  // reloads the viewer with the file's new contents.
+  useEffect(() => {
+    void read();
+  }, [read]);
+
+  if (!doc || !absolute) {
     return (
       <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground">
-        No artifact yet: answers with html or svg code blocks show here.
+        No artifact yet: a completed artifact file shows here.
       </div>
     );
   }
 
-  const openSavedInEditor = () => {
-    if (!savedPath) return;
-    // Same bridge as the transcript's answer export: the shell opens an
-    // editor tab for the path.
+  const openInEditor = () => {
     window.dispatchEvent(
-      new CustomEvent("pi:open-file", { detail: { path: savedPath } }),
+      new CustomEvent("pi:open-file", { detail: { path: absolute } }),
     );
   };
 
-  // Consented scripts need the data: URL render: a srcdoc document inherits
-  // the app's own CSP, whose script-src blocks inline script; a data:
-  // document carries an empty policy container, so only the injected meta
-  // applies there. The sandbox attribute guards both renders.
-  const chip = savedPath ? relativePath(savedPath, cwd ?? "") : null;
+  const chip = cwd ? relativePath(absolute, cwd) : absolute;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-7 shrink-0 items-center gap-1 border-b border-border/60 px-1.5">
         <button
           type="button"
+          data-uat="artifact-path"
+          title={`Open ${absolute} in the editor`}
+          onClick={openInEditor}
+          className={cn(
+            "min-w-0 truncate rounded px-1 text-xs text-muted-foreground",
+            "underline-offset-2 hover:text-foreground hover:underline",
+          )}
+        >
+          {chip}
+        </button>
+        <button
+          type="button"
+          data-uat="artifact-copy-path"
+          aria-label="Copy path"
+          title="Copy path"
           onClick={() => {
-            if (scriptsAllowed) {
-              setScriptsAllowed(false);
-              return;
-            }
-            setConsentOpen(true);
+            void navigator.clipboard?.writeText(absolute).catch(() => {});
           }}
           className={toolbarBtn}
         >
-          <HugeiconsIcon icon={PlayIcon} size={12} strokeWidth={1.75} />
-          {scriptsAllowed ? "Scripts on" : "Run scripts"}
+          <HugeiconsIcon icon={CopyIcon} size={12} strokeWidth={1.75} />
+          Copy path
         </button>
-        {cwd && !doc.path && doc.kind !== "image" ? (
-          <button
-            type="button"
-            onClick={() => void save()}
-            className={toolbarBtn}
-          >
-            <HugeiconsIcon icon={Download01Icon} size={12} strokeWidth={1.75} />
-            Save
-          </button>
-        ) : null}
-        {chip ? (
-          <button
-            type="button"
-            title={`Open ${savedPath} in the editor`}
-            onClick={openSavedInEditor}
-            className={cn(
-              "min-w-0 truncate rounded px-1 text-xs text-muted-foreground",
-              "underline-offset-2 hover:text-foreground hover:underline",
-            )}
-          >
-            {chip}
-          </button>
-        ) : null}
+        <button
+          type="button"
+          aria-label="Refresh artifact"
+          title="Refresh artifact"
+          onClick={() => void read()}
+          className={toolbarBtn}
+        >
+          <HugeiconsIcon
+            icon={Refresh01Icon}
+            size={12}
+            strokeWidth={1.75}
+          />
+          Refresh
+        </button>
         <span className="flex-1" />
-        {error ? (
-          <span className="truncate text-xs text-destructive">{error}</span>
-        ) : null}
+        <button
+          type="button"
+          title={`Open ${absolute} in the editor`}
+          onClick={openInEditor}
+          className={toolbarBtn}
+        >
+          <HugeiconsIcon icon={FileEditIcon} size={12} strokeWidth={1.75} />
+        </button>
       </div>
-      {consentOpen ? (
-        <div className="flex shrink-0 items-center gap-2 border-b border-border/60 px-2 py-1 text-xs text-muted-foreground">
-          <span className="min-w-0 flex-1">
-            Scripts in this artifact run with the network blocked.
+      {error ? (
+        <div
+          data-uat="artifact-error"
+          role="alert"
+          className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+        >
+          <span className="min-w-0 flex-1 truncate" title={error}>
+            {error}
           </span>
           <button
             type="button"
-            onClick={() => {
-              setConsentOpen(false);
-              setScriptsAllowed(true);
-            }}
-            className={toolbarBtn}
+            aria-label="Retry artifact load"
+            onClick={() => void read()}
+            className={cn(toolbarBtn, "text-destructive hover:text-destructive")}
           >
-            Allow
-          </button>
-          <button
-            type="button"
-            onClick={() => setConsentOpen(false)}
-            className={toolbarBtn}
-          >
-            Cancel
+            Retry
           </button>
         </div>
       ) : null}
       <div className="min-h-0 flex-1 bg-white">
-        {scriptsAllowed ? (
+        {loaded ? (
           <iframe
-            title={doc.title}
+            title={loaded.title}
             data-uat="artifact-frame"
-            src={htmlDataUrl(viewerDocument(doc))}
-            sandbox={ARTIFACT_SANDBOX_SCRIPTS}
-            className="h-full w-full border-0"
-          />
-        ) : (
-          <iframe
-            title={doc.title}
-            data-uat="artifact-frame"
-            srcDoc={viewerDocument(doc)}
+            srcDoc={viewerDocument({
+              kind: loaded.kind,
+              title: loaded.title,
+              source: loaded.source,
+            })}
             sandbox={ARTIFACT_SANDBOX}
             className="h-full w-full border-0"
           />
-        )}
+        ) : null}
       </div>
     </div>
   );

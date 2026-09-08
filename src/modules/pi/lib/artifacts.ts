@@ -16,9 +16,15 @@ export type Artifact = {
   source: string;
 };
 
+/** Document kinds the viewer renders. */
+export type ArtifactDocKind = "html" | "svg" | "md" | "image";
+
 /** What the pane's iframe shows. Kinds beyond detection cover project files
  *  viewed through the same pane; `path` marks an artifact that already is a
- *  project file. */
+ *  project file. K13 file-first fields: a detected answer artifact gains
+ *  `artifactId`, `turnKey`, `sessionId`, `mime` and `sha256` once its file
+ *  exists under .pi/artifacts; the viewer reads the file, never the answer
+ *  text. */
 export type ArtifactDoc = {
   kind: "html" | "svg" | "md" | "image";
   title: string;
@@ -29,6 +35,16 @@ export type ArtifactDoc = {
   /** Turn index and artifact index within the answer: the Save name. */
   turn?: number;
   n?: number;
+  /** Stable opaque id of the artifact's file under .pi/artifacts. */
+  artifactId?: string;
+  /** The owning turn's stable key (the user block id). */
+  turnKey?: string;
+  /** The owning pi session id. */
+  sessionId?: string | null;
+  /** Media type recorded in the artifact index. */
+  mime?: string;
+  /** Hash of the file the viewer reads. */
+  sha256?: string;
 };
 
 type FencedBlock = { lang: string; content: string };
@@ -166,6 +182,50 @@ export function detectArtifacts(markdown: string): Artifact[] {
  *  the consented scripts run. Exactly this string rides every viewer doc. */
 export const ARTIFACT_CSP =
   "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src data: blob:; form-action 'none'";
+
+// ---------------------------------------------------------------------------
+// K13 file-first artifacts
+// ---------------------------------------------------------------------------
+
+/** A completed artifact file recorded under .pi/artifacts: the viewer's
+ *  authoritative input (design.md 3.4 row "Answers and artifacts"). */
+export type ArtifactFileRef = { path: string; sha256: string };
+
+/** Map key for one detected artifact within its turn. */
+export function artifactFileKey(turnKey: string, n: number): string {
+  return `${turnKey}/${n}`;
+}
+
+/** Media type the Rust artifact writer records for one detected kind. */
+export function artifactMime(kind: ArtifactDoc["kind"]): string {
+  switch (kind) {
+    case "html":
+      return "text/html";
+    case "svg":
+      return "image/svg+xml";
+    case "md":
+      return "text/markdown";
+    case "image":
+      return "application/octet-stream";
+  }
+}
+
+/**
+ * Stable opaque artifact file id: a hash over the session id, the turn key
+ * (the user block id) and the index within the answer, so the same artifact
+ * writes to the same `<project>/.pi/artifacts/<artifact-id>.<ext>` across
+ * re-detections and restarts while the filename never carries a list
+ * position. sha256Hex keeps the id ASCII filename-safe.
+ */
+export async function artifactIdFor(
+  sessionId: string | null,
+  turnKey: string,
+  n: number,
+): Promise<string> {
+  const { sha256Hex } = await import("./drafts");
+  const digest = await sha256Hex(`${sessionId ?? ""}\n${turnKey}\n${n}`);
+  return `art-${digest.slice(0, 16)}`;
+}
 
 export function artifactCspMeta(): string {
   return `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_CSP}">`;

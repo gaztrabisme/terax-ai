@@ -259,12 +259,23 @@ describe("artifact chip", () => {
     },
   ];
 
-  it("offers Open artifact on answers that carry one and stays quiet otherwise", () => {
+  it("offers Open artifact only when the detected artifact has a file (K13 file-first)", () => {
+    const withHtmlButNoFile = renderToStaticMarkup(
+      <Transcript
+        blocks={blocksWithHtml}
+        onAnswer={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    // Detection alone cannot activate the viewer: no file, no control.
+    expect(withHtmlButNoFile).not.toContain("Open artifact");
+
     const withHtml = renderToStaticMarkup(
       <Transcript
         blocks={blocksWithHtml}
         onAnswer={() => {}}
         onDismiss={() => {}}
+        artifactFiles={{ "u0/0": { path: ".pi/artifacts/art-a.html", sha256: "f00d" } }}
       />,
     );
     expect(withHtml).toContain("Open artifact");

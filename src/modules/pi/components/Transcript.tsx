@@ -45,8 +45,13 @@ import {
   subagentName,
   type Turn,
 } from "@/modules/pi/lib/turns";
-import { detectArtifacts, type Artifact } from "@/modules/pi/lib/artifacts";
-import type { PiQueued } from "@/modules/pi/lib/piStore";
+import {
+  artifactFileKey,
+  detectArtifacts,
+  type Artifact,
+  type ArtifactFileRef,
+} from "@/modules/pi/lib/artifacts";
+import type { PiFailedSubmission, PiQueued } from "@/modules/pi/lib/piStore";
 import { CACHE_QUALIFIER_TEXT, cacheShareLabel } from "@/modules/pi/lib/usage";
 import { KeystoneCard } from "./blocks/KeystoneCard";
 import { ToolStep } from "./blocks/ToolRow";
@@ -58,11 +63,20 @@ type Props = {
   emptyHint?: string;
   /** Workspace root: anchors empty state and exported answer files. */
   cwd?: string;
+  /** The pi session id, naming exported answer and artifact files. */
+  sessionId?: string | null;
   /** Opens a child transcript tab from a subagent step. */
   onOpenChild?: (path: string) => void;
   /** Images sent with each turn, keyed by turn key (the user block id).
    *  Local state from the composer: the session file may not echo the bytes. */
   turnImages?: Record<string, PiImageAttachment[]>;
+  /** Completed artifact files per `<turnKey>/<n>`; a turn's Open artifact
+   *  control appears only when its file exists (K13 file-first). */
+  artifactFiles?: Record<string, ArtifactFileRef>;
+  /** The standing failed submission, when one is not acknowledged yet. */
+  failedSubmission?: PiFailedSubmission | null;
+  /** Resends a failed submission under its own id. */
+  onRetrySubmission?: (submissionId: string) => void;
   /** Follow-up prompts sent while a turn was streaming; rendered after the
    *  turns until pi runs them. */
   queued?: PiQueued[];
@@ -96,30 +110,27 @@ export function renderedText(markdown: string): string {
     .trim();
 }
 
-/** Writes the markdown to <cwd>/.pi/answers and asks the layout to open it. */
+/** Writes the answer's exact Markdown to `.pi/answers/<session-id>-<turn-id>.md`
+ *  through the Rust writer (K13), which reads the file back and verifies
+ *  content equality before the editor is allowed to open. */
 async function openAnswerInEditor(
   cwd: string,
-  turnIndex: number,
+  sessionId: string | null | undefined,
+  turnKey: string,
   markdown: string,
 ): Promise<string> {
-  const base = cwd.replace(/[\\/]+$/, "");
-  const dir = `${base}/.pi/answers`;
-  try {
-    await invoke("fs_create_dir", {
-      path: dir,
-      workspace: currentWorkspaceEnv(),
-    });
-  } catch {
-    // The answers dir already existing is the normal steady state.
-  }
-  const path = `${dir}/${turnIndex}-${Date.now()}.md`;
-  await invoke("fs_write_file", {
-    path,
-    content: markdown,
+  const res = await invoke<{ path: string }>("pi_write_answer", {
+    cwd,
+    sessionId: sessionId ?? "",
+    turnId: turnKey,
+    markdown,
     workspace: currentWorkspaceEnv(),
   });
-  window.dispatchEvent(new CustomEvent("pi:open-file", { detail: { path } }));
-  return path;
+  const absolute = `${cwd.replace(/[\\/]+$/, "")}/${res.path}`;
+  window.dispatchEvent(
+    new CustomEvent("pi:open-file", { detail: { path: absolute } }),
+  );
+  return absolute;
 }
 
 function basename(cwd?: string): string | null {
@@ -290,10 +301,22 @@ export function formatCost(cost: number): string {
   return cost >= 0.01 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(4)}`;
 }
 
-function ErrorCard({ block }: { block: PiErrorBlock }) {
+function ErrorCard({
+  block,
+  retry,
+}: {
+  block: PiErrorBlock;
+  /** K13: the Retry submission control scoped to the failed submission id. */
+  retry?: {
+    submissionId: string;
+    retrying: boolean;
+    onRetry: () => void;
+  };
+}) {
   return (
     <div
       data-uat="error-card"
+      data-uat-key={retry?.submissionId}
       className="flex max-w-[72ch] items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[13px] text-destructive"
     >
       <HugeiconsIcon
@@ -305,6 +328,20 @@ function ErrorCard({ block }: { block: PiErrorBlock }) {
       <span className="select-text whitespace-pre-wrap wrap-break-word">
         {block.text}
       </span>
+      {retry ? (
+        <button
+          type="button"
+          data-uat="submission-retry"
+          data-uat-key={retry.submissionId}
+          aria-label="Retry submission"
+          title="Retry submission"
+          disabled={retry.retrying}
+          onClick={retry.onRetry}
+          className="shrink-0 rounded-md border border-destructive/40 px-2 py-0.5 text-xs text-destructive hover:bg-destructive/20 disabled:opacity-50"
+        >
+          {retry.retrying ? "Retrying..." : "Retry submission"}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -537,15 +574,21 @@ function ActivityFold({
 
 function AnswerActions({
   cwd,
+  sessionId,
   turn,
   markdown,
   artifacts,
+  artifactFiles,
 }: {
   cwd?: string;
+  sessionId?: string | null;
   turn: Turn;
   markdown: string;
   /** Artifacts detected over this answer; one chip each. */
   artifacts: Artifact[];
+  /** Completed artifact files keyed by `<turnKey>/<n>`: only these may
+   *  open the viewer (K13 file-first, no answer-text-only activation). */
+  artifactFiles?: Record<string, ArtifactFileRef>;
 }) {
   const [copied, setCopied] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
@@ -574,7 +617,7 @@ function AnswerActions({
   const openInEditor = useCallback(() => {
     if (!cwd) return;
     setError(null);
-    openAnswerInEditor(cwd, turn.index, markdown)
+    openAnswerInEditor(cwd, sessionId, turn.key, markdown)
       .then((path) => {
         setSaved(path.split(/[\\/]/).pop() ?? path);
         window.setTimeout(() => setSaved(null), 2000);
@@ -582,7 +625,7 @@ function AnswerActions({
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e));
       });
-  }, [cwd, markdown, turn.index]);
+  }, [cwd, sessionId, markdown, turn.key]);
 
   const btn =
     "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground";
@@ -629,21 +672,29 @@ function AnswerActions({
           Open in editor
         </button>
       ) : null}
-      {artifacts.map((artifact, i) => (
-        <button
-          key={`${artifact.kind}-${i}`}
-          type="button"
-          data-uat="open-artifact"
-          data-uat-key={`${turn.key}/artifact-${i}`}
-          data-uat-index={i}
-          title={artifact.title}
-          onClick={() => window.dispatchEvent(openArtifactEvent(turn.index, i))}
-          className={btn}
-        >
-          <HugeiconsIcon icon={FileCodeIcon} size={12} strokeWidth={1.75} />
-          {artifacts.length > 1 ? `Open artifact ${i + 1}` : "Open artifact"}
-        </button>
-      ))}
+      {artifacts.map((artifact, i) => {
+        // File-first: a detected document without a completed file offers
+        // no viewer control at all.
+        const file = artifactFiles?.[artifactFileKey(turn.key, i)];
+        if (!file) return null;
+        return (
+          <button
+            key={`${artifact.kind}-${i}`}
+            type="button"
+            data-uat="open-artifact"
+            data-uat-key={`${turn.key}/artifact-${i}`}
+            data-uat-index={i}
+            title={artifact.title}
+            onClick={() =>
+              window.dispatchEvent(openArtifactEvent(turn.index, i))
+            }
+            className={btn}
+          >
+            <HugeiconsIcon icon={FileCodeIcon} size={12} strokeWidth={1.75} />
+            {artifacts.length > 1 ? `Open artifact ${i + 1}` : "Open artifact"}
+          </button>
+        );
+      })}
       {saved ? (
         <span className="text-xs text-muted-foreground">saved {saved}</span>
       ) : null}
@@ -659,9 +710,11 @@ function TurnView({
   open,
   onToggle,
   cwd,
+  sessionId,
   onOpenChild,
   onAnswer,
   onDismiss,
+  artifactFiles,
 }: {
   turn: Turn;
   usage: PiUsage | null;
@@ -669,9 +722,11 @@ function TurnView({
   open: boolean;
   onToggle: () => void;
   cwd?: string;
+  sessionId?: string | null;
   onOpenChild?: (path: string) => void;
   onAnswer: (requestId: string, answers: PiAskAnswer[]) => void;
   onDismiss: (requestId: string) => void;
+  artifactFiles?: Record<string, ArtifactFileRef>;
 }) {
   // Artifacts only once the answer is final: a streaming document would
   // redraw the pane on every chunk.
@@ -748,9 +803,11 @@ function TurnView({
             <div className="mt-1.5">
               <AnswerActions
                 cwd={cwd}
+                sessionId={sessionId}
                 turn={turn}
                 markdown={turn.answer}
                 artifacts={artifacts}
+                artifactFiles={artifactFiles}
               />
             </div>
           ) : null}
@@ -768,8 +825,12 @@ export function Transcript({
   onDismiss,
   emptyHint = "Enter sends, Shift+Enter newline",
   cwd,
+  sessionId,
   onOpenChild,
   turnImages,
+  artifactFiles,
+  failedSubmission,
+  onRetrySubmission,
   queued,
   onRemoveQueued,
 }: Props) {
@@ -815,9 +876,11 @@ export function Transcript({
                 open={openTurns[turn.key] ?? false}
                 onToggle={() => toggle(turn.key)}
                 cwd={cwd}
+                sessionId={sessionId}
                 onOpenChild={onOpenChild}
                 onAnswer={onAnswer}
                 onDismiss={onDismiss}
+                artifactFiles={artifactFiles}
               />
               {(cards.get(i) ?? []).map((block, j) =>
                 block.kind === "error" ? (
@@ -836,6 +899,27 @@ export function Transcript({
               <RetryCard key={`card-bare-${j}`} block={block} />
             ),
           )}
+          {/* A failed submission stands as its own error card carrying the
+              Retry submission control scoped to the submission id (K13).
+              Retrying sends the same text and images under the same id;
+              only the acknowledged turn can own the attachments. */}
+          {failedSubmission ? (
+            <ErrorCard
+              block={{
+                kind: "error",
+                at: 0,
+                text: `submission ${failedSubmission.submissionId} failed: ${
+                  failedSubmission.error ?? "the send was refused"
+                }`,
+              }}
+              retry={{
+                submissionId: failedSubmission.submissionId,
+                retrying: failedSubmission.state === "retrying",
+                onRetry: () =>
+                  onRetrySubmission?.(failedSubmission.submissionId),
+              }}
+            />
+          ) : null}
           {/* Queued follow-ups: pi accepted each one (the prompt command's
               success response) and runs it when the current turn ends; the
               block then leaves the queue and renders as a normal user turn.

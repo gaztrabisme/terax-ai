@@ -9,6 +9,7 @@ use std::thread;
 use shared_child::SharedChild;
 
 use super::launcher;
+use super::runtime;
 use crate::modules::proc::hide_console;
 
 /// Everything needed to spawn one pi session. The Tauri command layer fills
@@ -237,9 +238,10 @@ pub fn add_board_env(env: &mut HashMap<String, String>, cwd: &Path, agent_bin: O
     }
 }
 
-/// The direct path's step record: one `[k/4] <name> ... OK` (or
-/// `... FAIL <detail>`) line per prepare step, in the launcher's banner
-/// shape, so `<cwd>/.pi/launcher.log` reads like the bash launcher's output.
+/// The direct path's step record: one `[k/n] <name> ... <status> (<detail>)`
+/// line per prepare step, in the bash launcher's own banner shape
+/// (bin/efficient-pi prep_line: verbatim status, detail for every step, so a
+/// credential that leaks into any detail is still scrubbed from the log).
 pub fn format_launcher_log(report: &launcher::PrepareReport) -> String {
     let total = report.steps.len();
     report
@@ -248,10 +250,10 @@ pub fn format_launcher_log(report: &launcher::PrepareReport) -> String {
         .enumerate()
         .map(|(i, step)| {
             let head = format!("[{}/{}] {} ...", i + 1, total, step.name);
-            if step.ok {
-                format!("{head} OK\n")
+            if step.detail.trim().is_empty() {
+                format!("{head} {}\n", step.status)
             } else {
-                format!("{head} FAIL {}\n", step.detail)
+                format!("{head} {} ({})\n", step.status, step.detail)
             }
         })
         .collect()
@@ -261,28 +263,47 @@ pub fn format_launcher_log(report: &launcher::PrepareReport) -> String {
 /// harness agent (`agent pi prepare`, forwarded by
 /// launcher::prepare_session), truncates `<cwd>/.pi/launcher.log` with their
 /// outcome, and on any failed step refuses the spawn with the text the
-/// frontend shows as entry.error. The report's env overlays `base_env`,
-/// replacing the frontend's EFFICIENT_PI_* and PI_CODING_AGENT_DIR values
-/// with the prepared ones. PI_SESSIONS_DIR rides beside PI_CODING_AGENT_DIR
-/// (K11a): sessions route to `<project>/.pi/sessions`, matching the
-/// `--session-dir` the direct args pass, so the env alone still points new
-/// sessions at the project store.
+/// frontend shows as entry.error. On success the credential-free effective
+/// report is written to `<project>/.pi/runtime.json` (K14: after preparation
+/// and resolution, before pi spawns; a failed step writes no report, so the
+/// previous launch's file keeps describing the last real launch). The
+/// report's env overlays `base_env`, replacing the frontend's EFFICIENT_PI_*
+/// and PI_CODING_AGENT_DIR values with the prepared ones. PI_SESSIONS_DIR
+/// rides beside PI_CODING_AGENT_DIR (K11a): sessions route to
+/// `<project>/.pi/sessions`, matching the `--session-dir` the direct args
+/// pass, so the env alone still points new sessions at the project store.
 pub fn prepare_direct(
     input: launcher::PrepareInput,
     agent_bin: Option<&str>,
     base_env: HashMap<String, String>,
+    runtime_ctx: runtime::RuntimeContext,
 ) -> Result<HashMap<String, String>, String> {
     let cwd = input.cwd.clone();
+    // The render key leaves the call stack with `input`; keep it for the
+    // scrub so it can never reach the disk records through a step detail.
+    let render_key = input.endpoints.omlx_key.clone();
     let report = launcher::prepare_session(input, agent_bin.map(Path::new));
     let log_path = cwd.join(".pi").join("launcher.log");
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
-    fs::write(&log_path, format_launcher_log(&report))
+    // K14: the launcher.log write and the runtime report both go out
+    // credential-free. The secrets live only in this call stack (the render
+    // key plus any credential env value the spawn carries); every scrubbed
+    // byte goes to disk redacted (design 3.6: credentials are never logged).
+    let secrets = runtime::collect_secrets(&base_env, &render_key);
+    let log_text = runtime::scrub(&format_launcher_log(&report), &secrets);
+    fs::write(&log_path, log_text)
         .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
     if let Some(step) = report.steps.iter().find(|s| !s.ok) {
         return Err(format!("{} failed: {}", step.name, step.detail));
     }
+    // The credential-free effective report lands before the spawn; a failed
+    // step writes none, so the previous launch's file keeps describing the
+    // last real launch.
+    let mut runtime_report = runtime::build_report(&cwd, &report, &runtime_ctx);
+    runtime::scrub_report(&mut runtime_report, &secrets);
+    runtime::write_report(&cwd, &runtime_report)?;
     let mut env = base_env;
     env.extend(report.env.iter().map(|(k, v)| (k.clone(), v.clone())));
     add_board_env(&mut env, &cwd, agent_bin);
@@ -489,37 +510,56 @@ mod tests {
                 launcher::PrepareStep {
                     name: "seed".to_string(),
                     ok: true,
+                    status: "OK".to_string(),
                     detail: "agent dir ready at /data/pi-home/agent".to_string(),
                 },
                 launcher::PrepareStep {
                     name: "render".to_string(),
                     ok: false,
+                    status: "FAIL".to_string(),
                     detail: "OMLX_KEY not set; cannot render models.json".to_string(),
                 },
                 launcher::PrepareStep {
                     name: "root".to_string(),
                     ok: true,
+                    status: "OK".to_string(),
                     detail: "project root: /p".to_string(),
                 },
                 launcher::PrepareStep {
                     name: "wiki".to_string(),
                     ok: true,
+                    status: "OK".to_string(),
                     detail: "wiki files present".to_string(),
                 },
             ],
             agent_dir: "/data/pi-home/agent".into(),
             env: Default::default(),
+            session_dir: None,
+            agent_hub_dir: None,
         }
     }
 
     #[test]
     fn launcher_log_lines_follow_the_banner_shape() {
+        // The bash launcher's prep_line shape: verbatim status, detail for
+        // every step (bin/efficient-pi: `[%s/8] %s ... %s (%s)`), so the
+        // log's scrub sees a credential in any detail, not only failures.
         assert_eq!(
             format_launcher_log(&make_report()),
+            "[1/4] seed ... OK (agent dir ready at /data/pi-home/agent)\n\
+             [2/4] render ... FAIL (OMLX_KEY not set; cannot render models.json)\n\
+             [3/4] root ... OK (project root: /p)\n\
+             [4/4] wiki ... OK (wiki files present)\n"
+        );
+        // A blank detail keeps the bare status line.
+        let mut bare = make_report();
+        bare.steps[0].detail = String::new();
+        assert_eq!(
+            format_launcher_log(&bare),
             "[1/4] seed ... OK\n\
-             [2/4] render ... FAIL OMLX_KEY not set; cannot render models.json\n\
-             [3/4] root ... OK\n\
-             [4/4] wiki ... OK\n"
+             [2/4] render ... FAIL (OMLX_KEY not set; cannot render models.json)\n\
+             [3/4] root ... OK (project root: /p)\n\
+             [4/4] wiki ... OK (wiki files present)\n"
         );
     }
 
@@ -566,6 +606,22 @@ mod tests {
             .replace("{ARGV}", &argv_path.to_string_lossy())
             .replace("{REPORT}", report);
         write_stub(stubs, "agent", &script)
+    }
+
+    /// The spawn resolution pi_open threads into prepare_direct for the
+    /// runtime report (K14).
+    fn runtime_ctx() -> runtime::RuntimeContext {
+        runtime::RuntimeContext {
+            binary_path: "/bundled/pi".to_string(),
+            binary_source: "bundled".to_string(),
+            agent_dir_source: "bundled".to_string(),
+            provider: "bppc".to_string(),
+            provider_source: "global".to_string(),
+            model: "qwen3.8-27b".to_string(),
+            model_source: "global".to_string(),
+            thinking: "xhigh".to_string(),
+            thinking_source: "default".to_string(),
+        }
     }
 
     #[test]
@@ -618,18 +674,80 @@ mod tests {
             },
             Some(fake_agent.as_str()),
             HashMap::new(),
+            runtime_ctx(),
         )
         .expect("direct prep");
 
         let log =
             fs::read_to_string(project.path().join(".pi").join("launcher.log")).expect("log");
+        // The log carries the bash launcher's banner shape: verbatim status
+        // and detail for every step.
         assert_eq!(
             log,
-            "[1/4] seed ... OK\n\
-             [2/4] render ... OK\n\
-             [3/4] root ... OK\n\
-             [4/4] wiki ... OK\n"
+            format!(
+                "[1/4] seed ... OK (agent dir ready at {})\n\
+                 [2/4] render ... OK (models.json unchanged (bppc host 10.0.0.9))\n\
+                 [3/4] root ... OK (project root: {})\n\
+                 [4/4] wiki ... OK (wiki files present)\n",
+                agent_dir.display(),
+                project.path().display(),
+            )
         );
+        // K14: the credential-free effective report is on disk before the
+        // spawn, with the agent's step statuses verbatim and the launch
+        // resolution joined in.
+        let runtime_raw =
+            fs::read_to_string(runtime::runtime_path(project.path())).expect("runtime.json");
+        let runtime_report: runtime::RuntimeReport =
+            serde_json::from_str(&runtime_raw).expect("parse runtime.json");
+        assert_eq!(runtime_report.v, 1);
+        assert_eq!(
+            runtime_report
+                .steps
+                .iter()
+                .map(|s| (s.name.as_str(), s.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("seed", "OK"),
+                ("render", "OK"),
+                ("root", "OK"),
+                ("wiki", "OK")
+            ]
+        );
+        assert_eq!(
+            runtime_report.binary,
+            runtime::RuntimeBinary {
+                path: "/bundled/pi".to_string(),
+                source: "bundled".to_string()
+            }
+        );
+        assert_eq!(runtime_report.agent_dir_source, "bundled");
+        assert_eq!(runtime_report.roles.orchestrator.provider, "bppc");
+        assert_eq!(runtime_report.roles.orchestrator.model, "qwen3.8-27b");
+        assert_eq!(runtime_report.roles.orchestrator.thinking, "xhigh");
+        assert_eq!(runtime_report.roles.orchestrator.source, "global");
+        assert_eq!(
+            runtime_report.session_dir,
+            project
+                .path()
+                .join(".pi")
+                .join("sessions")
+                .to_string_lossy()
+                .into_owned()
+        );
+        assert_eq!(
+            runtime_report.agent_hub_dir,
+            app_data
+                .path()
+                .join("pi-home")
+                .join("agent")
+                .join("agent-hub")
+                .to_string_lossy()
+                .into_owned()
+        );
+        assert!(runtime_report.launched_at.ends_with('Z'));
+        // The render key the caller passed never reaches the report.
+        assert!(!runtime_raw.contains("sk-omlx"));
         assert_eq!(
             env.get("PI_CODING_AGENT_DIR").map(String::as_str),
             Some(agent_dir.to_str().expect("utf8"))
@@ -760,6 +878,7 @@ mod tests {
             },
             Some(fake_agent.as_str()),
             HashMap::new(),
+            runtime_ctx(),
         )
         .expect_err("empty project must fail the root guard");
         assert!(err.starts_with("root failed: "), "got: {err}");
@@ -768,6 +887,71 @@ mod tests {
             fs::read_to_string(project.path().join(".pi").join("launcher.log")).expect("log");
         assert!(log.contains("[3/4] root ... FAIL "));
         assert!(log.contains("[4/4] wiki ... OK"), "later steps still logged");
+        // A refused spawn writes no runtime report: the previous launch's
+        // file (if any) keeps describing the last real launch.
+        assert!(!runtime::runtime_path(project.path()).exists());
+    }
+
+    #[test]
+    fn direct_path_report_scrubs_a_credential_that_leaks_into_a_step_detail() {
+        let tmpl_dir = tempfile::tempdir().expect("tempdir");
+        let tmpl = write_min_template(tmpl_dir.path());
+        let app_data = tempfile::tempdir().expect("tempdir");
+        let project = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(project.path().join(".git")).expect("gitdir");
+        let stubs = tempfile::tempdir().expect("tempdir");
+        let agent_dir = app_data.path().join("pi-home").join("agent");
+        let report = serde_json::json!({
+            "steps": [
+                {"name": "seed", "status": "OK", "detail": "agent dir ready"},
+                {"name": "render", "status": "OK",
+                 "detail": "rendered with key sk-omlx-live (bppc host 10.0.0.9)"},
+                {"name": "root", "status": "OK", "detail": "project root"},
+                {"name": "wiki", "status": "OK", "detail": "wiki files present"},
+            ],
+            "agentDir": agent_dir.to_string_lossy(),
+            "env": {"PI_CODING_AGENT_DIR": agent_dir.to_string_lossy()},
+        })
+        .to_string();
+        let fake_agent = write_fake_agent(&stubs, &report);
+        prepare_direct(
+            launcher::PrepareInput {
+                app_version: "0.7.3".to_string(),
+                template_dir: tmpl,
+                app_data_dir: app_data.path().to_path_buf(),
+                agent_dir: agent_dir.clone(),
+                cwd: project.path().to_path_buf(),
+                roles: launcher::PrepareRoles {
+                    provider: "bppc".to_string(),
+                    model: "m".to_string(),
+                    thinking: "xhigh".to_string(),
+                    smol: String::new(),
+                },
+                endpoints: launcher::PrepareEndpoints {
+                    bppc_host: String::new(),
+                    omlx_key: "sk-omlx-live".to_string(),
+                },
+                allow_any_dir: false,
+            },
+            Some(fake_agent.as_str()),
+            HashMap::new(),
+            runtime_ctx(),
+        )
+        .expect("direct prep");
+        let raw =
+            fs::read_to_string(runtime::runtime_path(project.path())).expect("runtime.json");
+        assert!(
+            !raw.contains("sk-omlx-live"),
+            "credential leaked into runtime.json: {raw}"
+        );
+        assert!(raw.contains("[redacted]"), "raw: {raw}");
+        // launcher.log is scrubbed with the same secret set (design 3.6:
+        // credentials are never logged).
+        let log =
+            fs::read_to_string(project.path().join(".pi").join("launcher.log"))
+                .expect("log");
+        assert!(!log.contains("sk-omlx-live"), "log: {log}");
+        assert!(log.contains("[redacted]"), "log: {log}");
     }
 
     #[test]
@@ -797,6 +981,7 @@ mod tests {
             },
             None,
             HashMap::new(),
+            runtime_ctx(),
         )
         .expect_err("no agent binary must refuse the spawn");
         assert!(err.starts_with("prepare failed: "), "got: {err}");

@@ -247,11 +247,19 @@ describe("composer image chips", () => {
     expect(container.querySelectorAll("img")).toHaveLength(MAX_ATTACHMENTS);
   });
 
-  it("warns when the model may not accept images and stays sendable", () => {
+  it("warns when the model may not accept images, only once something is attached", async () => {
     const { container } = renderComposer(vi.fn(), {
       modelAcceptsImages: false,
     });
-    expect(container.textContent).toContain("may not accept images");
+    // The unknown-capability notice is attach-time: an empty composer shows
+    // no standing notice (R8.2).
+    expect(container.textContent).not.toContain("may not accept images");
+    pasteFiles(container.querySelector("[aria-label='pi composer']")!, [
+      imageFile("shot.png"),
+    ]);
+    await waitFor(() => {
+      expect(container.textContent).toContain("may not accept images");
+    });
     expect(
       container.querySelector("button[aria-label='Attach images']"),
     ).toBeTruthy();
@@ -295,12 +303,14 @@ describe("composer send with images", () => {
     );
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(onSubmit).toHaveBeenCalledWith("what is this", [
-      {
+    expect(onSubmit).toHaveBeenCalledWith(
+      "what is this",
+      [expect.objectContaining({
         mediaType: "image/png",
         data: btoa("encoded-shot.png"),
-      },
-    ]);
+        attachmentId: expect.stringMatching(/^att-\d+$/),
+      })],
+    );
     await waitFor(() => {
       expect(container.querySelectorAll("img")).toHaveLength(0);
     });
@@ -322,9 +332,13 @@ describe("composer send with images", () => {
     );
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(onSubmit).toHaveBeenCalledWith("", [
-      { mediaType: "image/png", data: btoa("encoded-only.png") },
-    ]);
+    expect(onSubmit).toHaveBeenCalledWith(
+      "",
+      [expect.objectContaining({
+        mediaType: "image/png",
+        data: btoa("encoded-only.png"),
+      })],
+    );
     await waitFor(() => {
       expect(container.querySelectorAll("img")).toHaveLength(0);
     });
@@ -376,7 +390,7 @@ describe("appendPendingImage caps", () => {
     );
     expect(second.images).toBe(first.images);
     expect(second.notice).toBe(
-      "Attachments would exceed the 4 MB image budget",
+      "Attachments would exceed the 4194304-byte (4 MiB) image budget",
     );
   });
 });

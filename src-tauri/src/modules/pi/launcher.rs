@@ -70,6 +70,9 @@ pub struct PrepareInput {
 pub struct PrepareStep {
     pub name: String,
     pub ok: bool,
+    /// The agent's own status, transcribed verbatim (OK, WARN, FAIL, SKIPPED);
+    /// runtime.json records it exactly while `ok` stays the spawn decision.
+    pub status: String,
     pub detail: String,
 }
 
@@ -79,11 +82,19 @@ pub struct PrepareReport {
     pub steps: Vec<PrepareStep>,
     pub agent_dir: PathBuf,
     pub env: BTreeMap<String, String>,
+    /// K14: the harness report's own storage locators when it supplies them
+    /// (K11 extends the report with sessionDir and agentHubDir); runtime.json
+    /// prefers them and derives the launch path's values otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_hub_dir: Option<String>,
 }
 
 /// One step of the agent's `--json` report. Status is the agent's vocabulary:
-/// OK, FAIL or SKIPPED; the last counts as ok for the spawn decision, exactly
-/// like the local steps before it.
+/// OK, FAIL or SKIPPED (WARN with the K14 report extension); the last counts
+/// as ok for the spawn decision, exactly like the local steps before it, and
+/// every status is transcribed verbatim into the runtime report.
 #[derive(Debug, Deserialize)]
 struct AgentStep {
     name: String,
@@ -93,7 +104,8 @@ struct AgentStep {
 
 /// The JSON object `agent pi prepare --json` prints on stdout. modelsJson is
 /// accepted and ignored: the report names the path, never the rendered body
-/// (the key stays in the file, as before).
+/// (the key stays in the file, as before). sessionDir and agentHubDir are
+/// optional K11 extensions; blank means the caller derives them.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentReport {
@@ -103,6 +115,10 @@ struct AgentReport {
     agent_dir: String,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    #[serde(default)]
+    session_dir: String,
+    #[serde(default)]
+    agent_hub_dir: String,
 }
 
 /// Prepares a pi session by running the resolved harness agent
@@ -120,10 +136,13 @@ pub fn prepare_session(input: PrepareInput, agent_bin: Option<&Path>) -> Prepare
         steps: vec![PrepareStep {
             name: "prepare".to_string(),
             ok: false,
+            status: "FAIL".to_string(),
             detail,
         }],
         agent_dir: agent_dir.clone(),
         env: report_env(&agent_dir, &input.roles),
+        session_dir: None,
+        agent_hub_dir: None,
     };
     let Some(agent_bin) = agent_bin else {
         return fail(
@@ -189,6 +208,8 @@ fn run_agent_prepare(
         steps,
         agent_dir: reported_dir,
         env: agent_env,
+        session_dir,
+        agent_hub_dir,
     } = parsed;
     if steps.is_empty() {
         return Err(format!(
@@ -209,14 +230,26 @@ fn run_agent_prepare(
         steps: steps
             .into_iter()
             .map(|s| PrepareStep {
-                ok: matches!(s.status.as_str(), "OK" | "SKIPPED"),
+                // Only FAIL refuses the spawn: OK and the informational
+                // SKIPPED/WARN outcomes let the launch proceed, while the
+                // verbatim status still lands in launcher.log and
+                // runtime.json for the reader to judge.
+                ok: matches!(s.status.as_str(), "OK" | "WARN" | "SKIPPED"),
+                status: s.status,
                 name: s.name,
                 detail: s.detail,
             })
             .collect(),
         agent_dir,
         env,
+        session_dir: non_empty(session_dir),
+        agent_hub_dir: non_empty(agent_hub_dir),
     })
+}
+
+/// Blank report fields count as absent: the caller derives its own value.
+fn non_empty(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
 }
 
 /// The report env every spawn path consumes: PI_CODING_AGENT_DIR plus the
@@ -424,6 +457,15 @@ mod agent_cli_tests {
             got.steps.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             vec!["seed", "render", "root", "wiki"]
         );
+        // K14: the agent's own status strings survive verbatim for the
+        // runtime report, even though SKIPPED counts as ok for the spawn.
+        assert_eq!(
+            got.steps
+                .iter()
+                .map(|s| s.status.as_str())
+                .collect::<Vec<_>>(),
+            vec!["OK", "SKIPPED", "FAIL", "OK"]
+        );
         assert_eq!(
             got.steps[1].detail,
             "models.json unchanged (bppc host 203.0.113.10)"
@@ -518,6 +560,59 @@ mod agent_cli_tests {
     }
 
     #[test]
+    fn warn_counts_as_ok_and_report_dirs_pass_through() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let app_data = tempfile::tempdir().expect("tempdir");
+        let template = tempfile::tempdir().expect("tempdir");
+        let project = tempfile::tempdir().expect("tempdir");
+        let agent_dir = user_agent_dir(app_data.path());
+        let report = serde_json::json!({
+            "steps": [
+                {"name": "seed", "status": "OK", "detail": "seeded"},
+                {"name": "render", "status": "WARN",
+                 "detail": "models.json drifted from the template"},
+                {"name": "root", "status": "OK", "detail": "project root"},
+                {"name": "wiki", "status": "OK", "detail": "wiki files present"},
+            ],
+            "agentDir": agent_dir.to_string_lossy(),
+            "modelsJson": agent_dir.join("models.json").to_string_lossy(),
+            "env": {"PI_CODING_AGENT_DIR": agent_dir.to_string_lossy()},
+            "sessionDir": "/proj/.pi/sessions",
+            "agentHubDir": "/agents/runtime/agent-hub",
+        })
+        .to_string();
+        let agent = write_fake_agent(scratch.path(), &report);
+        let got = prepare_session(
+            input(template.path(), app_data.path(), project.path(), false),
+            Some(&agent),
+        );
+        // WARN proceeds like SKIPPED: only FAIL refuses the spawn decision,
+        // and the verbatim status rides along for runtime.json.
+        assert!(got.steps.iter().all(|s| s.ok), "{:?}", got.steps);
+        assert_eq!(got.steps[1].status, "WARN");
+        assert_eq!(got.session_dir.as_deref(), Some("/proj/.pi/sessions"));
+        assert_eq!(
+            got.agent_hub_dir.as_deref(),
+            Some("/agents/runtime/agent-hub")
+        );
+        // Blank or absent report dirs stay None: the caller derives them.
+        let blank = serde_json::json!({
+            "steps": [{"name": "seed", "status": "OK", "detail": "seeded"}],
+            "agentDir": agent_dir.to_string_lossy(),
+            "env": {},
+            "sessionDir": "   ",
+        })
+        .to_string();
+        let agent = write_fake_agent(scratch.path(), &blank);
+        let got = prepare_session(
+            input(template.path(), app_data.path(), project.path(), false),
+            Some(&agent),
+        );
+        assert_eq!(got.session_dir, None);
+        assert_eq!(got.agent_hub_dir, None);
+    }
+
+    #[test]
     fn prepare_session_missing_agent_binary_yields_a_fail_step_not_a_panic() {
         let app_data = tempfile::tempdir().expect("tempdir");
         let template = tempfile::tempdir().expect("tempdir");
@@ -533,6 +628,7 @@ mod agent_cli_tests {
             assert_eq!(got.steps.len(), 1, "one FAIL step for {agent_bin:?}");
             assert!(!got.steps[0].ok);
             assert_eq!(got.steps[0].name, "prepare");
+            assert_eq!(got.steps[0].status, "FAIL");
             assert!(got.steps[0].detail.contains("agent"), "{}", got.steps[0].detail);
             assert_eq!(got.agent_dir, user_agent_dir(app_data.path()));
             assert_eq!(

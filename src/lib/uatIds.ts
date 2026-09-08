@@ -223,6 +223,26 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
     file: "src/modules/pi/components/Transcript.tsx",
     state: "a chat entry with a queued follow-up prompt",
   },
+  {
+    id: "submission-retry",
+    file: "src/modules/pi/components/Transcript.tsx",
+    state: "a failed submission standing (K13: unacknowledged send with its error)",
+  },
+  {
+    id: "artifact-path",
+    file: "src/modules/pi/components/ArtifactPane.tsx",
+    state: "the artifact viewer showing a completed file-backed artifact (K13)",
+  },
+  {
+    id: "artifact-copy-path",
+    file: "src/modules/pi/components/ArtifactPane.tsx",
+    state: "the artifact viewer showing a completed file-backed artifact (K13)",
+  },
+  {
+    id: "artifact-error",
+    file: "src/modules/pi/components/ArtifactPane.tsx",
+    state: "the artifact viewer whose file is missing or unreadable (K13)",
+  },
 ];
 
 /**
@@ -282,5 +302,53 @@ export const UAT_IDS_K11_STATEFUL: UatStatefulEntry[] = [
     id: "storage-retry",
     file: "src/modules/pi/PiTab.tsx",
     state: "a ui-state write failure standing (storage error banner visible)",
+  },
+];
+
+/**
+ * K14 stateful ids: the launch-error banner and its Open log button render
+ * only while a launch preparation failure stands (design.md section 3.5 row
+ * "Launch preparation fails": an entry error with no session behind it;
+ * Open log opens `<project>/.pi/launcher.log`, New session retries).
+ */
+export const UAT_IDS_K14_STATEFUL: UatStatefulEntry[] = [
+  {
+    id: "launch-error",
+    file: "src/modules/pi/components/ChatPane.tsx",
+    state: "a launch preparation failure standing (entry error, no session)",
+  },
+  {
+    id: "open-launcher-log",
+    file: "src/modules/pi/components/ChatPane.tsx",
+    state: "a launch preparation failure standing (entry error, no session)",
+  },
+];
+
+/**
+ * K12e stateful ids (design.md section 3.7): the ticket sheet's acceptance
+ * section, gate rows and wiki-close verdict render only with a loaded ticket
+ * behind the sheet; board-error renders only while a board poll or command
+ * has failed, naming the failed command and `.pi/logs/board.jsonl`.
+ */
+export const UAT_IDS_K12_STATEFUL: UatStatefulEntry[] = [
+  {
+    id: "ticket-acceptance",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+    state: "the ticket sheet open on a loaded ticket",
+  },
+  {
+    id: "ticket-gate",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+    state: "the ticket sheet open on a loaded ticket",
+  },
+  {
+    id: "ticket-wiki-close",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+    state: "the ticket sheet open on a loaded ticket",
+  },
+  {
+    id: "board-error",
+    file: "src/modules/pi/components/BoardPane.tsx",
+    state: "a board poll or command failure standing (stale content beneath)",
   },
 ];

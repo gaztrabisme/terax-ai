@@ -259,6 +259,7 @@ describe("piStore", () => {
       text: "queue me",
       images: [],
       error: "Agent is currently streaming; specify streamingBehavior",
+      records: [],
     });
     expect(
       entry?.state.blocks.some(
@@ -308,5 +309,188 @@ describe("piStore", () => {
       images: [],
       error: null,
     });
+  });
+
+  it("runs the K13 transaction: stages before send, binds on the user block", async () => {
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "pi_stage_submission") {
+        return [
+          {
+            attachmentId: (args?.attachments as { attachmentId: string }[])[0]!
+              .attachmentId,
+            path: `.pi/attachments/${args?.submissionId}-att-1.png`,
+            sha256: "f00d",
+          },
+        ];
+      }
+      if (command === "fs_read_file") return { kind: "text", content: "" };
+      if (command === "fs_read_dir") return [];
+      return undefined;
+    });
+    await usePiStore.getState().openSession(20, { cwd: "/tmp/p" });
+    await usePiStore.getState().sendPrompt(20, "look", [
+      {
+        mediaType: "image/png",
+        data: "AAAA",
+        attachmentId: "att-1",
+        draftPath: ".pi/drafts/tab-att-1.png",
+        sha256: "cafe",
+      } as never,
+    ]);
+    expect(sent).toHaveLength(1);
+    expect(invokeMock).toHaveBeenCalledWith("pi_stage_submission", {
+      cwd: "/tmp/p",
+      submissionId: expect.stringMatching(/^sub-\d+$/),
+      attachments: [{ attachmentId: "att-1", path: ".pi/drafts/tab-att-1.png" }],
+      workspace: { kind: "local" },
+    });
+    const submissionId = (invokeMock.mock.calls.find(
+      ([cmd]) => cmd === "pi_stage_submission",
+    )?.[1] as { submissionId: string }).submissionId;
+
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent(
+      '{"type":"message_start","message":{"role":"user","content":"look"}}',
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    // The chip binds to the acknowledged turn with the staged path.
+    expect(usePiStore.getState().tabs[20]?.state.blocks[0]).toMatchObject({
+      savedAttachments: [
+        { path: `.pi/attachments/${submissionId}-att-1.png`, error: null },
+      ],
+    });
+    // The index append rides the acknowledgement, atomically.
+    expect(invokeMock).toHaveBeenCalledWith("pi_record_attachment_binding", {
+      cwd: "/tmp/p",
+      submissionId,
+      sessionId: "abcd1234-test",
+      turnId: expect.any(String),
+      bindings: [
+        {
+          attachmentId: "att-1",
+          path: `.pi/attachments/${submissionId}-att-1.png`,
+          sha256: "f00d",
+        },
+      ],
+      workspace: { kind: "local" },
+    });
+  });
+
+  it("a refused send marks the submission failed and never binds a later turn", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "pi_stage_submission")
+        return [
+          {
+            attachmentId: "att-1",
+            path: ".pi/attachments/sub-x-att-1.png",
+            sha256: "f00d",
+          },
+        ];
+      if (command === "fs_read_file") return { kind: "text", content: "" };
+      return undefined;
+    });
+    await usePiStore.getState().openSession(21, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await usePiStore.getState().sendPrompt(21, "hold", [
+      {
+        mediaType: "image/png",
+        data: "AAAA",
+        attachmentId: "att-1",
+        draftPath: ".pi/drafts/tab-att-1.png",
+      } as never,
+    ]);
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent(
+      '{"type":"response","command":"prompt","success":false,"error":"Agent is currently streaming; specify streamingBehavior"}',
+    );
+    let entry = usePiStore.getState().tabs[21];
+    expect(entry?.failedSubmission).toMatchObject({
+      state: "failed",
+      error: "Agent is currently streaming; specify streamingBehavior",
+      records: [
+        { attachmentId: "att-1", stagedPath: ".pi/attachments/sub-x-att-1.png" },
+      ],
+    });
+    // The pending set left the queue with the refusal.
+    expect(entry?.pendingAttachments).toEqual([]);
+
+    // A later plain turn must not own the failed submission's chip.
+    await usePiStore.getState().sendPrompt(21, "plain text");
+    onEvent(
+      '{"type":"message_start","message":{"role":"user","content":"plain text"}}',
+    );
+    entry = usePiStore.getState().tabs[21];
+    const plain = entry?.state.blocks.find(
+      (block) =>
+        block.kind === "message" &&
+        block.role === "user" &&
+        (block as { parts: { text?: string }[] }).parts.some(
+          (part) => part.text === "plain text",
+        ),
+    );
+    expect(plain).toBeTruthy();
+    expect(
+      (plain as { savedAttachments?: unknown[] } | undefined)
+        ?.savedAttachments,
+    ).toBeUndefined();
+  });
+
+  it("retrySubmission resends the same submission id and binds on its own ack", async () => {
+    let stageCount = 0;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "pi_stage_submission") {
+        stageCount += 1;
+        return [
+          {
+            attachmentId: "att-1",
+            path: ".pi/attachments/sub-r-att-1.png",
+            sha256: "f00d",
+          },
+        ];
+      }
+      if (command === "fs_read_file") return { kind: "text", content: "" };
+      return undefined;
+    });
+    await usePiStore.getState().openSession(22, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await usePiStore.getState().sendPrompt(22, "hold", [
+      {
+        mediaType: "image/png",
+        data: "AAAA",
+        attachmentId: "att-1",
+        draftPath: ".pi/drafts/tab-att-1.png",
+      } as never,
+    ]);
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent(
+      '{"type":"response","command":"prompt","success":false,"error":"Agent is currently streaming; specify streamingBehavior"}',
+    );
+    const submissionId = usePiStore.getState().tabs[22]?.failedSubmission
+      ?.submissionId as string;
+
+    sent.length = 0;
+    await usePiStore.getState().retrySubmission(22, submissionId);
+    // Same id staged and sent; the failure stands until the ack.
+    expect(stageCount).toBe(2);
+    expect(JSON.parse(sent[0]!)).toMatchObject({ message: "hold" });
+    expect(usePiStore.getState().tabs[22]?.failedSubmission).toMatchObject({
+      state: "retrying",
+    });
+
+    // pi's command ack clears the standing failure; its user block binds.
+    onEvent('{"type":"response","command":"prompt","success":true}');
+    expect(usePiStore.getState().tabs[22]?.failedSubmission).toBeNull();
+    onEvent(
+      '{"type":"message_start","message":{"role":"user","content":"hold"}}',
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(invokeMock).toHaveBeenCalledWith(
+      "pi_record_attachment_binding",
+      expect.objectContaining({ submissionId }),
+    );
+    expect(usePiStore.getState().tabs[22]?.failedSubmission).toBeNull();
   });
 });

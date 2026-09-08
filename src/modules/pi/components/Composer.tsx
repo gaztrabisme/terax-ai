@@ -2,11 +2,13 @@ import { Extension, EditorContent, useEditor } from "@tiptap/react";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Cancel01Icon, ImageAdd01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { native } from "@/lib/native";
+import { currentWorkspaceEnv } from "@/modules/workspace";
 import {
   clearDraft,
   emptyChatMeta,
@@ -15,10 +17,11 @@ import {
   saveDraft,
   saveDraftMeta,
   type ChatDraftMeta,
+  type DraftAttachmentMeta,
 } from "@/modules/pi/lib/drafts";
 import { stableIdOf } from "@/modules/tabs/lib/sid";
 import type { PiImageAttachment } from "@/modules/pi/lib/parse";
-import { usePiStore } from "@/modules/pi/lib/piStore";
+import { usePiStore, type ComposerImage } from "@/modules/pi/lib/piStore";
 import {
   INSERT_DRAFT_EVENT,
   type InsertDraftDetail,
@@ -67,8 +70,19 @@ const ALPHA_SOURCE_TYPES = new Set(["image/png", "image/webp", "image/gif"]);
 /** An encoded attachment: media type, base64 payload, decoded byte size. */
 export type EncodedImage = PiImageAttachment & { bytes: number };
 
-/** A chip in the composer: an encoded image plus display metadata. */
-export type PendingImage = EncodedImage & { id: number; name: string };
+/** A chip in the composer: an encoded image plus display metadata. K13: the
+ *  chip is path-backed - the draft file under .pi/drafts carries the bytes
+ *  the moment the chip appears. */
+export type PendingImage = EncodedImage & {
+  id: number;
+  name: string;
+  attachmentId: string;
+  /** Project-relative draft file path; null until the write resolves. */
+  draftPath: string | null;
+  sha256: string | null;
+  state: "draft" | "failed";
+  error: string | null;
+};
 
 /** Exact size of a base64 payload once decoded (padding-aware). */
 export function base64Bytes(payload: string): number {
@@ -145,7 +159,8 @@ let pendingImageSeq = 0;
 
 /** Pure append used by every input path (paste, drop, attach): enforces the
  *  image count cap and the total encoded byte cap, naming the cap in the
- *  notice it returns when the image does not fit. */
+ *  notice it returns when the image does not fit. A fitting image mints its
+ *  stable attachment id here; the caller writes the draft file (K13). */
 export function appendPendingImage(
   current: PendingImage[],
   image: EncodedImage,
@@ -161,7 +176,8 @@ export function appendPendingImage(
   if (total + image.bytes > MAX_TOTAL_IMAGE_BYTES) {
     return {
       images: current,
-      notice: "Attachments would exceed the 4 MB image budget",
+      notice:
+        "Attachments would exceed the 4194304-byte (4 MiB) image budget",
     };
   }
   pendingImageSeq += 1;
@@ -171,6 +187,11 @@ export function appendPendingImage(
       {
         ...image,
         id: pendingImageSeq,
+        attachmentId: `att-${pendingImageSeq}`,
+        draftPath: null,
+        sha256: null,
+        state: "draft",
+        error: null,
         name: name || `image ${pendingImageSeq}`,
       },
     ],
@@ -224,10 +245,10 @@ type Props = {
   disabled?: boolean;
   placeholder?: string;
   /** True when the resolved role model accepts image input; undefined or
-   *  false shows the one-line may-not-accept notice. Sending never blocks:
-   *  pi decides what to do with the images. */
+   *  false shows the one-line may-not-accept notice while attachments are
+   *  queued. Sending never blocks: pi decides what to do with the images. */
   modelAcceptsImages?: boolean;
-  onSubmit: (markdown: string, images: PiImageAttachment[]) => void;
+  onSubmit: (markdown: string, images: ComposerImage[]) => void;
   onStop?: () => void;
 };
 
@@ -337,13 +358,105 @@ export function Composer({
     setImages(next);
   };
 
+  // K13 draft record: the .json beside the draft text carries the queued
+  // attachments {id,path,sha256,mime,state}. Chips and record change
+  // together; a failed record write surfaces as a notice (the chip still
+  // shows its own state).
+  const metaRef = useRef<ChatDraftMeta | null>(null);
+  const persistMeta = (next: ChatDraftMeta) => {
+    metaRef.current = next;
+    if (!cwd) return;
+    saveDraftMeta(cwd, draftKey, next).catch((e: unknown) => {
+      setNotice(
+        `Could not save the draft record: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    });
+  };
+
+  const recordAddAttachment = (chip: PendingImage) => {
+    if (!chip.draftPath || chip.state !== "draft") return;
+    const meta = metaRef.current ?? emptyChatMeta();
+    const entry: DraftAttachmentMeta = {
+      id: chip.attachmentId,
+      path: chip.draftPath,
+      sha256: chip.sha256 ?? "",
+      mime: chip.mediaType,
+      state: "draft",
+    };
+    const rest = meta.attachments.filter((a) => a.id !== entry.id);
+    persistMeta({ ...meta, attachments: [...rest, entry] });
+  };
+
   const removeImage = (id: number) => {
+    const chip = imagesRef.current.find((img) => img.id === id);
     setChips(imagesRef.current.filter((img) => img.id !== id));
     setNotice(null);
+    if (!chip) return;
+    // Removing a chip deletes the draft file behind it.
+    if (chip.draftPath && cwd) {
+      void invoke("fs_delete", {
+        path: `${cwd.replace(/[\\/]+$/, "")}/${chip.draftPath}`,
+        workspace: currentWorkspaceEnv(),
+      }).catch(() => {
+        // The file may already be gone; the chip is removed either way.
+      });
+    }
+    if (metaRef.current) {
+      persistMeta({
+        ...metaRef.current,
+        attachments: metaRef.current.attachments.filter(
+          (a) => a.id !== chip.attachmentId,
+        ),
+      });
+    }
+  };
+
+  // Writes the chip's bytes to the draft file at once (K13): the chip is
+  // path-backed before anything can be sent. Failures stand on the chip.
+  const writeChipDraft = async (chip: PendingImage): Promise<PendingImage> => {
+    if (!cwd) return chip;
+    try {
+      const res = await invoke<{ path: string; sha256: string }>(
+        "pi_save_draft_attachment",
+        {
+          cwd,
+          tabId: draftKey,
+          attachmentId: chip.attachmentId,
+          mediaType: chip.mediaType,
+          data: chip.data,
+          workspace: currentWorkspaceEnv(),
+        },
+      );
+      return {
+        ...chip,
+        draftPath: res.path,
+        sha256: res.sha256,
+        state: "draft",
+        error: null,
+      };
+    } catch (e) {
+      return {
+        ...chip,
+        state: "failed",
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
+  };
+
+  const applyChipUpdate = (updated: PendingImage) => {
+    setChips(
+      imagesRef.current.map((img) =>
+        img.attachmentId === updated.attachmentId ? updated : img,
+      ),
+    );
+    recordAddAttachment(updated);
   };
 
   // Shared by paste, drop and the attach button: encode each image, then let
-  // appendPendingImage decide whether it fits under the caps.
+  // appendPendingImage decide whether it fits under the caps. A rejected
+  // image writes no draft file: existing chips and their files stand.
   const addFiles = async (files: File[]) => {
     if (disabledRef.current) return;
     setNotice(null);
@@ -362,7 +475,12 @@ export function Composer({
         file.name || "",
       );
       setChips(result.images);
-      if (result.notice) setNotice(result.notice);
+      if (result.notice) {
+        setNotice(result.notice);
+        continue;
+      }
+      const added = result.images[result.images.length - 1];
+      if (added) void writeChipDraft(added).then(applyChipUpdate);
     }
   };
 
@@ -380,7 +498,12 @@ export function Composer({
         );
         const result = appendPendingImage(imagesRef.current, encoded, name);
         setChips(result.images);
-        if (result.notice) setNotice(result.notice);
+        if (result.notice) {
+          setNotice(result.notice);
+          continue;
+        }
+        const added = result.images[result.images.length - 1];
+        if (added) void writeChipDraft(added).then(applyChipUpdate);
       } catch {
         setNotice(`Could not read ${name}`);
       }
@@ -506,22 +629,35 @@ export function Composer({
     },
   });
 
-  // Send clears the editor, the chips and any cap notice; attachments live
-  // only in this component state, so the draft file never carries images.
+  // Send clears the editor, the chips and any cap notice. K13: with
+  // attachments the draft record survives the send - the store runs the
+  // transaction (stage, index on ack, or state "failed" on refusal), so
+  // clearing here would drop the record a failed send must leave behind.
   // An empty message with attached images still sends (image-only prompt).
   const performSubmit = (): boolean => {
     if (!editor || disabledRef.current) return false;
     const md = editor.getMarkdown().trim();
-    const attachments: PiImageAttachment[] = imagesRef.current.map((img) => ({
+    const missing = imagesRef.current.filter((img) => !img.data);
+    if (missing.length > 0) {
+      const first = missing[0]!;
+      setNotice(
+        `Attachment file is missing: ${first.draftPath ?? first.name}`,
+      );
+      return true;
+    }
+    const attachments: ComposerImage[] = imagesRef.current.map((img) => ({
       mediaType: img.mediaType,
       data: img.data,
+      attachmentId: img.attachmentId,
+      draftPath: img.draftPath,
+      sha256: img.sha256,
     }));
     if (!md && attachments.length === 0) return true;
     submitRef.current(md, attachments);
     editor.commands.clearContent();
     setChips([]);
     setNotice(null);
-    if (cwd) void clearDraft(cwd, draftKey);
+    if (cwd && attachments.length === 0) void clearDraft(cwd, draftKey);
     return true;
   };
   performSubmitRef.current = performSubmit;
@@ -598,7 +734,60 @@ export function Composer({
     };
   }, [editor]);
 
-  // Restore the persisted draft once, before the user types.
+  useEffect(() => {
+    if (!cwd) return;
+    let alive = true;
+    void loadDraftMeta(cwd, draftKey).then(async (meta) => {
+      if (!alive || !meta || meta.attachments.length === 0) return;
+      metaRef.current = meta;
+      const base = cwd.replace(/[\\/]+$/, "");
+      const restored: PendingImage[] = [];
+      for (const att of meta.attachments) {
+        let data = "";
+        let error: string | null = null;
+        try {
+          const bytes = await invoke<{ base64: string }>(
+            "fs_read_file_bytes",
+            { path: `${base}/${att.path}`, workspace: currentWorkspaceEnv() },
+          );
+          data = bytes.base64;
+        } catch {
+          error = `attachment file is missing: ${att.path}`;
+        }
+        pendingImageSeq += 1;
+        restored.push({
+          mediaType: att.mime,
+          data,
+          bytes: base64Bytes(data),
+          id: pendingImageSeq,
+          attachmentId: att.id,
+          draftPath: att.path,
+          sha256: att.sha256,
+          state: error ? "failed" : "draft",
+          error,
+          name: att.path.split(/[\\/]/).pop() || att.id,
+        });
+      }
+      if (!alive) return;
+      setChips([...imagesRef.current, ...restored]);
+      // Everything restored is queued again: the record states normalize to
+      // "draft" and a prior submission id no longer names a live attempt.
+      persistMeta({
+        v: 1,
+        submissionId: null,
+        attachments: meta.attachments.map((a) => ({ ...a, state: "draft" })),
+        sources: meta.sources,
+      });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [cwd, draftKey]);
+
+  // Restore the persisted draft once, before the user types. K13: the
+  // record's queued attachments come back as path-backed chips; a draft
+  // file that cannot be read keeps its chip with the missing-file error
+  // instead of silently dropping the record's evidence.
   useEffect(() => {
     if (!editor || !cwd) return;
     let alive = true;
@@ -686,7 +875,10 @@ export function Composer({
   // image chips into the empty editor once, then clear the field so it
   // cannot rebind a later draft. The rejection reason itself stays on the
   // transcript's error card; while the editor holds typed text the restore
-  // waits for it to empty again.
+  // waits for it to empty again. K13: chips adopt their failed records'
+  // stable ids and draft paths (the record keeps state "failed" until the
+  // submission is retried or resent); images without a record get a draft
+  // file written at once.
   const rejectedDraft = usePiStore((s) => s.tabs[tabId]?.rejectedDraft ?? null);
   const clearRejectedDraft = usePiStore((s) => s.clearRejectedDraft);
   useEffect(() => {
@@ -698,19 +890,31 @@ export function Composer({
       });
     }
     let next = pendingImageSeq;
-    setChips(
-      rejectedDraft.images.map((img) => {
-        next += 1;
-        return {
-          ...img,
-          bytes: base64Bytes(img.data),
-          id: next,
-          name: `image ${next}`,
-        };
-      }),
-    );
+    const restored: PendingImage[] = rejectedDraft.images.map((img, i) => {
+      const record = rejectedDraft.records?.[i];
+      next += 1;
+      const draftPath = record?.draftPath ?? null;
+      return {
+        ...img,
+        bytes: base64Bytes(img.data),
+        id: next,
+        attachmentId: record?.attachmentId ?? `att-${next}`,
+        draftPath,
+        sha256: record?.sha256 ?? null,
+        state: "draft",
+        error: null,
+        name: draftPath
+          ? draftPath.split(/[\\/]/).pop() || `image ${next}`
+          : `image ${next}`,
+      };
+    });
     pendingImageSeq = next;
+    setChips(restored);
     clearRejectedDraft(tabId);
+    for (const chip of restored) {
+      if (!chip.draftPath) void writeChipDraft(chip).then(applyChipUpdate);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, rejectedDraft, clearRejectedDraft, tabId]);
 
   useEffect(() => {
@@ -757,22 +961,53 @@ export function Composer({
       }}
     >
       {images.length > 0 ? (
-        <div className="mb-1.5 flex flex-wrap items-center gap-2">
+        <div className="mb-1.5 flex flex-wrap items-start gap-2">
           {images.map((img) => (
-            <span key={img.id} className="relative inline-flex">
-              <img
-                src={`data:${img.mediaType};base64,${img.data}`}
-                alt={img.name}
-                className="size-14 rounded-md border border-border/60 object-cover"
-              />
-              <button
-                type="button"
-                aria-label={`Remove ${img.name}`}
-                onClick={() => removeImage(img.id)}
-                className="absolute -right-1.5 -top-1.5 rounded-full border border-border/60 bg-background p-0.5 text-muted-foreground hover:text-foreground"
+            <span
+              key={img.id}
+              data-uat="attachment-chip"
+              data-uat-key={img.attachmentId}
+              className="relative inline-flex max-w-48 flex-col gap-0.5"
+            >
+              <span className="relative inline-flex">
+                {img.data ? (
+                  <img
+                    src={`data:${img.mediaType};base64,${img.data}`}
+                    alt={img.name}
+                    className="size-14 rounded-md border border-border/60 object-cover"
+                  />
+                ) : (
+                  <span
+                    aria-label={img.name}
+                    className="grid size-14 place-items-center rounded-md border border-destructive/40 bg-destructive/10 text-[10px] text-destructive"
+                  >
+                    missing
+                  </span>
+                )}
+                <button
+                  type="button"
+                  aria-label={`Remove ${img.name}`}
+                  onClick={() => removeImage(img.id)}
+                  className="absolute -right-1.5 -top-1.5 rounded-full border border-border/60 bg-background p-0.5 text-muted-foreground hover:text-foreground"
+                >
+                  <HugeiconsIcon
+                    icon={Cancel01Icon}
+                    size={10}
+                    strokeWidth={2}
+                  />
+                </button>
+              </span>
+              {/* The draft file the chip is backed by (K13); a failed write
+                  or a missing file stands visible in place of the path. */}
+              <span
+                title={img.error ?? img.draftPath ?? undefined}
+                className={cn(
+                  "max-w-48 truncate font-mono text-[10px]",
+                  img.error ? "text-destructive" : "text-muted-foreground",
+                )}
               >
-                <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={2} />
-              </button>
+                {img.error ?? img.draftPath ?? "writing..."}
+              </span>
             </span>
           ))}
         </div>
@@ -796,7 +1031,9 @@ export function Composer({
         ) : null}
         <EditorContent editor={editor} />
       </div>
-      {modelAcceptsImages !== true ? (
+      {/* The "vision unknown" notice is attach-time: it appears only while
+          attachments are queued, never as empty-composer text (R8.2). */}
+      {images.length > 0 && modelAcceptsImages !== true ? (
         <div className="mt-1.5 text-xs text-muted-foreground">
           This model may not accept images; pi decides what to do with them.
         </div>

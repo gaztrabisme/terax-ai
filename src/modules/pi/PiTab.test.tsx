@@ -252,6 +252,8 @@ beforeEach(() => {
           tokens: 10,
         },
       ];
+    if (cmd === "pi_write_artifact")
+      return { path: ".pi/artifacts/art-mock.html", sha256: "f00d", reused: false };
     if (cmd === "pi_sessions_search")
       return [
         {
@@ -323,10 +325,13 @@ describe("PiTab mode strip", () => {
     "Board",
     "Graph",
     "Artifact",
-  ])("traverses %s panel, fullscreen, Back, Escape", (name) => {
+  ])("traverses %s panel, fullscreen, Back, Escape", async (name) => {
     setSession(1, { blocks: [message("```html\n<h1>Artifact</h1>\n```")] });
     mount();
     const id = name.toLowerCase();
+    if (name === "Artifact") {
+      await waitFor(() => expect(uat("artifact-button")).toBeTruthy());
+    }
     click(name);
     click(`Full screen ${name}`);
     expect(uat(`${id}-fullscreen`)).toBeTruthy();
@@ -434,7 +439,7 @@ describe("PiTab mode strip", () => {
     );
     expect(screen.getByLabelText("1 running children")).toBeTruthy();
     setSession(1, { blocks: [message("```html\n<p>new artifact</p>\n```")] });
-    expect(uat("artifact-button")).toBeTruthy();
+    await waitFor(() => expect(uat("artifact-button")).toBeTruthy());
     expect(document.querySelectorAll("section[data-mode]")).toHaveLength(0);
     const polls = invokeMock.mock.calls.filter(
       ([cmd]) => cmd === "shell_run_command",
@@ -571,9 +576,12 @@ describe("dimensions and tab lifetime", () => {
     "Graph",
     "Sessions",
     "Artifact",
-  ])("opens %s fullscreen in a narrow window and Back closes", (name) => {
+  ])("opens %s fullscreen in a narrow window and Back closes", async (name) => {
     setSession(1, { blocks: [message("```html\n<p>artifact</p>\n```")] });
     mount();
+    if (name === "Artifact") {
+      await waitFor(() => expect(uat("artifact-button")).toBeTruthy());
+    }
     resize(599);
     click(name);
     expect(uat(`${name.toLowerCase()}-fullscreen`)).toBeTruthy();
@@ -611,13 +619,14 @@ describe("dimensions and tab lifetime", () => {
 });
 
 describe("focused-control priority and active-tab shortcuts", () => {
-  it("uses all four shortcuts only on the active tab and refocuses an already-open Sessions search", () => {
+  it("uses all four shortcuts only on the active tab and refocuses an already-open Sessions search", async () => {
     setSession(1, { blocks: [message("```html\n<p>artifact</p>\n```")] });
     render(<PiStack tabs={tabs()} activeId={1} onOpenChild={() => {}} />);
     shortcut("b", true);
     expect(uat("board-panel")).toBeTruthy();
     shortcut("g", true);
     expect(uat("graph-panel")).toBeTruthy();
+    await waitFor(() => expect(uat("artifact-button")).toBeTruthy());
     shortcut("a", true);
     expect(uat("artifact-panel")).toBeTruthy();
     shortcut("j");

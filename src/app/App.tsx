@@ -28,6 +28,7 @@ import { native } from "@/lib/native";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useZoom } from "@/lib/useZoom";
 import { cn } from "@/lib/utils";
+import { chooseStartupProject } from "@/app/startup";
 import {
   type EditorPaneHandle,
   EditorStack,
@@ -127,6 +128,31 @@ function dirname(path: string | null): string | null {
   const idx = normalized.lastIndexOf("/");
   if (idx <= 0) return normalized;
   return normalized.slice(0, idx);
+}
+
+/** True when the path stats as an existing directory (fs_stat errors when
+ *  missing or inaccessible). */
+async function dirExists(path: string): Promise<boolean> {
+  try {
+    const stat = await invoke<{ kind: string }>("fs_stat", {
+      path,
+      workspace: currentWorkspaceEnv(),
+    });
+    return stat.kind === "dir";
+  } catch {
+    return false;
+  }
+}
+
+/** True when the registry accepts (and records) the folder, the same
+ *  authorization the open-folder flow grants on a pick. */
+async function pathAuthorized(path: string): Promise<boolean> {
+  try {
+    await native.workspaceAuthorize(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const SIDEBAR_DEFAULT_WIDTH = 260;
@@ -385,6 +411,13 @@ export default function App() {
     },
     [workspaceEnv, setWorkspaceEnv, resetWorkspace],
   );
+  // K14 dock recovery: when a --pi launch carries no project argument, the
+  // last project is reopened from preferences when it exists and is
+  // authorized; a missing or unauthorized one shows the folder picker (with
+  // the missing path) instead of any conversation.
+  const [startupPick, setStartupPick] = useState<{
+    missingPath: string | null;
+  } | null>(null);
   useEffect(() => {
     let alive = true;
     native
@@ -392,13 +425,51 @@ export default function App() {
       .then(async (cwd) => {
         if (!alive) return;
         setLaunchCwd(cwd);
-        if (await consumeLaunchPi()) newPiTab(cwd);
+        if (!(await consumeLaunchPi())) return;
+        // An explicit project argument always wins, exactly as before.
+        const argDir = getLaunchDir();
+        if (argDir) {
+          newPiTab(cwd);
+          return;
+        }
+        const prefs = usePreferencesStore.getState();
+        if (!prefs.hydrated) await prefs.init();
+        if (!alive) return;
+        const lastProject = usePreferencesStore.getState().lastProject;
+        const exists = lastProject ? await dirExists(lastProject) : false;
+        const authorized = exists && lastProject
+          ? await pathAuthorized(lastProject)
+          : false;
+        if (!alive) return;
+        const decision = chooseStartupProject(
+          { lastProject },
+          () => exists,
+          () => authorized,
+        );
+        if (decision.action === "open") {
+          newPiTab(decision.path);
+        } else {
+          setStartupPick({ missingPath: decision.missingPath });
+        }
       })
       .catch(() => setLaunchCwd(null))
       .finally(() => setLaunchCwdResolved(true));
     return () => {
       alive = false;
     };
+  }, [newPiTab]);
+
+  // The picker side of dock recovery: the existing open-folder flow, whose
+  // pick authorizes the folder the same way a --pi argument path is.
+  const pickStartupProject = useCallback(async () => {
+    const picked = await pickPiSessionFolder();
+    if (picked.status === "cancelled") return;
+    if (picked.status === "unauthorized") {
+      toast(picked.error);
+      return;
+    }
+    setStartupPick(null);
+    newPiTab(picked.dir);
   }, [newPiTab]);
 
   // The launcher passes --launcher-dir <checkout> next to --pi. An empty
@@ -1198,6 +1269,31 @@ export default function App() {
 
   const workspaceSurface = (
     <div className="relative h-full min-h-0">
+      {startupPick && (
+        <div
+          data-uat="startup-project-picker"
+          role="status"
+          className="absolute inset-0 z-10 grid place-items-center bg-background/80 p-4"
+        >
+          <div className="flex max-w-md flex-col gap-3 rounded-lg border border-border/60 bg-card p-4 text-sm shadow-md">
+            <span className="font-medium">
+              {startupPick.missingPath
+                ? `Project not found: ${startupPick.missingPath}`
+                : "No project to reopen"}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              Choose a folder to open a pi session in.
+            </span>
+            <button
+              type="button"
+              onClick={() => void pickStartupProject()}
+              className="self-start rounded-md border border-border/60 px-2 py-1 text-xs hover:bg-accent hover:text-foreground"
+            >
+              Choose folder
+            </button>
+          </div>
+        </div>
+      )}
       <div
         className={cn(
           "absolute inset-0 px-3 pt-2 pb-2",
