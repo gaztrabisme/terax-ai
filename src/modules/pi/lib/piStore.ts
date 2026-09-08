@@ -17,6 +17,7 @@ import {
   type PiImageAttachment,
   type PiSavedAttachment,
   type PiSessionState,
+  type PiStreamingBehavior,
 } from "./parse";
 import {
   modelRowsForProvider,
@@ -28,7 +29,7 @@ import {
 } from "./providers";
 import { openPiSession, type PiSessionHandle } from "./rpc-client";
 import { PI_MODULE_PREFS_DEFAULTS } from "./settingsSchema";
-import { groupTurns } from "./turns";
+import { groupTurns, messageText } from "./turns";
 
 export type PiOpenOptions = {
   cwd?: string;
@@ -42,6 +43,26 @@ export type PiOpenOptions = {
  *  data-pi-model / data-pi-smol root attributes. */
 export type PiRoles = { provider: string; model: string; smol: string };
 
+/** A prompt sent while a turn was streaming: queued locally in the order it
+ *  was sent, with pi's acknowledgement state for the prompt command. */
+export type PiQueued = {
+  id: string;
+  text: string;
+  images: PiImageAttachment[];
+  /** pi answered success for the prompt command: the follow-up is in its
+   *  queue and Remove (a local-only recall) is no longer offered. */
+  acked: boolean;
+};
+
+/** Text handed back to the composer after a refused send or a queued Remove:
+ *  restored into the empty editor once, then cleared. */
+export type PiRejectedDraft = {
+  text: string;
+  images: PiImageAttachment[];
+  /** The rejection reason; null when the return was user-initiated. */
+  error: string | null;
+};
+
 type PiTabEntry = {
   /** Open generation; a later open for the same tab supersedes this one. */
   gen: number;
@@ -53,6 +74,12 @@ type PiTabEntry = {
   roles: PiRoles;
   cwd?: string;
   pendingAttachments?: PiSavedAttachment[][];
+  /** Follow-ups sent while a turn was streaming, in send order. */
+  queued?: PiQueued[];
+  /** The newest send whose prompt response has not landed yet; pi 0.3.0
+   *  echoes no id for our id-less commands, so this is the correlation. */
+  lastPrompt?: { text: string; images: PiImageAttachment[] } | null;
+  rejectedDraft?: PiRejectedDraft | null;
 };
 
 type PiStore = {
@@ -73,6 +100,11 @@ type PiStore = {
     text: string,
     images?: PiImageAttachment[],
   ) => Promise<void>;
+  /** Drops a queued prompt that pi has not acknowledged yet and hands its
+   *  text back to the composer. pi's own queue cannot be cancelled. */
+  removeQueued: (tabId: number, id: string) => void;
+  /** Clears the composer restore field once Composer has rebound the text. */
+  clearRejectedDraft: (tabId: number) => void;
   answerAsk: (
     tabId: number,
     requestId: string,
@@ -98,24 +130,110 @@ function patchEntry(
 
 let openGen = 0;
 
+/** Session-wide counter giving each queued prompt a stable data-uat-key. */
+let queuedSeq = 0;
+
 function attachmentError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function applyPiEvent(
-  entry: PiTabEntry,
-  line: string,
-): Pick<PiTabEntry, "state" | "pendingAttachments"> {
+type PiEventPatch = Pick<
+  PiTabEntry,
+  "state" | "pendingAttachments" | "queued" | "lastPrompt" | "rejectedDraft"
+>;
+
+/** Sniffs one event line for a prompt command response; null for anything
+ *  else. The reducer ignores success frames, so the queue bookkeeping here
+ *  reads both outcomes: success acknowledges the newest send (an idle start
+ *  or an accepted follow-up, rpc.rs answers response_ok right after
+ *  push_follow_up), failure refuses it. pi 0.3.0 echoes no id for our
+ *  id-less commands, so lastPrompt is the correlation. */
+function promptResponse(line: string): {
+  ok: boolean;
+  error: string | null;
+} | null {
+  const trimmed = line.trimStart();
+  if (!trimmed.startsWith("{")) return null;
+  let event: unknown;
+  try {
+    event = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (
+    typeof event !== "object" ||
+    event === null ||
+    (event as { type?: unknown }).type !== "response" ||
+    (event as { command?: unknown }).command !== "prompt"
+  ) {
+    return null;
+  }
+  const record = event as { success?: unknown; error?: unknown };
+  return {
+    ok: record.success !== false,
+    error: typeof record.error === "string" ? record.error : null,
+  };
+}
+
+function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
   const previous = entry.state;
   let state = applyEvent(previous, line);
   let pending = entry.pendingAttachments ?? [];
+  let queued = entry.queued ?? [];
+  let lastPrompt = entry.lastPrompt ?? null;
+  let rejectedDraft = entry.rejectedDraft ?? null;
 
-  if (state.switching || state.blocks.length < previous.blocks.length) {
-    return { state, pendingAttachments: [] };
+  const response = promptResponse(line);
+  if (response && lastPrompt) {
+    const sentPrompt = lastPrompt;
+    if (response.ok) {
+      // Accepted: whichever matching entry is still unacked is now in pi's
+      // queue and Remove is no longer offered for it.
+      let acked = false;
+      queued = queued.map((q) => {
+        if (acked || q.acked || q.text !== sentPrompt.text) return q;
+        acked = true;
+        return { ...q, acked: true };
+      });
+      lastPrompt = null;
+    } else {
+      // Refused: pi put the "prompt rejected" card on the feed; hand the
+      // text back to the composer instead of leaving it lost, and do not
+      // keep a queued entry pi never accepted.
+      const index = queued.findIndex(
+        (q) => !q.acked && q.text === sentPrompt.text,
+      );
+      if (index !== -1) queued = queued.filter((_, i) => i !== index);
+      rejectedDraft = {
+        text: sentPrompt.text,
+        images: sentPrompt.images,
+        error: response.error,
+      };
+      lastPrompt = null;
+    }
   }
 
-  if (pending.length === 0) {
-    return { state, pendingAttachments: pending };
+  if (state.switching || state.blocks.length < previous.blocks.length) {
+    // The session that held the follow-up queue is gone: queued prompts can
+    // never run, so they must not read as pending. The composer restore and
+    // the send awaiting its ack are not tied to this session and stay.
+    return {
+      state,
+      pendingAttachments: [],
+      queued: [],
+      lastPrompt,
+      rejectedDraft,
+    };
+  }
+
+  if (pending.length === 0 && queued.length === 0) {
+    return {
+      state,
+      pendingAttachments: pending,
+      queued,
+      lastPrompt,
+      rejectedDraft,
+    };
   }
 
   const previousUserIds = new Set(
@@ -133,11 +251,33 @@ function applyPiEvent(
       !previousUserIds.has(block.id),
   );
   if (!user || user.kind !== "message") {
-    return { state, pendingAttachments: pending };
+    return {
+      state,
+      pendingAttachments: pending,
+      queued,
+      lastPrompt,
+      rejectedDraft,
+    };
   }
 
-  state = recordSavedAttachments(state, user.id, pending[0]);
-  return { state, pendingAttachments: pending.slice(1) };
+  if (pending.length > 0) {
+    state = recordSavedAttachments(state, user.id, pending[0]);
+    pending = pending.slice(1);
+  }
+  // A queued follow-up leaves the local queue once pi emits the user block
+  // carrying its text (the first matching block after the queue push).
+  if (queued.length > 0) {
+    const text = messageText(user);
+    const index = queued.findIndex((q) => q.text === text);
+    if (index !== -1) queued = queued.filter((_, i) => i !== index);
+  }
+  return {
+    state,
+    pendingAttachments: pending,
+    queued,
+    lastPrompt,
+    rejectedDraft,
+  };
 }
 
 /** Global pi prefs from the LazyStore (defaults when not yet hydrated). */
@@ -237,6 +377,9 @@ export const usePiStore = create<PiStore>()((set, get) => ({
       },
       cwd: opts.cwd,
       pendingAttachments: [],
+      queued: [],
+      lastPrompt: null,
+      rejectedDraft: null,
     };
     set((s) => ({ tabs: { ...s.tabs, [tabId]: entry } }));
     try {
@@ -292,6 +435,17 @@ export const usePiStore = create<PiStore>()((set, get) => ({
     const session = entry?.session;
     if (!session) return;
     const attachments = images ?? [];
+    // pi refuses a bare prompt while a turn is in flight ("Agent is currently
+    // streaming; specify streamingBehavior"), which used to drop the text.
+    // While thinking or running a tool the prompt rides streamingBehavior
+    // "follow-up": pi queues it and runs it when the turn ends. awaiting-ask
+    // stays on the plain path: a follow-up would sit behind the open question.
+    const status = entry.state.status;
+    const busy = status !== "idle" && status !== "awaiting-ask";
+    const behavior: PiStreamingBehavior | undefined = busy
+      ? "follow-up"
+      : undefined;
+    const queuedId = busy ? `queued-${(queuedSeq += 1)}` : null;
     const saved: PiSavedAttachment[] = [];
     if (attachments.length > 0) {
       const turn = groupTurns(messageBlocks(entry.state.blocks)).length;
@@ -321,8 +475,29 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         })),
       );
     }
+    // The queue entry lands before the write so pi's ack, which can only
+    // arrive after the line is sent, finds it; the catch rolls it back.
+    if (queuedId) {
+      set((s) =>
+        patchEntry(s.tabs, tabId, (e) => ({
+          ...e,
+          queued: [
+            ...(e.queued ?? []),
+            { id: queuedId, text, images: attachments, acked: false },
+          ],
+        })),
+      );
+    }
+    // The response frame names no id for our id-less commands, so the store
+    // holds the newest send until its ack or rejection arrives.
+    set((s) =>
+      patchEntry(s.tabs, tabId, (e) => ({
+        ...e,
+        lastPrompt: { text, images: attachments },
+      })),
+    );
     try {
-      await session.send(promptLine(text, images));
+      await session.send(promptLine(text, images, behavior));
     } catch (error) {
       if (saved.length > 0) {
         set((s) =>
@@ -341,8 +516,52 @@ export const usePiStore = create<PiStore>()((set, get) => ({
           }),
         );
       }
+      set((s) =>
+        patchEntry(s.tabs, tabId, (e) => ({
+          ...e,
+          queued: queuedId
+            ? (e.queued ?? []).filter((q) => q.id !== queuedId)
+            : e.queued,
+          // The write failed before pi saw the text: give it back to the
+          // composer instead of dropping it on the floor.
+          rejectedDraft: {
+            text,
+            images: attachments,
+            error: attachmentError(error),
+          },
+        })),
+      );
       throw error;
     }
+  },
+
+  removeQueued: (tabId, id) => {
+    set((s) =>
+      patchEntry(s.tabs, tabId, (e) => {
+        const queued = e.queued ?? [];
+        const removed = queued.find((q) => q.id === id);
+        if (!removed) return e;
+        // Remove only pulls the text back into the composer (through the
+        // same restore rejections use). pi 0.3.0 has no command that cancels
+        // an already-accepted follow-up, so an acked prompt would still run
+        // when the current turn ends; the button is only offered pre-ack.
+        return {
+          ...e,
+          queued: queued.filter((q) => q.id !== id),
+          rejectedDraft: {
+            text: removed.text,
+            images: removed.images,
+            error: null,
+          },
+        };
+      }),
+    );
+  },
+
+  clearRejectedDraft: (tabId) => {
+    set((s) =>
+      patchEntry(s.tabs, tabId, (e) => ({ ...e, rejectedDraft: null })),
+    );
   },
 
   answerAsk: async (tabId, requestId, answers) => {

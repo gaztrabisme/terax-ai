@@ -8,8 +8,10 @@ import {
   initialPiSessionState,
   messageBlocks,
   type PiFeedItem,
+  type PiUsage,
 } from "../lib/parse";
 import { groupTurns } from "../lib/turns";
+import { CACHE_QUALIFIER_TEXT, cacheShareLabel } from "../lib/usage";
 import {
   formatCost,
   openArtifactEvent,
@@ -57,10 +59,11 @@ describe("turn footer usage", () => {
     });
   });
 
-  it("appends tokens and cached share after the worked label", () => {
-    expect(usageLabel(usage!)).toBe("1,204 in, 312 out, 89% cached");
+  it("keeps the cached share out of the worked label (K10 split)", () => {
+    expect(usageLabel(usage!)).toBe("1,204 in, 312 out");
+    expect(cacheShareLabel(usage!)).toBe("89% cached");
     expect(workedLabel(turn, usage)).toBe(
-      "Worked 1 s, 1,204 in, 312 out, 89% cached, $0.0031",
+      "Worked 1 s, 1,204 in, 312 out, $0.0031",
     );
   });
 
@@ -68,9 +71,7 @@ describe("turn footer usage", () => {
     const html = renderToStaticMarkup(
       <Transcript blocks={blocks} onAnswer={() => {}} onDismiss={() => {}} />,
     );
-    expect(html).toContain(
-      "Worked 1 s, 1,204 in, 312 out, 89% cached, $0.0031",
-    );
+    expect(html).toContain("Worked 1 s, 1,204 in, 312 out, $0.0031");
     expect(html).toContain("retrying 1/3 in 4 s");
     expect(html).toContain("retry 1 succeeded");
   });
@@ -113,8 +114,9 @@ describe("turn footer usage", () => {
     const localTurn = groupTurns(messageBlocks(localBlocks))[0];
     const localUsage = usageByTurn(localBlocks).get(0) ?? null;
     expect(workedLabel(localTurn, localUsage)).toBe(
-      "Worked 1 s, 100 in, 20 out, 0% cached",
+      "Worked 1 s, 100 in, 20 out",
     );
+    expect(cacheShareLabel(localUsage!)).toBe("0% cached");
     const html = renderToStaticMarkup(
       <Transcript
         blocks={localBlocks}
@@ -124,6 +126,98 @@ describe("turn footer usage", () => {
     );
     expect(html).toContain("100 in, 20 out");
     expect(html).not.toContain("$");
+  });
+});
+
+describe("cache qualifier (K10)", () => {
+  // A thinking part gives the turn an activity fold, which carries the
+  // footer; every usage shape goes through the same markup.
+  function turnBlocks(usage: PiUsage | null): PiFeedItem[] {
+    return [
+      {
+        kind: "message",
+        id: "u",
+        role: "user",
+        parts: [{ type: "text", text: "hi" }],
+        model: null,
+        usage: null,
+        streaming: false,
+        at: 1000,
+      },
+      {
+        kind: "message",
+        id: "a",
+        role: "assistant",
+        parts: [{ type: "thinking", thinking: "hmm" }],
+        model: null,
+        usage,
+        streaming: false,
+        at: 2000,
+      },
+    ];
+  }
+
+  function render(blocks: PiFeedItem[]): string {
+    return renderToStaticMarkup(
+      <Transcript blocks={blocks} onAnswer={() => {}} onDismiss={() => {}} />,
+    );
+  }
+
+  function footerSpan(html: string): string {
+    const match = html.match(
+      /<span[^>]*data-uat="usage-footer"[^>]*>([\s\S]*?)<\/span>/,
+    );
+    expect(match).not.toBeNull();
+    return match![1];
+  }
+
+  const usage: PiUsage = {
+    input: 1204,
+    output: 312,
+    cacheRead: 9700,
+    cacheWrite: 0,
+    totalTokens: 11216,
+    costTotal: 0.0031,
+  };
+  const zeroUsage: PiUsage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    costTotal: 0,
+  };
+
+  it("renders the qualifier with the exact sentence on a turn with usage", () => {
+    const html = render(turnBlocks(usage));
+    expect(html).toContain('data-uat="cache-qualifier"');
+    expect(html).toContain(`title="${CACHE_QUALIFIER_TEXT}"`);
+    expect(html).toContain(`aria-label="${CACHE_QUALIFIER_TEXT}"`);
+  });
+
+  it("renders the qualifier on a zero-usage turn and reports cache unknown", () => {
+    const html = render(turnBlocks(zeroUsage));
+    expect(html).toContain('data-uat="cache-qualifier"');
+    expect(html).toContain(`title="${CACHE_QUALIFIER_TEXT}"`);
+    expect(html).toContain("cache unknown");
+  });
+
+  it("renders the qualifier on a turn whose usage is unknown", () => {
+    const html = render(turnBlocks(null));
+    expect(html).toContain('data-uat="cache-qualifier"');
+    expect(html).toContain(`title="${CACHE_QUALIFIER_TEXT}"`);
+    // No usage record, no unstable segment to mark.
+    expect(html).not.toContain('data-uat="cache-share"');
+  });
+
+  it("marks cache-share unstable and keeps the cached share out of the footer", () => {
+    const html = render(turnBlocks(usage));
+    const shareTag = html.match(/<span[^>]*data-uat="cache-share"[^>]*>/);
+    expect(shareTag).not.toBeNull();
+    expect(shareTag![0]).toContain('data-uat-unstable="1"');
+    const footer = footerSpan(html);
+    expect(footer).not.toContain("% cached");
+    expect(footer).toContain("1,204 in, 312 out");
   });
 });
 

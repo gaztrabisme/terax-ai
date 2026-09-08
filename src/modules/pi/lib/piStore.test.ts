@@ -69,6 +69,14 @@ describe("piStore", () => {
 
   it("sendPrompt carries images in pi's prompt shape", async () => {
     await usePiStore.getState().openSession(5, { cwd: "/tmp/p" });
+    // The mocked session fires agent_start on open (status "thinking");
+    // this test pins the plain idle-path wire shape.
+    usePiStore.setState((s) => ({
+      tabs: {
+        ...s.tabs,
+        5: { ...s.tabs[5]!, state: { ...s.tabs[5]!.state, status: "idle" } },
+      },
+    }));
     await usePiStore.getState().sendPrompt(5, "look", [
       { mediaType: "image/png", data: "AAAA" },
       { mediaType: "image/jpeg", data: "/9j/4AA" },
@@ -92,9 +100,9 @@ describe("piStore", () => {
 
   it("writes images before sending and records paths on the arriving user block", async () => {
     await usePiStore.getState().openSession(9, { cwd: "/tmp/p" });
-    await usePiStore.getState().sendPrompt(9, "look", [
-      { mediaType: "image/png", data: "AAAA" },
-    ]);
+    await usePiStore
+      .getState()
+      .sendPrompt(9, "look", [{ mediaType: "image/png", data: "AAAA" }]);
     expect(invokeMock).toHaveBeenCalledWith("pi_save_attachment", {
       cwd: "/tmp/p",
       turn: 0,
@@ -111,14 +119,12 @@ describe("piStore", () => {
     );
     expect(usePiStore.getState().tabs[9]?.state.blocks[0]).toMatchObject({
       role: "user",
-      savedAttachments: [
-        { path: ".pi/attachments/0-0.png", error: null },
-      ],
+      savedAttachments: [{ path: ".pi/attachments/0-0.png", error: null }],
     });
 
-    await usePiStore.getState().sendPrompt(9, "next", [
-      { mediaType: "image/png", data: "BBBB" },
-    ]);
+    await usePiStore
+      .getState()
+      .sendPrompt(9, "next", [{ mediaType: "image/png", data: "BBBB" }]);
     expect(invokeMock).toHaveBeenCalledWith("pi_save_attachment", {
       cwd: "/tmp/p",
       turn: 1,
@@ -135,9 +141,9 @@ describe("piStore", () => {
       throw new Error("disk full");
     });
     await usePiStore.getState().openSession(10, { cwd: "/tmp/p" });
-    await usePiStore.getState().sendPrompt(10, "still send", [
-      { mediaType: "image/png", data: "AAAA" },
-    ]);
+    await usePiStore
+      .getState()
+      .sendPrompt(10, "still send", [{ mediaType: "image/png", data: "AAAA" }]);
     expect(sent).toHaveLength(1);
     const calls = vi.mocked(openPiSessionMock).mock.calls;
     const onEvent = calls[calls.length - 1]![0].onEvent;
@@ -192,5 +198,115 @@ describe("piStore", () => {
       0.5,
       6,
     );
+  });
+
+  it("sends streamingBehavior follow-up while busy and queues the prompt", async () => {
+    await usePiStore.getState().openSession(11, { cwd: "/tmp/p" });
+    // The mocked session fires agent_start on open: status turns thinking.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(usePiStore.getState().tabs[11]?.state.status).toBe("thinking");
+
+    await usePiStore.getState().sendPrompt(11, "hold this");
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toEqual({
+      type: "prompt",
+      message: "hold this",
+      streamingBehavior: "follow-up",
+    });
+    const entry = usePiStore.getState().tabs[11];
+    expect(entry?.queued).toEqual([
+      { id: expect.any(String), text: "hold this", images: [], acked: false },
+    ]);
+
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    // pi's ack for a queued follow-up is the prompt response itself.
+    onEvent('{"type":"response","command":"prompt","success":true}');
+    expect(usePiStore.getState().tabs[11]?.queued?.[0]?.acked).toBe(true);
+
+    // The queued text leaves the queue when pi emits its user block.
+    onEvent(
+      '{"type":"message_start","message":{"role":"user","content":"hold this"}}',
+    );
+    expect(usePiStore.getState().tabs[11]?.queued).toEqual([]);
+  });
+
+  it("keeps a queued entry when another user block arrives first", async () => {
+    await usePiStore.getState().openSession(14, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await usePiStore.getState().sendPrompt(14, "hold this");
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent(
+      '{"type":"message_start","message":{"role":"user","content":"something else"}}',
+    );
+    expect(usePiStore.getState().tabs[14]?.queued).toHaveLength(1);
+  });
+
+  it("hands the text back when pi answers success:false", async () => {
+    await usePiStore.getState().openSession(12, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await usePiStore.getState().sendPrompt(12, "queue me");
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent(
+      '{"type":"response","command":"prompt","success":false,"error":"Agent is currently streaming; specify streamingBehavior"}',
+    );
+    const entry = usePiStore.getState().tabs[12];
+    // The refused queued entry leaves the queue; the rejection card stays.
+    expect(entry?.queued).toEqual([]);
+    expect(entry?.rejectedDraft).toEqual({
+      text: "queue me",
+      images: [],
+      error: "Agent is currently streaming; specify streamingBehavior",
+    });
+    expect(
+      entry?.state.blocks.some(
+        (block) =>
+          block.kind === "error" && block.text.startsWith("prompt rejected"),
+      ),
+    ).toBe(true);
+    // Once handled, clearRejectedDraft resets the field.
+    usePiStore.getState().clearRejectedDraft(12);
+    expect(usePiStore.getState().tabs[12]?.rejectedDraft).toBeNull();
+  });
+
+  it("hands the text back when the write throws", async () => {
+    openPiSessionMock.mockImplementationOnce(
+      async (opts: { onExit?: (c: number) => void }) => ({
+        id: 9,
+        send: async () => {
+          throw new Error("stdin closed");
+        },
+        kill: async () => {
+          opts.onExit?.(0);
+        },
+      }),
+    );
+    await usePiStore.getState().openSession(13, { cwd: "/tmp/p" });
+    await expect(
+      usePiStore.getState().sendPrompt(13, "lost text"),
+    ).rejects.toThrow("stdin closed");
+    expect(usePiStore.getState().tabs[13]?.rejectedDraft).toEqual({
+      text: "lost text",
+      images: [],
+      error: "stdin closed",
+    });
+  });
+
+  it("removeQueued recalls the text to the composer path", async () => {
+    await usePiStore.getState().openSession(15, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await usePiStore.getState().sendPrompt(15, "take me back");
+    const id = usePiStore.getState().tabs[15]?.queued?.[0]?.id;
+    expect(id).toBeTruthy();
+    usePiStore.getState().removeQueued(15, id!);
+    const entry = usePiStore.getState().tabs[15];
+    expect(entry?.queued).toEqual([]);
+    expect(entry?.rejectedDraft).toEqual({
+      text: "take me back",
+      images: [],
+      error: null,
+    });
   });
 });

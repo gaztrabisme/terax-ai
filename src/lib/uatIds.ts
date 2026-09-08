@@ -33,6 +33,8 @@ export const UAT_IDS_K4: UatIdEntry[] = [
   { id: "attachment-chip", file: "src/modules/pi/components/Transcript.tsx" },
   { id: "turn-fold", file: "src/modules/pi/components/Transcript.tsx" },
   { id: "usage-footer", file: "src/modules/pi/components/Transcript.tsx" },
+  { id: "cache-share", file: "src/modules/pi/components/Transcript.tsx" },
+  { id: "cache-qualifier", file: "src/modules/pi/components/Transcript.tsx" },
   { id: "answer-body", file: "src/modules/pi/components/Transcript.tsx" },
   { id: "answer-actions", file: "src/modules/pi/components/Transcript.tsx" },
   { id: "copy", file: "src/modules/pi/components/Transcript.tsx" },
@@ -162,14 +164,23 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
     file: "src/modules/editor/EditorPane.tsx",
     state: "an open editor tab with its document loaded",
   },
+  {
+    id: "turn-queued",
+    file: "src/modules/pi/components/Transcript.tsx",
+    state: "a chat entry with a queued follow-up prompt",
+  },
+  {
+    id: "queued-remove",
+    file: "src/modules/pi/components/Transcript.tsx",
+    state: "a chat entry with a queued follow-up prompt",
+  },
 ];
 
 /**
  * Inventory rows whose owner column says K4 but whose control does not exist
  * in this tree. Nothing asserts them; naming them here keeps the audit
  * explicit instead of inventing UI. `command-palette`: the header has no
- * command button. `cache-share`: the cache segment is text inside the
- * usage-footer span (the design forbids asserting cache text). `board-verify`,
+ * command button. `board-verify`,
  * `board-confirm`, `board-cancel`: the ticket sheet exposes only the
  * align/land/close/rework verbs and its two-click confirmation rides the same
  * verb button. `editor-path`, `editor-save`: the editor pane renders no path
@@ -177,7 +188,6 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
  */
 export const UAT_IDS_K4_ABSENT: { id: string; reason: string }[] = [
   { id: "command-palette", reason: "no header command button exists" },
-  { id: "cache-share", reason: "no separate cache element; text inside usage-footer" },
   { id: "board-verify", reason: "ticket sheet has no Verify verb button" },
   { id: "board-confirm", reason: "confirmation rides the armed verb button" },
   { id: "board-cancel", reason: "no separate cancel control in the sheet" },

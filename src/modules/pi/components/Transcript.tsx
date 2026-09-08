@@ -46,6 +46,8 @@ import {
   type Turn,
 } from "@/modules/pi/lib/turns";
 import { detectArtifacts, type Artifact } from "@/modules/pi/lib/artifacts";
+import type { PiQueued } from "@/modules/pi/lib/piStore";
+import { CACHE_QUALIFIER_TEXT, cacheShareLabel } from "@/modules/pi/lib/usage";
 import { KeystoneCard } from "./blocks/KeystoneCard";
 import { ToolStep } from "./blocks/ToolRow";
 
@@ -61,6 +63,12 @@ type Props = {
   /** Images sent with each turn, keyed by turn key (the user block id).
    *  Local state from the composer: the session file may not echo the bytes. */
   turnImages?: Record<string, PiImageAttachment[]>;
+  /** Follow-up prompts sent while a turn was streaming; rendered after the
+   *  turns until pi runs them. */
+  queued?: PiQueued[];
+  /** Returns a queued prompt's text to the composer. Only called pre-ack:
+   *  it cannot cancel pi's queue (pi 0.3.0 has no command for that). */
+  onRemoveQueued?: (id: string) => void;
 };
 
 /** Event the artifact pane listens for: select this turn's artifact and
@@ -137,9 +145,7 @@ function AttachmentActions({
     <div className="mt-1.5 flex flex-wrap justify-end gap-1">
       {attachments.map((attachment, i) => {
         const absolute =
-          attachment.path && cwd
-            ? projectPath(cwd, attachment.path)
-            : null;
+          attachment.path && cwd ? projectPath(cwd, attachment.path) : null;
         return (
           <div
             key={`${attachment.path ?? "failed"}-${i}`}
@@ -157,9 +163,7 @@ function AttachmentActions({
             >
               {attachment.path ?? `attachment ${i + 1}`}
             </span>
-            {attachment.error ? (
-              <span>failed: {attachment.error}</span>
-            ) : null}
+            {attachment.error ? <span>failed: {attachment.error}</span> : null}
             {absolute ? (
               <>
                 <button
@@ -276,17 +280,9 @@ export function usageByTurn(blocks: PiFeedItem[]): Map<number, PiUsage> {
   return map;
 }
 
-/** "1,204 in, 312 out, 89% cached"; cached share over input plus cacheRead. */
+/** "1,204 in, 312 out"; the cached share renders separately (K10). */
 export function usageLabel(usage: PiUsage): string {
-  const parts = [
-    `${usage.input.toLocaleString()} in`,
-    `${usage.output.toLocaleString()} out`,
-  ];
-  const prompt = usage.input + usage.cacheRead;
-  if (prompt > 0) {
-    parts.push(`${Math.round((usage.cacheRead / prompt) * 100)}% cached`);
-  }
-  return parts.join(", ");
+  return `${usage.input.toLocaleString()} in, ${usage.output.toLocaleString()} out`;
 }
 
 /** "$0.0031" for the small per-turn sums, "$0.92" once a run adds up. */
@@ -437,6 +433,25 @@ function ChildCard({
   );
 }
 
+/**
+ * K10: the unconditional provider-neutral qualifier, on every rendered usage
+ * footer including unknown usage. The sentence rides the title and
+ * aria-label; the visible form is one muted glyph (aesthetic and
+ * minimalist).
+ */
+function CacheQualifier() {
+  return (
+    <span
+      data-uat="cache-qualifier"
+      title={CACHE_QUALIFIER_TEXT}
+      aria-label={CACHE_QUALIFIER_TEXT}
+      className="text-muted-foreground"
+    >
+      ?
+    </span>
+  );
+}
+
 function ActivityFold({
   turn,
   usage,
@@ -464,9 +479,20 @@ function ActivityFold({
         {turn.status === "streaming" ? (
           <Shimmer duration={1.4}>{streamingLabel(turn)}</Shimmer>
         ) : (
-          <span data-uat="usage-footer" data-uat-key={turn.key}>
-            {workedLabel(turn, usage)}
-          </span>
+          <>
+            <span data-uat="usage-footer" data-uat-key={turn.key}>
+              {workedLabel(turn, usage)}
+            </span>
+            {/* The unstable cache segment, split out of the footer string:
+                the computed share, or "cache unknown" when the prompt size
+                is 0. UAT never asserts this text. */}
+            {usage ? (
+              <span data-uat="cache-share" data-uat-unstable="1">
+                {cacheShareLabel(usage)}
+              </span>
+            ) : null}
+            <CacheQualifier />
+          </>
         )}
         <HugeiconsIcon
           icon={ArrowDown01Icon}
@@ -561,8 +587,17 @@ function AnswerActions({
   const btn =
     "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground";
   return (
-    <div data-uat="answer-actions" data-uat-key={turn.key} className="flex items-center gap-1">
-      <button type="button" data-uat="copy" onClick={copyRendered} className={btn}>
+    <div
+      data-uat="answer-actions"
+      data-uat-key={turn.key}
+      className="flex items-center gap-1"
+    >
+      <button
+        type="button"
+        data-uat="copy"
+        onClick={copyRendered}
+        className={btn}
+      >
         <HugeiconsIcon
           icon={copied ? CheckmarkCircle01Icon : CopyIcon}
           size={12}
@@ -570,7 +605,12 @@ function AnswerActions({
         />
         Copy
       </button>
-      <button type="button" data-uat="copy-markdown" onClick={copyMarkdown} className={btn}>
+      <button
+        type="button"
+        data-uat="copy-markdown"
+        onClick={copyMarkdown}
+        className={btn}
+      >
         <HugeiconsIcon
           icon={copied ? CheckmarkCircle01Icon : CopyIcon}
           size={12}
@@ -579,7 +619,12 @@ function AnswerActions({
         Copy markdown
       </button>
       {cwd ? (
-        <button type="button" data-uat="open-in-editor" onClick={openInEditor} className={btn}>
+        <button
+          type="button"
+          data-uat="open-in-editor"
+          onClick={openInEditor}
+          className={btn}
+        >
           <HugeiconsIcon icon={FileEditIcon} size={12} strokeWidth={1.75} />
           Open in editor
         </button>
@@ -725,6 +770,8 @@ export function Transcript({
   cwd,
   onOpenChild,
   turnImages,
+  queued,
+  onRemoveQueued,
 }: Props) {
   // Error and retry blocks render as their own cards attached to the turn
   // they belong to, so the turn model never sees them.
@@ -737,7 +784,7 @@ export function Transcript({
     setOpenTurns((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
 
-  if (turns.length === 0 && cards.size === 0) {
+  if (turns.length === 0 && cards.size === 0 && (queued?.length ?? 0) === 0) {
     return (
       <div
         data-uat="transcript"
@@ -789,6 +836,41 @@ export function Transcript({
               <RetryCard key={`card-bare-${j}`} block={block} />
             ),
           )}
+          {/* Queued follow-ups: pi accepted each one (the prompt command's
+              success response) and runs it when the current turn ends; the
+              block then leaves the queue and renders as a normal user turn.
+              Remove exists only before that ack: it hands the text back to
+              the composer but cannot cancel pi's queue, which pi 0.3.0
+              gives no command for, so an acked follow-up always runs. */}
+          {(queued ?? []).map((q) => (
+            <div
+              key={q.id}
+              data-uat="turn-queued"
+              data-uat-key={q.id}
+              className="flex justify-end"
+            >
+              <div className="max-w-[65%] rounded-md border border-border/60 bg-muted/40 px-3.5 py-2 text-[14px] leading-relaxed">
+                <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
+                  <span>Queued</span>
+                  {!q.acked && onRemoveQueued ? (
+                    <button
+                      type="button"
+                      data-uat="queued-remove"
+                      aria-label="Remove queued prompt"
+                      title="Returns the text to the composer; the queued follow-up cannot be cancelled"
+                      onClick={() => onRemoveQueued(q.id)}
+                      className="rounded-md border border-border/60 px-1.5 py-0.5 hover:bg-accent hover:text-foreground"
+                    >
+                      Remove
+                    </button>
+                  ) : null}
+                </div>
+                <div className="whitespace-pre-wrap wrap-break-word text-foreground">
+                  {q.text}
+                </div>
+              </div>
+            </div>
+          ))}
         </ConversationContent>
         <ConversationScrollButton />
       </Conversation>

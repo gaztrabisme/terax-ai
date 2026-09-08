@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { native } from "@/lib/native";
 import { clearDraft, loadDraft, saveDraft } from "@/modules/pi/lib/drafts";
 import type { PiImageAttachment } from "@/modules/pi/lib/parse";
+import { usePiStore } from "@/modules/pi/lib/piStore";
 import {
   completeSlashLine,
   filterPrompts,
@@ -105,7 +106,8 @@ async function encodeImageBlob(blob: Blob): Promise<EncodedImage> {
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("canvas 2d context unavailable");
   ctx.drawImage(img, 0, 0, w, h);
-  const keepPng = ALPHA_SOURCE_TYPES.has(blob.type) && hasTransparency(ctx, w, h);
+  const keepPng =
+    ALPHA_SOURCE_TYPES.has(blob.type) && hasTransparency(ctx, w, h);
   const url = keepPng
     ? canvas.toDataURL("image/png")
     : canvas.toDataURL("image/jpeg", JPEG_QUALITY);
@@ -153,7 +155,11 @@ export function appendPendingImage(
   return {
     images: [
       ...current,
-      { ...image, id: pendingImageSeq, name: name || `image ${pendingImageSeq}` },
+      {
+        ...image,
+        id: pendingImageSeq,
+        name: name || `image ${pendingImageSeq}`,
+      },
     ],
     notice: null,
   };
@@ -161,9 +167,7 @@ export function appendPendingImage(
 
 /** Image files among the drag or clipboard payloads, in order. */
 export function imageFilesOf(dt: DataTransfer | null): File[] {
-  return Array.from(dt?.files ?? []).filter((f) =>
-    f.type.startsWith("image/"),
-  );
+  return Array.from(dt?.files ?? []).filter((f) => f.type.startsWith("image/"));
 }
 
 /** Extensions the bytes bridge accepts from dialogs and OS drops. */
@@ -602,6 +606,38 @@ export function Composer({
     };
   }, [editor, cwd, tabId]);
 
+  // A send pi refused (success:false response, or the write threw) and a
+  // queued Remove hand their text back through the store: put it and its
+  // image chips into the empty editor once, then clear the field so it
+  // cannot rebind a later draft. The rejection reason itself stays on the
+  // transcript's error card; while the editor holds typed text the restore
+  // waits for it to empty again.
+  const rejectedDraft = usePiStore((s) => s.tabs[tabId]?.rejectedDraft ?? null);
+  const clearRejectedDraft = usePiStore((s) => s.clearRejectedDraft);
+  useEffect(() => {
+    if (!editor || !rejectedDraft) return;
+    if (!editor.isEmpty) return;
+    if (rejectedDraft.text) {
+      editor.commands.setContent(rejectedDraft.text, {
+        contentType: "markdown",
+      });
+    }
+    let next = pendingImageSeq;
+    setChips(
+      rejectedDraft.images.map((img) => {
+        next += 1;
+        return {
+          ...img,
+          bytes: base64Bytes(img.data),
+          id: next,
+          name: `image ${next}`,
+        };
+      }),
+    );
+    pendingImageSeq = next;
+    clearRejectedDraft(tabId);
+  }, [editor, rejectedDraft, clearRejectedDraft, tabId]);
+
   useEffect(() => {
     editor?.setEditable(!disabled);
   }, [editor, disabled]);
@@ -674,10 +710,7 @@ export function Composer({
           <PromptMenu
             prompts={prompts}
             query={filterQuery}
-            highlighted={Math.min(
-              highlight,
-              Math.max(0, filtered.length - 1),
-            )}
+            highlighted={Math.min(highlight, Math.max(0, filtered.length - 1))}
             onHighlight={setHighlight}
             onSelect={selectPrompt}
           />

@@ -43,6 +43,7 @@ function statusLabel(
 export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
   const entry = usePiStore((s) => s.tabs[tabId]);
   const sendPrompt = usePiStore((s) => s.sendPrompt);
+  const removeQueued = usePiStore((s) => s.removeQueued);
   const answerAsk = usePiStore((s) => s.answerAsk);
   const dismissAsk = usePiStore((s) => s.dismissAsk);
   const kill = usePiStore((s) => s.kill);
@@ -230,6 +231,8 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
       <Transcript
         blocks={blocks}
         turnImages={turnImages}
+        queued={entry?.queued ?? []}
+        onRemoveQueued={(id) => removeQueued(tabId, id)}
         onAnswer={(requestId, answers) =>
           void answerAsk(tabId, requestId, answers)
         }

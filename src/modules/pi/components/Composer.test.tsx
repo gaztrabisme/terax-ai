@@ -40,6 +40,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialogOpenMock }));
 
+import { usePiStore } from "@/modules/pi/lib/piStore";
 import { Composer } from "./Composer";
 
 // @tiptap/core is not a direct dependency, but @tiptap/react re-exports it
@@ -171,9 +172,7 @@ function renderComposer(
   onSubmit = vi.fn(),
   props: Partial<Parameters<typeof Composer>[0]> = {},
 ) {
-  const utils = render(
-    <Composer tabId={7} onSubmit={onSubmit} {...props} />,
-  );
+  const utils = render(<Composer tabId={7} onSubmit={onSubmit} {...props} />);
   const pm = utils.container.querySelector(
     "[aria-label='pi composer']",
   ) as Element;
@@ -218,7 +217,9 @@ describe("composer image chips", () => {
     await waitFor(() => {
       expect(container.querySelectorAll("img")).toHaveLength(2);
     });
-    fireEvent.click(container.querySelector("button[aria-label='Remove a.png']")!);
+    fireEvent.click(
+      container.querySelector("button[aria-label='Remove a.png']")!,
+    );
     expect(container.querySelectorAll("img")).toHaveLength(1);
     expect(container.querySelector("img[alt='b.png']")).toBeTruthy();
     expect(
@@ -250,7 +251,9 @@ describe("composer image chips", () => {
       modelAcceptsImages: false,
     });
     expect(container.textContent).toContain("may not accept images");
-    expect(container.querySelector("button[aria-label='Attach images']")).toBeTruthy();
+    expect(
+      container.querySelector("button[aria-label='Attach images']"),
+    ).toBeTruthy();
   });
 
   it("shows no images notice when the model accepts images", () => {
@@ -258,7 +261,9 @@ describe("composer image chips", () => {
       modelAcceptsImages: true,
     });
     expect(container.textContent).not.toContain("may not accept images");
-    expect(container.querySelector("button[aria-label='Attach images']")).toBeTruthy();
+    expect(
+      container.querySelector("button[aria-label='Attach images']"),
+    ).toBeTruthy();
   });
 });
 
@@ -492,5 +497,55 @@ describe("composer OS drag and drop", () => {
       path: "/tmp/dropped.png",
       workspace: expect.anything(),
     });
+  });
+});
+
+// A send pi refused (or a queued Remove) lands in the store as
+// rejectedDraft; the composer restores it into the empty editor once.
+describe("composer rejected draft restore", () => {
+  const draft = {
+    text: "second look",
+    images: [{ mediaType: "image/png", data: btoa("chip") }],
+    error: "Agent is currently streaming; specify streamingBehavior",
+  };
+
+  afterEach(() => {
+    usePiStore.setState({ tabs: {} });
+  });
+
+  it("restores the rejected text and chips once and clears the store", async () => {
+    const { container } = renderComposer();
+    usePiStore.setState({
+      tabs: { 7: { rejectedDraft: draft } } as never,
+    });
+    const composer = container.querySelector("[aria-label='pi composer']")!;
+    await waitFor(() => {
+      expect(composer.textContent).toContain("second look");
+    });
+    await waitFor(() => {
+      expect(container.querySelectorAll("img")).toHaveLength(1);
+    });
+    expect(usePiStore.getState().tabs[7]?.rejectedDraft ?? null).toBeNull();
+  });
+
+  it("waits when the editor already holds typed text", async () => {
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "fs_read_file"
+        ? { kind: "text", content: "typed first" }
+        : { kind: "ok" },
+    );
+    const { container } = renderComposer(undefined, { cwd: "/tmp/proj" });
+    const composer = container.querySelector("[aria-label='pi composer']")!;
+    await waitFor(() => {
+      expect(composer.textContent).toContain("typed first");
+    });
+    usePiStore.setState({
+      tabs: { 7: { rejectedDraft: draft } } as never,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(composer.textContent).not.toContain("second look");
+    expect(usePiStore.getState().tabs[7]?.rejectedDraft?.text).toBe(
+      "second look",
+    );
   });
 });

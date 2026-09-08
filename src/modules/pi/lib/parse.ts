@@ -308,13 +308,25 @@ export function toPromptImages(
   }));
 }
 
+/** What pi should do with a prompt sent while a turn is streaming
+ *  (rpc.rs parse_streaming_behavior): "steer" interrupts, "follow-up"
+ *  queues the message to run after the current turn ends. */
+export type PiStreamingBehavior = "follow-up" | "steer";
+
 export function promptLine(
   message: string,
   images?: PiImageAttachment[],
+  streamingBehavior?: PiStreamingBehavior,
 ): string {
   const wire = toPromptImages(images);
-  if (!wire) return JSON.stringify({ type: "prompt", message });
-  return JSON.stringify({ type: "prompt", message, images: wire });
+  if (!wire && !streamingBehavior)
+    return JSON.stringify({ type: "prompt", message });
+  return JSON.stringify({
+    type: "prompt",
+    message,
+    ...(wire ? { images: wire } : {}),
+    ...(streamingBehavior ? { streamingBehavior } : {}),
+  });
 }
 
 export function askResponseLine(

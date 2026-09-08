@@ -369,6 +369,43 @@ describe("protocol hygiene", () => {
   });
 });
 
+describe("promptLine streamingBehavior", () => {
+  const png = { mediaType: "image/png", data: "AAAA" };
+
+  it("adds the field only when given", () => {
+    expect(promptLine("hi")).toBe('{"type":"prompt","message":"hi"}');
+    expect(promptLine("hi", undefined, "follow-up")).toBe(
+      '{"type":"prompt","message":"hi","streamingBehavior":"follow-up"}',
+    );
+    expect(promptLine("hi", undefined, "steer")).toBe(
+      '{"type":"prompt","message":"hi","streamingBehavior":"steer"}',
+    );
+  });
+
+  it("rides alongside images in pi's accepted shape", () => {
+    // pi 0.3.0 reads streamingBehavior (or streaming_behavior) off the
+    // prompt command and accepts "follow-up" | "followUp" | "follow_up" |
+    // "steer" (vendor rpc.rs parse_streaming_behavior).
+    const parsed = JSON.parse(promptLine("hi", [png], "follow-up")) as {
+      type: string;
+      message: string;
+      streamingBehavior: string;
+      images: { type: string; source: Record<string, string> }[];
+    };
+    expect(parsed).toEqual({
+      type: "prompt",
+      message: "hi",
+      images: [
+        {
+          type: "image",
+          source: { type: "base64", mediaType: "image/png", data: "AAAA" },
+        },
+      ],
+      streamingBehavior: "follow-up",
+    });
+  });
+});
+
 describe("promptLine images", () => {
   const png = { mediaType: "image/png", data: "AAAA" };
   const jpeg = { mediaType: "image/jpeg", data: "/9j/4AA" };
