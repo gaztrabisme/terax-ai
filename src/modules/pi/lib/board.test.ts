@@ -11,12 +11,14 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 import {
   DEFAULT_AGENT_BIN,
   STATE_LABELS,
+  allowedActionFor,
   boardActionCommand,
   boardListCommand,
   boardShowCommand,
   effectiveAgentBin,
   gateDots,
   latestGateByName,
+  latestGates,
   loadResolvedAgentBin,
   parseBoard,
   parseTicket,
@@ -124,6 +126,80 @@ describe("parseTicket", () => {
       workpad: null,
       gates: [],
     });
+  });
+});
+
+// K12e: show --json carries the spine authority (harness commit 9df925e); the
+// parse is tolerant when the field is absent so an older binary never throws.
+describe("parseTicket allowedActions", () => {
+  it("parses the harness authority entries with their gate reasons", () => {
+    const ticket = parseTicket(
+      JSON.stringify({
+        id: "aa",
+        kind: "build",
+        status: "todo",
+        allowedActions: [
+          { action: "align", allowed: true, reasons: ["criteria_confirmed"] },
+          { action: "rework", allowed: false, reasons: ["criteria_confirmed"] },
+        ],
+      }),
+    );
+    expect(ticket.allowedActions).toEqual([
+      { action: "align", allowed: true, reasons: ["criteria_confirmed"] },
+      { action: "rework", allowed: false, reasons: ["criteria_confirmed"] },
+    ]);
+  });
+
+  it("tolerates a missing allowedActions field as null (older harness)", () => {
+    const ticket = parseTicket(JSON.stringify({ id: "x", gates: [] }));
+    expect(ticket.allowedActions).toBeNull();
+  });
+
+  it("keeps an empty list for a terminal ticket and drops malformed entries", () => {
+    const ticket = parseTicket(
+      JSON.stringify({
+        allowedActions: [
+          { action: "close", allowed: false, reasons: ["resolved", 7, "wiki-close"] },
+          "junk",
+          3,
+        ],
+      }),
+    );
+    expect(ticket.allowedActions).toEqual([
+      { action: "close", allowed: false, reasons: ["resolved", "wiki-close"] },
+    ]);
+  });
+
+  it("allowedActionFor finds one verb entry or null when not offered", () => {
+    const todo = parseTicket(
+      JSON.stringify({
+        status: "todo",
+        allowedActions: [
+          { action: "align", allowed: true, reasons: ["criteria_confirmed"] },
+          { action: "rework", allowed: false, reasons: ["criteria_confirmed"] },
+        ],
+      }),
+    );
+    expect(allowedActionFor(todo, "align")?.allowed).toBe(true);
+    expect(allowedActionFor(todo, "rework")?.allowed).toBe(false);
+    expect(allowedActionFor(todo, "close")).toBeNull();
+    expect(allowedActionFor(todo, "land")).toBeNull();
+  });
+
+  it("latestGates returns one full report per gate name in first-appearance order", () => {
+    const ticket = parseTicket(
+      JSON.stringify({
+        gates: [
+          { id: 1, gate: "acceptance", passed: false, attempt: 0 },
+          { id: 2, gate: "wiki-close", passed: false, attempt: 1 },
+          { id: 3, gate: "acceptance", passed: true, attempt: 1 },
+        ],
+      }),
+    );
+    expect(latestGates(ticket).map((g) => [g.gate, g.id])).toEqual([
+      ["acceptance", 3],
+      ["wiki-close", 2],
+    ]);
   });
 });
 

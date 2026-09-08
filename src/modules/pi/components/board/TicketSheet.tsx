@@ -13,9 +13,11 @@ import { currentWorkspaceEnv } from "@/modules/workspace";
 import { cn } from "@/lib/utils";
 import {
   DEFAULT_AGENT_BIN,
+  allowedActionFor,
   boardActionCommand,
   boardShowCommand,
   ensureAgentBin,
+  latestGates,
   parseTicket,
   stateLabel,
   type BoardVerb,
@@ -58,9 +60,64 @@ const VERB_UAT_IDS: Record<BoardVerb, string> = {
   rework: "board-rework",
 };
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+type VerbAuthority = { allowed: boolean; reason: string | null };
+
+/**
+ * The previous status heuristic, kept ONLY for a ticket whose harness sent no
+ * allowedActions field at all (older binary): enablement then matches the
+ * pre-K12 sheet instead of disabling everything on missing data.
+ */
+function fallbackEnabled(status: string | null, verb: BoardVerb): boolean {
+  if (!status) return false;
+  switch (verb) {
+    case "align":
+      return status === "align" || status === "todo";
+    case "land":
+      return status === "land" || status === "review";
+    case "close":
+      return status === "done";
+    case "rework":
+      return true;
+  }
+}
+
+/**
+ * Verb enablement from the harness authority (design.md section 3.2): the
+ * allowedActions entry decides, and a disabled verb's reason is the harness
+ * reason list verbatim. A verb the harness did not offer from the current
+ * status (no spine successor entry) is disabled with that named instead.
+ */
+function verbAuthority(ticket: Ticket | null, verb: BoardVerb): VerbAuthority {
+  if (!ticket) return { allowed: false, reason: null };
+  const actions = ticket.allowedActions;
+  if (actions === null) {
+    return { allowed: fallbackEnabled(ticket.status, verb), reason: null };
+  }
+  const label = VERB_LABELS[verb];
+  const entry = allowedActionFor(ticket, verb);
+  if (!entry) {
+    return {
+      allowed: false,
+      reason: `${label} is not offered from ${stateLabel(ticket.status)}`,
+    };
+  }
+  if (entry.allowed) return { allowed: true, reason: null };
+  const reasons =
+    entry.reasons.length > 0 ? entry.reasons.join(", ") : "harness refused";
+  return { allowed: false, reason: `${label} needs ${reasons}` };
+}
+
+function Section({
+  title,
+  uat,
+  children,
+}: {
+  title: string;
+  uat?: string;
+  children: React.ReactNode;
+}) {
   return (
-    <section>
+    <section data-uat={uat}>
       <h3 className="text-[12px] font-medium uppercase tracking-wide text-muted-foreground">
         {title}
       </h3>
@@ -147,6 +204,11 @@ export function TicketSheet({
     };
   }, []);
 
+  const disarm = () => {
+    if (armTimer.current !== null) window.clearTimeout(armTimer.current);
+    setArmed(null);
+  };
+
   const runAction = (verb: BoardVerb) => {
     if (!cwd || !ticketId || running) return;
     if (armed !== verb) {
@@ -156,8 +218,7 @@ export function TicketSheet({
       armTimer.current = window.setTimeout(() => setArmed(null), ARM_RESET_MS);
       return;
     }
-    if (armTimer.current !== null) window.clearTimeout(armTimer.current);
-    setArmed(null);
+    disarm();
     setRunning(true);
     setActionError(null);
     ensureAgentBin(agentBin)
@@ -185,13 +246,18 @@ export function TicketSheet({
       });
   };
 
-  const status = ticket?.status ?? null;
-  const enabled: Record<BoardVerb, boolean> = {
-    align: status === "align" || status === "todo",
-    land: status === "land" || status === "review",
-    close: status === "done",
-    rework: true,
-  };
+  const verbs = Object.keys(VERB_LABELS) as BoardVerb[];
+  const authorities = Object.fromEntries(
+    verbs.map((verb) => [verb, verbAuthority(ticket, verb)]),
+  ) as Record<BoardVerb, VerbAuthority>;
+  // One muted line under the verbs: every disabled verb's harness reason, in
+  // button order.
+  const reasonLine = verbs
+    .map((verb) => (!authorities[verb].allowed ? authorities[verb].reason : null))
+    .filter((reason): reason is string => reason !== null)
+    .join(" · ");
+  const gateRows = ticket ? latestGates(ticket) : [];
+  const wikiGate = gateRows.find((g) => g.gate === "wiki-close") ?? null;
 
   return (
     <Sheet open={ticketId !== null} onOpenChange={onOpenChange}>
@@ -240,7 +306,7 @@ export function TicketSheet({
               <Section title="Acceptance criteria">
                 <SectionText value={ticket.workpad?.criteria ?? null} />
               </Section>
-              <Section title="Validation">
+              <Section title="Validation" uat="ticket-acceptance">
                 <SectionText value={ticket.workpad?.validation ?? null} />
               </Section>
               <Section title="Notes">
@@ -258,13 +324,16 @@ export function TicketSheet({
                 )}
               </Section>
               <Section title="Gates">
-                {ticket.gates.length === 0 ? (
+                {gateRows.length === 0 ? (
                   <p className="text-[14px] text-muted-foreground">None</p>
                 ) : (
                   <ul className="space-y-2">
-                    {ticket.gates.map((gate) => (
+                    {gateRows.map((gate, gi) => (
                       <li
-                        key={gate.id}
+                        key={gate.gate}
+                        data-uat="ticket-gate"
+                        data-uat-key={gate.gate}
+                        data-uat-index={gi}
                         className="border-l-2 border-border pl-2.5"
                       >
                         <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
@@ -291,35 +360,94 @@ export function TicketSheet({
                     ))}
                   </ul>
                 )}
+                <div
+                  data-uat="ticket-wiki-close"
+                  className="mt-2 flex items-center gap-1.5 text-[12px]"
+                >
+                  <span className="text-foreground">wiki-close</span>
+                  {wikiGate ? (
+                    <span
+                      className={cn(
+                        "flex items-center gap-1.5",
+                        wikiGate.passed
+                          ? "text-foreground"
+                          : "text-destructive",
+                      )}
+                    >
+                      <GateDot passed={wikiGate.passed} />
+                      <span>{wikiGate.passed ? "pass" : "fail"}</span>
+                      {wikiGate.created_at ? (
+                        <span className="text-muted-foreground">
+                          &middot; {wikiGate.created_at}
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">
+                      no verdict recorded
+                    </span>
+                  )}
+                </div>
               </Section>
             </>
           )}
         </div>
 
-        <SheetFooter className="flex-row items-center gap-2 border-t border-border/60 px-4 py-3">
+        <SheetFooter className="flex-row items-start gap-2 border-t border-border/60 px-4 py-3">
           {actionError ? (
             <pre className="mb-2 w-full whitespace-pre-wrap rounded bg-accent/40 p-2 font-mono text-[12px] text-destructive">
               {actionError}
             </pre>
           ) : null}
-          <div className="flex w-full flex-wrap gap-2">
-            {(Object.keys(VERB_LABELS) as BoardVerb[]).map((verb) => (
-              <Button
-                key={verb}
-                type="button"
-                size="sm"
-                data-uat={VERB_UAT_IDS[verb]}
-                data-uat-key={verb}
-                variant={armed === verb ? "destructive" : "outline"}
-                disabled={running || !enabled[verb]}
-                onClick={() => runAction(verb)}
-                className="text-[12px]"
-              >
-                {armed === verb
-                  ? `${VERB_LABELS[verb]}: click again`
-                  : VERB_LABELS[verb]}
-              </Button>
-            ))}
+          <div className="w-full">
+            <div className="flex w-full flex-wrap gap-2">
+              {verbs.map((verb) => {
+                const authority = authorities[verb];
+                const disabled = running || !authority.allowed;
+                return (
+                  <Button
+                    key={verb}
+                    type="button"
+                    size="sm"
+                    // The armed verb IS the two-click confirm: the second
+                    // click targets board-confirm (design.md section 3.7).
+                    data-uat={
+                      armed === verb ? "board-confirm" : VERB_UAT_IDS[verb]
+                    }
+                    data-uat-key={verb}
+                    variant={armed === verb ? "destructive" : "outline"}
+                    disabled={disabled}
+                    aria-disabled={disabled || undefined}
+                    title={
+                      disabled && authority.reason ? authority.reason : undefined
+                    }
+                    onClick={() => runAction(verb)}
+                    className="text-[12px]"
+                  >
+                    {armed === verb
+                      ? `${VERB_LABELS[verb]}: click again`
+                      : VERB_LABELS[verb]}
+                  </Button>
+                );
+              })}
+              {armed ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  data-uat="board-cancel"
+                  onClick={disarm}
+                  className="text-[12px]"
+                >
+                  Cancel
+                </Button>
+              ) : null}
+            </div>
+            {reasonLine ? (
+              <p className="mt-2 text-[12px] text-muted-foreground">
+                {reasonLine}
+              </p>
+            ) : null}
           </div>
         </SheetFooter>
       </SheetContent>

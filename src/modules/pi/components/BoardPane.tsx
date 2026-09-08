@@ -43,9 +43,14 @@ export function BoardView({
     agentBin,
     enabled: !data,
   });
-  const { snapshot, error, refresh } = data ?? ownData;
+  const { snapshot, error, failedCommand, refresh } = data ?? ownData;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState<string | null>(null);
+
+  // A failed poll keeps the previous snapshot on screen, marked stale, instead
+  // of dropping the content (design.md section 3.5 row "Board/graph refresh
+  // fails").
+  const stale = Boolean(error && snapshot);
 
   const tickets = snapshot
     ? railTickets(
@@ -54,19 +59,38 @@ export function BoardView({
       )
     : [];
 
+  const errorLine = error ? (
+    <>
+      <span
+        data-uat="board-error"
+        title={error}
+        className="min-w-0 truncate normal-case text-destructive"
+      >
+        Refresh failed: {failedCommand ?? "unknown command"} &middot; log:
+        .pi/logs/board.jsonl
+      </span>
+      {stale ? (
+        <span className="shrink-0 normal-case text-muted-foreground">stale</span>
+      ) : null}
+    </>
+  ) : null;
+
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {!framed && (
         <div className="flex h-7 shrink-0 items-center gap-2 px-2 text-[12px] font-medium uppercase text-muted-foreground">
           <span>board</span>
           <span className="flex-1" />
-          {error ? (
-            <span className="normal-case text-destructive">offline</span>
-          ) : null}
+          {errorLine}
         </div>
       )}
+      {framed && errorLine ? (
+        <div className="flex shrink-0 items-center gap-2 px-2 pt-2 text-[12px]">
+          {errorLine}
+        </div>
+      ) : null}
 
-      {error ? (
+      {error && !snapshot ? (
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
           <div className="text-[14px] text-destructive">Board offline</div>
           <pre className="mt-1 whitespace-pre-wrap font-mono text-[12px] text-muted-foreground">

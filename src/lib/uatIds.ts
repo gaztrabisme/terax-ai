@@ -249,17 +249,14 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
  * Inventory rows whose owner column says K4 but whose control does not exist
  * in this tree. Nothing asserts them; naming them here keeps the audit
  * explicit instead of inventing UI. `command-palette`: the header has no
- * command button. `board-verify`,
- * `board-confirm`, `board-cancel`: the ticket sheet exposes only the
- * align/land/close/rework verbs and its two-click confirmation rides the same
- * verb button. `editor-path`, `editor-save`: the editor pane renders no path
+ * command button. `board-verify`: the ticket sheet
+ * exposes no Verify verb (`board-confirm` and `board-cancel` exist while a
+ * verb is armed, listed as stateful). `editor-path`, `editor-save`: the editor pane renders no path
  * element and no Save button (Mod-S only).
  */
 export const UAT_IDS_K4_ABSENT: { id: string; reason: string }[] = [
   { id: "command-palette", reason: "no header command button exists" },
   { id: "board-verify", reason: "ticket sheet has no Verify verb button" },
-  { id: "board-confirm", reason: "confirmation rides the armed verb button" },
-  { id: "board-cancel", reason: "no separate cancel control in the sheet" },
   { id: "editor-path", reason: "editor pane renders no path element" },
   { id: "editor-save", reason: "editor has no Save button (Mod-S only)" },
 ];

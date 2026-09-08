@@ -60,6 +60,19 @@ export type Gate = {
   created_at: string | null;
 };
 
+/**
+ * One harness authority entry from `show --json` (harness commit 9df925e,
+ * crates/agent/src/main.rs allowed_actions): whether the harness would run the
+ * action NOW, plus every gate name on its path not yet satisfied. A human gate
+ * (the click itself supplies it) leaves allowed true with the reason named; a
+ * machine gate (wiki-close, tests_green, mutation_score) blocks the action.
+ */
+export type AllowedAction = {
+  action: string;
+  allowed: boolean;
+  reasons: string[];
+};
+
 export type Workpad = {
   plan: string | null;
   criteria: string | null;
@@ -80,6 +93,12 @@ export type Ticket = {
   red_gates: number;
   workpad: Workpad | null;
   gates: Gate[];
+  /**
+   * The spine authority the UI renders (design.md section 3.2). Null when the
+   * harness did not send the field at all (older binary); the sheet then falls
+   * back to the previous status heuristic instead of inventing authority.
+   */
+  allowedActions: AllowedAction[] | null;
 };
 
 export type BoardSnapshot = {
@@ -208,6 +227,30 @@ export function gateDots(ticket: Ticket): { gate: string; passed: boolean }[] {
   return dots;
 }
 
+/** Latest full report per gate name, in first-appearance order: one sheet row
+ * per gate carrying its human/machine source, evidence and latest verdict. */
+export function latestGates(ticket: Ticket): Gate[] {
+  const latest = latestGateByName(ticket);
+  const seen = new Set<string>();
+  const rows: Gate[] = [];
+  for (const gate of ticket.gates ?? []) {
+    if (seen.has(gate.gate)) continue;
+    seen.add(gate.gate);
+    const row = latest.get(gate.gate);
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
+/** The authority entry for a verb, or null when the harness did not offer it
+ * from the ticket's current status (not a spine successor). */
+export function allowedActionFor(
+  ticket: Ticket,
+  action: string,
+): AllowedAction | null {
+  return ticket.allowedActions?.find((a) => a.action === action) ?? null;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -257,6 +300,17 @@ export function parseWorkpad(value: unknown): Workpad {
   };
 }
 
+export function parseAllowedAction(value: unknown): AllowedAction {
+  const rec = asRecord(value);
+  return {
+    action: asString(rec.action),
+    allowed: asBoolean(rec.allowed),
+    reasons: Array.isArray(rec.reasons)
+      ? rec.reasons.filter((r): r is string => typeof r === "string")
+      : [],
+  };
+}
+
 export function parseTicketRecord(value: unknown): Ticket {
   const rec = asRecord(value);
   return {
@@ -271,6 +325,15 @@ export function parseTicketRecord(value: unknown): Ticket {
     red_gates: asNumber(rec.red_gates),
     workpad: rec.workpad === undefined ? null : parseWorkpad(rec.workpad),
     gates: Array.isArray(rec.gates) ? rec.gates.map(parseGate) : [],
+    // Tolerant when absent: an older harness sends no authority field and the
+    // sheet falls back instead of disabling everything on missing data.
+    // Entries without an action name carry no authority and are dropped.
+    allowedActions:
+      rec.allowedActions === undefined
+        ? null
+        : Array.isArray(rec.allowedActions)
+          ? rec.allowedActions.map(parseAllowedAction).filter((a) => a.action !== "")
+          : [],
   };
 }
 
