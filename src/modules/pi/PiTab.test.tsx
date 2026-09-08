@@ -29,6 +29,10 @@ import { PiStack, PiTab } from "./PiTab";
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("@/modules/settings/store", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/modules/settings/store")>(),
+  recordProjectOpen: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({
     onDragDropEvent: () => Promise.resolve(() => {}),
