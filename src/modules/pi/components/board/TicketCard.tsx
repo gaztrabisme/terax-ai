@@ -6,14 +6,19 @@ type Props = {
   ticket: Ticket;
   /** Dense form used by the rail list. */
   dense?: boolean;
+  /** Zero-based position of the ticket in its list. */
+  uatIndex?: number;
   onOpen: (id: string) => void;
 };
 
-export function TicketCard({ ticket, dense = false, onOpen }: Props) {
+export function TicketCard({ ticket, dense = false, uatIndex, onOpen }: Props) {
   const dots = gateDots(ticket);
   return (
     <button
       type="button"
+      data-uat="board-ticket"
+      data-uat-key={ticket.id}
+      data-uat-index={uatIndex}
       onClick={() => onOpen(ticket.id)}
       className={cn(
         "block w-full rounded-md border border-border/60 bg-card text-left transition-colors hover:bg-accent/60",

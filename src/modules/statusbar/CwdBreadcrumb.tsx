@@ -53,7 +53,7 @@ export function CwdBreadcrumb({ cwd, filePath, home, onCd }: Props) {
     const first = segments[0];
     const middle = segments.slice(1);
     return (
-      <Breadcrumb>
+      <Breadcrumb data-uat="cwd-breadcrumb">
         <BreadcrumbList className="gap-1 text-xs sm:gap-1.5">
           {first ? (
             <BreadcrumbSegment
@@ -98,7 +98,7 @@ export function CwdBreadcrumb({ cwd, filePath, home, onCd }: Props) {
   const firstParent = parents[0];
   const middleParents = parents.slice(1);
   return (
-    <Breadcrumb>
+    <Breadcrumb data-uat="cwd-breadcrumb">
       <BreadcrumbList className="gap-1 text-xs sm:gap-1.5">
         {firstParent ? (
           <BreadcrumbSegment

@@ -21,6 +21,8 @@ export function AgentTranscriptStack({ tabs, activeId }: StackProps) {
         <div
           key={t.id}
           aria-hidden={t.id !== activeId}
+          data-uat="child-tab"
+          data-uat-key={String(t.id)}
           className={cn(
             "absolute inset-0",
             t.id !== activeId && "invisible pointer-events-none",
@@ -38,7 +40,11 @@ export function AgentTranscriptStack({ tabs, activeId }: StackProps) {
 export function AgentTranscriptPane({ path }: { path: string }) {
   const state = useChildStore((s) => s.children[path]);
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border/60 bg-card">
+    <div
+      data-uat="child-transcript"
+      data-uat-key={path}
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border/60 bg-card"
+    >
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-xs text-muted-foreground">
         <span className="font-medium text-foreground">pi child</span>
         <span className="truncate font-mono text-[10px]">{path}</span>

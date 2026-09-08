@@ -298,6 +298,8 @@ export function PiTab({
       <ResizablePanel id={`pi-chat-${tabId}`} minSize="20%">
         <div
           data-pi-chat={tabId}
+          data-uat="pi-tab"
+          data-uat-key={String(tabId)}
           className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border/60"
         >
           <ChatPane tabId={tabId} cwd={cwd} onOpenChild={onOpenChild} />

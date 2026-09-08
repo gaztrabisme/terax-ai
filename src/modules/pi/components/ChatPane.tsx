@@ -163,7 +163,10 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
       data-pi-smol={roles?.smol || undefined}
       className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-card"
     >
-      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-xs text-muted-foreground">
+      <div
+        data-uat="session-strip"
+        className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-xs text-muted-foreground"
+      >
         <span
           className={cn(
             "size-1.5 shrink-0 rounded-full",
@@ -177,21 +180,24 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
           )}
         />
         <span className="font-medium text-foreground">pi</span>
-        <span>
+        <span data-uat="session-status">
           {!exited && retry
             ? retryPendingLabel(retry)
             : statusLabel(status, exited, entry?.exitCode ?? null)}
         </span>
         {state && state.turnTokens > 0 ? (
-          <span>{state.turnTokens.toLocaleString()} tok</span>
+          <span data-uat="turn-tokens">
+            {state.turnTokens.toLocaleString()} tok
+          </span>
         ) : null}
         {state && state.sessionCost > 0 ? (
-          <span>{formatCost(state.sessionCost)}</span>
+          <span data-uat="session-cost">{formatCost(state.sessionCost)}</span>
         ) : null}
         <span className="flex-1" />
         {showStop ? (
           <button
             type="button"
+            data-uat="stop-button"
             onClick={() => void kill(tabId)}
             className={headerBtn}
           >
@@ -199,7 +205,12 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
           </button>
         ) : null}
         {showNew ? (
-          <button type="button" onClick={newSession} className={headerBtn}>
+          <button
+            type="button"
+            data-uat="new-session"
+            onClick={newSession}
+            className={headerBtn}
+          >
             New session
           </button>
         ) : null}

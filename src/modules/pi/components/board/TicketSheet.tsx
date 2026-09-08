@@ -50,6 +50,14 @@ const VERB_LABELS: Record<BoardVerb, string> = {
   rework: "Rework",
 };
 
+/** Canonical UAT id per verb, spelled out so each id is greppable. */
+const VERB_UAT_IDS: Record<BoardVerb, string> = {
+  align: "board-align",
+  land: "board-land",
+  close: "board-close",
+  rework: "board-rework",
+};
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section>
@@ -189,6 +197,8 @@ export function TicketSheet({
     <Sheet open={ticketId !== null} onOpenChange={onOpenChange}>
       <SheetContent
         side="right"
+        data-uat="ticket-sheet"
+        data-uat-key={ticketId ?? undefined}
         className="flex w-[480px] flex-col gap-0 p-0 sm:max-w-[480px]"
       >
         <SheetHeader className="gap-1 border-b border-border/60 px-4 py-3">
@@ -298,6 +308,8 @@ export function TicketSheet({
                 key={verb}
                 type="button"
                 size="sm"
+                data-uat={VERB_UAT_IDS[verb]}
+                data-uat-key={verb}
                 variant={armed === verb ? "destructive" : "outline"}
                 disabled={running || !enabled[verb]}
                 onClick={() => runAction(verb)}

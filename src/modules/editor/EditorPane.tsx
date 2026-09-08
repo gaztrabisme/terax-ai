@@ -5,7 +5,7 @@ import {
   SearchQuery,
   setSearchQuery,
 } from "@codemirror/search";
-import { keymap } from "@codemirror/view";
+import { EditorView, keymap } from "@codemirror/view";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { EDITOR_THEME_EXT } from "./lib/themes";
@@ -99,6 +99,10 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         })),
         ...buildSharedExtensions(),
         languageCompartment.of([]),
+        EditorView.contentAttributes.of({
+          "aria-label": "Editor input",
+          "data-uat": "editor-input",
+        }),
         keymap.of([
           {
             key: "Mod-s",

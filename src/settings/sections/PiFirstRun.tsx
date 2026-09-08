@@ -406,7 +406,7 @@ export function PiFirstRun({
         : STATUS_STYLES.ok;
 
   return (
-    <div className="flex flex-col gap-2">
+    <div data-uat="pi-check-panel" className="flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <HugeiconsIcon
@@ -442,6 +442,7 @@ export function PiFirstRun({
           variant="outline"
           size="sm"
           className="h-7 shrink-0 text-[12px]"
+          data-uat="pi-first-run-check"
           disabled={loading}
           onClick={() => void runCheck()}
         >
@@ -493,7 +494,11 @@ function FirstRunRow({
 }) {
   const style = STATUS_STYLES[row.status];
   return (
-    <div className="flex items-center gap-2 border-b border-border/40 px-3 py-1.5 last:border-b-0">
+    <div
+      data-uat="check-row"
+      data-uat-key={row.id}
+      className="flex items-center gap-2 border-b border-border/40 px-3 py-1.5 last:border-b-0"
+    >
       <HugeiconsIcon
         icon={style.icon}
         size={14}

@@ -90,11 +90,13 @@ export function EditorStack({
         return (
           <div
             key={t.id}
+            aria-hidden={!visible}
+            data-uat="editor-tab"
+            data-uat-key={String(t.id)}
             className={cn(
               "absolute inset-0",
               !visible && "invisible pointer-events-none",
             )}
-            aria-hidden={!visible}
           >
             <div className="h-full overflow-hidden rounded-md border border-border/60 bg-background">
               <EditorPane

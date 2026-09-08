@@ -186,6 +186,7 @@ export function GeneralSection() {
           <Switch
             checked={terminalComposer}
             onCheckedChange={(v) => void setTerminalComposer(v)}
+            data-uat="terminal-composer-default"
           />
         </SettingRow>
         <SettingRow

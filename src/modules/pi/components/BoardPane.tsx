@@ -141,11 +141,12 @@ export function BoardView({
                 No tickets
               </div>
             ) : (
-              tickets.map((ticket) => (
+              tickets.map((ticket, ti) => (
                 <TicketCard
                   key={ticket.id}
                   ticket={ticket}
                   dense
+                  uatIndex={ti}
                   onOpen={setSelectedId}
                 />
               ))

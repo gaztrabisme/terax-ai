@@ -177,6 +177,20 @@ function createBlockDecorations(
   };
 }
 
+/** Canonical UAT id of a closed block's status dot; a running block has none. */
+function exitDotUatId(status: Block["status"]): string | null {
+  switch (status) {
+    case "ok":
+      return "exit-dot-ok";
+    case "error":
+      return "exit-dot-fail";
+    case "unknown":
+      return "exit-dot-unknown";
+    default:
+      return null;
+  }
+}
+
 /** Dot plus hover action row, inside the one-cell left decoration element. */
 function renderDot(
   el: HTMLElement,
@@ -188,6 +202,12 @@ function renderDot(
 ): void {
   // Never overwrite className: xterm positions the element through it.
   el.classList.add("terax-block");
+  el.setAttribute("data-uat", "terminal-block");
+  el.setAttribute("data-uat-key", String(block.id));
+  el.setAttribute(
+    "data-uat-index",
+    String(Math.max(0, store.getBlocks().indexOf(block))),
+  );
   let dot = el.querySelector<HTMLDivElement>(":scope > .terax-block-dot");
   if (!dot) {
     dot = document.createElement("div");
@@ -195,6 +215,9 @@ function renderDot(
     el.appendChild(dot);
   }
   dot.className = `terax-block-dot is-${block.status}`;
+  const exitDotId = exitDotUatId(block.status);
+  if (exitDotId) dot.setAttribute("data-uat", exitDotId);
+  else dot.removeAttribute("data-uat");
   // Only "unknown" carries a title: ok and error are self-evident.
   if (block.status === "unknown") dot.title = "exit status unknown";
   else dot.removeAttribute("title");
@@ -220,41 +243,56 @@ function buildActionRow(
   const term = slot.term;
 
   row.appendChild(
-    makeButton("Copy", () => {
-      if (!liveMarker(block.marker)) return;
-      const buf = term.buffer.active;
-      const start = block.marker.line;
-      const end = nextBlockStartLine(store.getBlocks(), block, buf.length);
-      void navigator.clipboard
-        .writeText(extractBlockText((y) => buf.getLine(y), start, end))
-        .catch(() => {});
-    }),
+    makeButton(
+      "Copy",
+      () => {
+        if (!liveMarker(block.marker)) return;
+        const buf = term.buffer.active;
+        const start = block.marker.line;
+        const end = nextBlockStartLine(store.getBlocks(), block, buf.length);
+        void navigator.clipboard
+          .writeText(extractBlockText((y) => buf.getLine(y), start, end))
+          .catch(() => {});
+      },
+      "block-copy",
+      block.id,
+    ),
   );
 
   row.appendChild(
-    makeButton("Copy ANSI", () => {
-      if (!liveMarker(block.marker)) return;
-      const start = block.marker.line;
-      const end = Math.max(
-        start,
-        nextBlockStartLine(store.getBlocks(), block, term.buffer.active.length) - 1,
-      );
-      try {
-        const text = slot.serializeAddon.serialize({
-          range: { start, end },
-        });
-        void navigator.clipboard.writeText(text).catch(() => {});
-      } catch (e) {
-        console.warn("[terax] block serialize failed:", e);
-      }
-    }),
+    makeButton(
+      "Copy ANSI",
+      () => {
+        if (!liveMarker(block.marker)) return;
+        const start = block.marker.line;
+        const end = Math.max(
+          start,
+          nextBlockStartLine(store.getBlocks(), block, term.buffer.active.length) - 1,
+        );
+        try {
+          const text = slot.serializeAddon.serialize({
+            range: { start, end },
+          });
+          void navigator.clipboard.writeText(text).catch(() => {});
+        } catch (e) {
+          console.warn("[terax] block serialize failed:", e);
+        }
+      },
+      "block-copy-ansi",
+      block.id,
+    ),
   );
 
   if (block.command) {
     row.appendChild(
-      makeButton("Rerun", () => {
-        writeToSession(leafId, `${block.command}\r`);
-      }),
+      makeButton(
+        "Rerun",
+        () => {
+          writeToSession(leafId, `${block.command}\r`);
+        },
+        "block-rerun",
+        block.id,
+      ),
     );
   }
   return row;
@@ -267,11 +305,20 @@ function renderDuration(el: HTMLElement, block: Block): void {
   el.textContent = duration === null ? "" : formatDuration(duration);
 }
 
-function makeButton(label: string, onClick: () => void): HTMLButtonElement {
+function makeButton(
+  label: string,
+  onClick: () => void,
+  uatId?: string,
+  uatKey?: number,
+): HTMLButtonElement {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "terax-block-btn";
   btn.textContent = label;
+  if (uatId) {
+    btn.setAttribute("data-uat", uatId);
+    if (uatKey !== undefined) btn.setAttribute("data-uat-key", String(uatKey));
+  }
   // Keep keyboard focus in the emulator when a block action is clicked.
   btn.addEventListener("mousedown", (e) => e.preventDefault());
   btn.addEventListener("click", (e) => {

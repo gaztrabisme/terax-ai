@@ -81,6 +81,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
 
     return (
       <div
+        data-uat="terminal-tab"
+        data-uat-key={String(leafId)}
         className="zoom-exempt group relative flex h-full w-full flex-col"
         style={{
           visibility: visible ? "visible" : "hidden",
@@ -88,7 +90,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
         }}
       >
         {/* The pooled slot host is appended into this inner node. */}
-        <div ref={containerRef} className="relative min-h-0 w-full flex-1" />
+        <div
+          ref={containerRef}
+          data-uat="terminal-emulator"
+          data-uat-key={String(leafId)}
+          className="relative min-h-0 w-full flex-1"
+        />
         {composerEnabled ? (
           <TerminalComposer
             leafId={leafId}
@@ -100,6 +107,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
         <BlockChrome leafId={leafId} store={blockStore} />
         <button
           type="button"
+          data-uat="composer-toggle"
           onClick={() => void setTerminalComposer(!composerEnabled)}
           aria-pressed={composerEnabled}
           title={composerEnabled ? "Hide composer" : "Show composer"}

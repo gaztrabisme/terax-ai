@@ -476,6 +476,7 @@ export function Composer({
           "max-h-40 min-h-16 w-full overflow-y-auto rounded-md border border-border/60 bg-background p-2 text-[14px] outline-none focus:ring-1 focus:ring-ring",
         "data-placeholder": placeholder,
         "aria-label": "pi composer",
+        "data-uat": "composer-input",
       },
     },
   });
@@ -707,6 +708,7 @@ export function Composer({
           type="button"
           aria-label="Attach images"
           title="Attach images"
+          data-uat="attach-images"
           disabled={disabled}
           onClick={() => void pickImages()}
           className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border/60 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
@@ -715,6 +717,7 @@ export function Composer({
         </button>
         <span
           ref={chipRef}
+          data-uat="model-chip"
           className="rounded-md border border-border/60 px-2 py-0.5 text-xs text-muted-foreground"
         >
           {model ?? "model unset"}
@@ -723,6 +726,7 @@ export function Composer({
         <span className="flex-1" />
         <button
           type="button"
+          data-uat="send-button"
           onClick={() => performSubmitRef.current()}
           disabled={disabled}
           className="h-7 shrink-0 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"

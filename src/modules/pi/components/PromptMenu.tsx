@@ -33,6 +33,7 @@ export function PromptMenu({
     <div
       role="listbox"
       aria-label="Prompt templates"
+      data-uat="prompt-menu"
       className="absolute bottom-full left-0 right-0 z-20 mb-1 max-h-56 overflow-y-auto rounded-md border border-border/60 bg-popover p-1 shadow-md"
     >
       {filtered.length === 0 ? (

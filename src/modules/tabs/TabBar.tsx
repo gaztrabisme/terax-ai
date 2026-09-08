@@ -97,6 +97,7 @@ export function TabBar({
     <div
       ref={scrollRef}
       data-tauri-drag-region
+      data-uat="tab-bar"
       className="min-w-0 shrink overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
     >
       <div className="flex w-max items-center gap-0.5">
@@ -105,7 +106,7 @@ export function TabBar({
           onValueChange={(v) => onSelect(Number(v))}
         >
           <TabsList className="h-7 w-max gap-0.5 bg-transparent p-0">
-            {tabs.map((t) => {
+            {tabs.map((t, ti) => {
               const isPreview = t.kind === "editor" && (t as EditorTab).preview;
 
               // While renaming, render a non-button cell so the <input> is not
@@ -139,6 +140,9 @@ export function TabBar({
                   key={t.id}
                   value={String(t.id)}
                   data-tab-id={t.id}
+                  data-uat={t.id === activeId ? "tab-active" : "tab"}
+                  data-uat-key={String(t.id)}
+                  data-uat-index={ti}
                   onDoubleClick={() => isPreview && onPin(t.id)}
                   onAuxClick={(e) => {
                     if (e.button === 1 && tabs.length > 1) {
@@ -238,6 +242,8 @@ export function TabBar({
               size="icon"
               className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
               title="New tab"
+              aria-label="New tab"
+              data-uat="new-tab"
             >
               <HugeiconsIcon icon={PlusSignIcon} size={14} strokeWidth={2} />
             </Button>
@@ -295,6 +301,7 @@ export function TabBar({
           size="icon"
           className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
           title={`New pi session (${fmtShortcut(MOD_KEY, SHIFT_KEY, "P")})`}
+          data-uat="new-pi-session"
           onClick={onNewPiSession}
         >
           <HugeiconsIcon icon={AiChat02Icon} size={14} strokeWidth={2} />

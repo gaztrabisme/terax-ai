@@ -110,6 +110,7 @@ export function Header({
       className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
       onClick={onOpenSettings}
       title="Settings"
+      data-uat="settings-button"
     >
       <HugeiconsIcon icon={Settings01Icon} size={15} strokeWidth={1.75} />
     </Button>
@@ -119,6 +120,7 @@ export function Header({
     <div
       ref={rootRef}
       data-tauri-drag-region
+      data-uat="header"
       className={`flex h-10 shrink-0 items-center gap-2 border-b border-border/60 bg-card select-none ${
         IS_MAC ? "pr-2 pl-20" : "pr-0 pl-2"
       }`}
@@ -127,6 +129,8 @@ export function Header({
         <Button
           onClick={onToggleSidebar}
           title="Toggle sidebar"
+          aria-label="Toggle sidebar"
+          data-uat="sidebar-toggle"
           variant="ghost"
           size="icon-sm"
           className="shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"

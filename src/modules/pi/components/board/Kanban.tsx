@@ -15,11 +15,14 @@ export function Kanban({ snapshot, onOpen }: Props) {
   return (
     <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden">
       <div className="flex h-full min-h-0 gap-2 p-2">
-        {snapshot.states.map((state) => {
+        {snapshot.states.map((state, ci) => {
           const tickets = snapshot.tickets.filter((t) => t.status === state);
           return (
             <div
               key={state}
+              data-uat="board-columns"
+              data-uat-key={state}
+              data-uat-index={ci}
               className="flex h-full min-h-0 w-[240px] shrink-0 flex-col rounded-md border border-border/60 bg-card/50"
             >
               <div className="flex shrink-0 items-center justify-between px-2 py-1.5 text-[12px] font-medium text-muted-foreground">
@@ -32,10 +35,11 @@ export function Kanban({ snapshot, onOpen }: Props) {
                     No tickets
                   </div>
                 ) : (
-                  tickets.map((ticket) => (
+                  tickets.map((ticket, ti) => (
                     <TicketCard
                       key={ticket.id}
                       ticket={ticket}
+                      uatIndex={ti}
                       onOpen={onOpen}
                     />
                   ))

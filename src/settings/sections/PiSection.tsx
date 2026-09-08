@@ -918,7 +918,7 @@ export function PiSection() {
           ) : null}
         </div>
         <div className="max-h-96 overflow-y-auto rounded-lg border border-border/60">
-          <table className="w-full border-collapse">
+          <table data-uat="provider-table" className="w-full border-collapse">
             <thead>
               <tr className="border-b border-border/60 text-left text-[12px] text-muted-foreground">
                 <th className="px-3 py-1.5 font-medium">provider</th>
@@ -1002,6 +1002,8 @@ export function PiSection() {
             </span>
             <Input
               type="password"
+              data-uat="settings-secret"
+              data-uat-key="omlx"
               value={omlxDraft}
               onChange={(e) =>
                 setSecretDrafts((d) => ({ ...d, omlx: e.target.value }))
@@ -1236,6 +1238,8 @@ function ProviderRow({
               <Input
                 autoFocus
                 type="password"
+                data-uat="settings-secret"
+                data-uat-key={row.id}
                 value={keyDraft}
                 onChange={(e) => setKeyDraft(e.target.value)}
                 onKeyDown={(e) => {
@@ -1295,6 +1299,8 @@ function CloudKeyRow({
       </span>
       <Input
         type="password"
+        data-uat="settings-secret"
+        data-uat-key={provider.id}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {

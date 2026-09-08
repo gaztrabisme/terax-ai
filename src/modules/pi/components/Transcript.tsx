@@ -143,6 +143,9 @@ function AttachmentActions({
         return (
           <div
             key={`${attachment.path ?? "failed"}-${i}`}
+            data-uat="attachment-chip"
+            data-uat-key={attachment.path ?? `failed-${i}`}
+            data-uat-index={i}
             className={cn(
               "flex max-w-full flex-wrap items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 text-xs",
               attachment.error ? "text-destructive" : "text-muted-foreground",
@@ -293,7 +296,10 @@ export function formatCost(cost: number): string {
 
 function ErrorCard({ block }: { block: PiErrorBlock }) {
   return (
-    <div className="flex max-w-[72ch] items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+    <div
+      data-uat="error-card"
+      className="flex max-w-[72ch] items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[13px] text-destructive"
+    >
       <HugeiconsIcon
         icon={AlertCircleIcon}
         size={14}
@@ -321,7 +327,10 @@ function RetryCard({ block }: { block: PiRetryBlock }) {
           ? `retry ${block.attempt} failed`
           : `retry ${block.attempt}`;
   return (
-    <div className="flex max-w-[72ch] items-start gap-2 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-[13px] text-muted-foreground">
+    <div
+      data-uat="retry-card"
+      className="flex max-w-[72ch] items-start gap-2 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-[13px] text-muted-foreground"
+    >
       <HugeiconsIcon
         icon={Refresh01Icon}
         size={14}
@@ -395,7 +404,11 @@ function ChildCard({
 }) {
   const path = childTranscriptPath(block, cwd);
   return (
-    <div className="flex items-center gap-2 rounded-md border border-border/60 px-2 py-1.5">
+    <div
+      data-uat="child-card"
+      data-uat-key={block.toolCallId}
+      className="flex items-center gap-2 rounded-md border border-border/60 px-2 py-1.5"
+    >
       <HugeiconsIcon
         icon={BotIcon}
         size={14}
@@ -413,6 +426,7 @@ function ChildCard({
       {path && onOpenChild ? (
         <button
           type="button"
+          data-uat="open-transcript"
           onClick={() => onOpenChild(path)}
           className="shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-xs hover:bg-accent hover:text-foreground"
         >
@@ -442,13 +456,17 @@ function ActivityFold({
     <div className="w-full">
       <button
         type="button"
+        data-uat="turn-fold"
+        data-uat-key={turn.key}
         onClick={onToggle}
         className="group flex w-full items-center gap-1.5 rounded-md py-0.5 text-left text-xs text-muted-foreground hover:text-foreground"
       >
         {turn.status === "streaming" ? (
           <Shimmer duration={1.4}>{streamingLabel(turn)}</Shimmer>
         ) : (
-          <span>{workedLabel(turn, usage)}</span>
+          <span data-uat="usage-footer" data-uat-key={turn.key}>
+            {workedLabel(turn, usage)}
+          </span>
         )}
         <HugeiconsIcon
           icon={ArrowDown01Icon}
@@ -543,8 +561,8 @@ function AnswerActions({
   const btn =
     "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground";
   return (
-    <div className="flex items-center gap-1">
-      <button type="button" onClick={copyRendered} className={btn}>
+    <div data-uat="answer-actions" data-uat-key={turn.key} className="flex items-center gap-1">
+      <button type="button" data-uat="copy" onClick={copyRendered} className={btn}>
         <HugeiconsIcon
           icon={copied ? CheckmarkCircle01Icon : CopyIcon}
           size={12}
@@ -552,7 +570,7 @@ function AnswerActions({
         />
         Copy
       </button>
-      <button type="button" onClick={copyMarkdown} className={btn}>
+      <button type="button" data-uat="copy-markdown" onClick={copyMarkdown} className={btn}>
         <HugeiconsIcon
           icon={copied ? CheckmarkCircle01Icon : CopyIcon}
           size={12}
@@ -561,7 +579,7 @@ function AnswerActions({
         Copy markdown
       </button>
       {cwd ? (
-        <button type="button" onClick={openInEditor} className={btn}>
+        <button type="button" data-uat="open-in-editor" onClick={openInEditor} className={btn}>
           <HugeiconsIcon icon={FileEditIcon} size={12} strokeWidth={1.75} />
           Open in editor
         </button>
@@ -570,6 +588,9 @@ function AnswerActions({
         <button
           key={`${artifact.kind}-${i}`}
           type="button"
+          data-uat="open-artifact"
+          data-uat-key={`${turn.key}/artifact-${i}`}
+          data-uat-index={i}
           title={artifact.title}
           onClick={() => window.dispatchEvent(openArtifactEvent(turn.index, i))}
           className={btn}
@@ -618,10 +639,18 @@ function TurnView({
     (images?.length ?? 0) > 0 ||
     turn.savedAttachments.length > 0;
   return (
-    <div className="flex flex-col gap-2">
+    <div
+      data-uat="pi-turn"
+      data-uat-key={turn.key}
+      data-uat-index={turn.index}
+      className="flex flex-col gap-2"
+    >
       {hasUserContent ? (
         <div className="flex justify-end">
-          <div className="max-w-[65%] rounded-md bg-muted/70 px-3.5 py-2 text-[14px] leading-relaxed whitespace-pre-wrap text-foreground">
+          <div
+            data-uat="turn-user"
+            className="max-w-[65%] rounded-md bg-muted/70 px-3.5 py-2 text-[14px] leading-relaxed whitespace-pre-wrap text-foreground"
+          >
             {images && images.length > 0 ? (
               <div className="mb-2 flex flex-wrap justify-end gap-1.5">
                 {images.map((img, i) => (
@@ -663,7 +692,7 @@ function TurnView({
         />
       ))}
       {turn.answer ? (
-        <div className="max-w-[72ch]">
+        <div data-uat="answer-body" className="max-w-[72ch]">
           <MessageResponse
             streaming={turn.status === "streaming"}
             className="text-[14px] leading-relaxed text-foreground"
@@ -710,7 +739,10 @@ export function Transcript({
 
   if (turns.length === 0 && cards.size === 0) {
     return (
-      <div className="min-h-0 flex-1 select-text overflow-y-auto">
+      <div
+        data-uat="transcript"
+        className="min-h-0 flex-1 select-text overflow-y-auto"
+      >
         <ConversationEmptyState
           title={basename(cwd) ?? "pi"}
           description={emptyHint}
@@ -720,7 +752,10 @@ export function Transcript({
   }
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col select-text">
+    <div
+      data-uat="transcript"
+      className="relative flex min-h-0 flex-1 flex-col select-text"
+    >
       <Conversation className="min-h-0 flex-1">
         <ConversationContent className="gap-6 p-4">
           {turns.map((turn, i) => (

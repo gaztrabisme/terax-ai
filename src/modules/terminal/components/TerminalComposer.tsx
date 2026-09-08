@@ -343,6 +343,7 @@ export function TerminalComposer({
     <div
       ref={hostRef}
       data-terax-composer=""
+      data-uat="terminal-composer"
       aria-hidden={hidden}
       aria-label="terminal composer"
       className={`shrink-0 border-t border-border/60 bg-background/95 ${

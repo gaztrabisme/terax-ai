@@ -112,7 +112,11 @@ export function ToolStep({ block, defaultOpen = false }: ToolRowProps) {
   const Icon = toolFamilyIcon(block.toolName);
   const PanelRenderer = panelForTool(block.toolName)?.renderer;
   return (
-    <div className="rounded-md border border-border/60">
+    <div
+      data-uat="tool-row"
+      data-uat-key={block.toolCallId}
+      className="rounded-md border border-border/60"
+    >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}

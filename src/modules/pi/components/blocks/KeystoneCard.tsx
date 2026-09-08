@@ -25,13 +25,21 @@ export function recommendedAnswers(block: PiAskBlock): PiAskAnswer[] {
 export function KeystoneCard({ block, onAnswer, onDismiss }: Props) {
   if (block.state !== "pending") {
     return (
-      <div className="rounded-md border border-border/60 rounded-md px-2 py-1 text-xs text-muted-foreground">
+      <div
+        data-uat="keystone-card"
+        data-uat-key={block.requestId}
+        className="rounded-md border border-border/60 rounded-md px-2 py-1 text-xs text-muted-foreground"
+      >
         ask {block.state}
       </div>
     );
   }
   return (
-    <div className="space-y-1.5 rounded-md border border-yellow-500/40 bg-yellow-500/5 p-2">
+    <div
+      data-uat="keystone-card"
+      data-uat-key={block.requestId}
+      className="space-y-1.5 rounded-md border border-yellow-500/40 bg-yellow-500/5 p-2"
+    >
       {block.questions.map((q, qi) => {
         const questionId = effectiveQuestionId(q, qi);
         return (
@@ -45,6 +53,9 @@ export function KeystoneCard({ block, onAnswer, onDismiss }: Props) {
                 <button
                   key={opt.label}
                   type="button"
+                  data-uat="keystone-option"
+                  data-uat-key={`${questionId}:${opt.label}`}
+                  data-uat-index={oi}
                   onClick={() =>
                     onAnswer([{ questionId, selected: [opt.label] }])
                   }
@@ -64,6 +75,7 @@ export function KeystoneCard({ block, onAnswer, onDismiss }: Props) {
       <div className="flex gap-1.5">
         <button
           type="button"
+          data-uat="keystone-approve"
           onClick={() => onAnswer(recommendedAnswers(block))}
           className="rounded-md bg-primary px-2 py-0.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
         >
@@ -71,6 +83,7 @@ export function KeystoneCard({ block, onAnswer, onDismiss }: Props) {
         </button>
         <button
           type="button"
+          data-uat="keystone-reject"
           onClick={onDismiss}
           className="rounded-md px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
         >

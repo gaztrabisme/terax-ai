@@ -176,6 +176,7 @@ export function ArtifactPane({ doc, cwd }: Props) {
         {scriptsAllowed ? (
           <iframe
             title={doc.title}
+            data-uat="artifact-frame"
             src={htmlDataUrl(viewerDocument(doc))}
             sandbox={ARTIFACT_SANDBOX_SCRIPTS}
             className="h-full w-full border-0"
@@ -183,6 +184,7 @@ export function ArtifactPane({ doc, cwd }: Props) {
         ) : (
           <iframe
             title={doc.title}
+            data-uat="artifact-frame"
             srcDoc={viewerDocument(doc)}
             sandbox={ARTIFACT_SANDBOX}
             className="h-full w-full border-0"

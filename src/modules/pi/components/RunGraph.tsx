@@ -115,6 +115,14 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph]);
 
+  // Zero-based position of each child node within the child collection; the
+  // orchestrator ("parent") is the singleton graph-node-orchestrator target.
+  const childIndexById = new Map(
+    graph.nodes
+      .filter((n) => n.id !== "parent")
+      .map((n, i) => [n.id, i] as const),
+  );
+
   const flowNodes: Node[] = useMemo(
     () =>
       graph.nodes.map((n) => ({
@@ -122,7 +130,16 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
         position: positions[n.id] ?? { x: 0, y: 0 },
         data: {
           label: (
-            <div className="text-left">
+            <div
+              className="text-left"
+              data-uat={
+                n.id === "parent"
+                  ? "graph-node-orchestrator"
+                  : "graph-node-child"
+              }
+              data-uat-key={n.id}
+              data-uat-index={n.id === "parent" ? undefined : childIndexById.get(n.id)}
+            >
               <div className="flex items-center gap-1.5 text-xs font-medium">
                 <span
                   className="inline-block size-2 rounded-full"

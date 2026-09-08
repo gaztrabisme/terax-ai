@@ -168,6 +168,11 @@ export function SessionSearch({ tabId, cwd }: { tabId: number; cwd?: string }) {
   const input =
     "w-full rounded-md border border-border/60 bg-transparent px-2 py-1 text-xs outline-hidden placeholder:text-muted-foreground/60 focus-visible:border-ring";
 
+  // Zero-based position in the rendered result list, shared by the grouped
+  // hit rows and the flat session rows; JSX builds in order, so a counter
+  // taken at render time is the row's collection index.
+  let sessionRowIndex = 0;
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-1.5 p-2">
       <div className="relative shrink-0">
@@ -183,6 +188,7 @@ export function SessionSearch({ tabId, cwd }: { tabId: number; cwd?: string }) {
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search sessions"
           aria-label="Search pi sessions"
+          data-uat="sessions-search"
           className={`${input} ps-7`}
         />
       </div>
@@ -196,7 +202,7 @@ export function SessionSearch({ tabId, cwd }: { tabId: number; cwd?: string }) {
           Open the tab in a project directory to list its sessions.
         </p>
       ) : null}
-      <div className="min-h-0 flex-1 overflow-y-auto text-xs">
+      <div data-uat="sessions-list" className="min-h-0 flex-1 overflow-y-auto text-xs">
         {hits !== null
           ? groupHits(hits).map(([path, group]) => (
               <div key={path} className="mb-2">
@@ -207,6 +213,9 @@ export function SessionSearch({ tabId, cwd }: { tabId: number; cwd?: string }) {
                   <button
                     key={`${path}-${i}`}
                     type="button"
+                    data-uat="session-row"
+                    data-uat-key={`${path}-${i}`}
+                    data-uat-index={sessionRowIndex++}
                     onClick={() => openHit(hit)}
                     className="block w-full rounded-md px-1 py-0.5 text-left hover:bg-accent hover:text-foreground"
                   >
@@ -227,6 +236,9 @@ export function SessionSearch({ tabId, cwd }: { tabId: number; cwd?: string }) {
               <button
                 key={session.path}
                 type="button"
+                data-uat="session-row"
+                data-uat-key={session.path}
+                data-uat-index={sessionRowIndex++}
                 onClick={() => openSummary(session)}
                 className="block w-full rounded-md px-1 py-1 text-left hover:bg-accent hover:text-foreground"
               >
