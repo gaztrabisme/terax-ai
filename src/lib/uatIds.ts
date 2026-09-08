@@ -46,45 +46,77 @@ export const UAT_IDS_K4: UatIdEntry[] = [
   { id: "error-card", file: "src/modules/pi/components/Transcript.tsx" },
   { id: "retry-card", file: "src/modules/pi/components/Transcript.tsx" },
   { id: "tool-row", file: "src/modules/pi/components/blocks/ToolRow.tsx" },
-  { id: "keystone-card", file: "src/modules/pi/components/blocks/KeystoneCard.tsx" },
-  { id: "keystone-option", file: "src/modules/pi/components/blocks/KeystoneCard.tsx" },
-  { id: "keystone-approve", file: "src/modules/pi/components/blocks/KeystoneCard.tsx" },
-  { id: "keystone-reject", file: "src/modules/pi/components/blocks/KeystoneCard.tsx" },
+  {
+    id: "keystone-card",
+    file: "src/modules/pi/components/blocks/KeystoneCard.tsx",
+  },
+  {
+    id: "keystone-option",
+    file: "src/modules/pi/components/blocks/KeystoneCard.tsx",
+  },
+  {
+    id: "keystone-approve",
+    file: "src/modules/pi/components/blocks/KeystoneCard.tsx",
+  },
+  {
+    id: "keystone-reject",
+    file: "src/modules/pi/components/blocks/KeystoneCard.tsx",
+  },
   { id: "composer-input", file: "src/modules/pi/components/Composer.tsx" },
   { id: "attach-images", file: "src/modules/pi/components/Composer.tsx" },
   { id: "model-chip", file: "src/modules/pi/components/Composer.tsx" },
   { id: "send-button", file: "src/modules/pi/components/Composer.tsx" },
   { id: "prompt-menu", file: "src/modules/pi/components/PromptMenu.tsx" },
-  { id: "sessions-search", file: "src/modules/pi/components/SessionSearch.tsx" },
+  {
+    id: "sessions-search",
+    file: "src/modules/pi/components/SessionSearch.tsx",
+  },
   { id: "sessions-list", file: "src/modules/pi/components/SessionSearch.tsx" },
   { id: "session-row", file: "src/modules/pi/components/SessionSearch.tsx" },
-  { id: "sessions-pane", file: "src/modules/pi/components/RailPane.tsx" },
-  { id: "sessions-open-tab", file: "src/modules/pi/components/RailPane.tsx" },
-  { id: "sessions-expand-current", file: "src/modules/pi/components/RailPane.tsx" },
-  { id: "board-pane", file: "src/modules/pi/components/RailPane.tsx" },
-  { id: "board-open-tab", file: "src/modules/pi/components/RailPane.tsx" },
-  { id: "board-expand-current", file: "src/modules/pi/components/RailPane.tsx" },
-  { id: "graph-pane", file: "src/modules/pi/components/RailPane.tsx" },
-  { id: "graph-open-tab", file: "src/modules/pi/components/RailPane.tsx" },
-  { id: "graph-expand-current", file: "src/modules/pi/components/RailPane.tsx" },
-  { id: "artifact-pane", file: "src/modules/pi/components/RailPane.tsx" },
   { id: "board-columns", file: "src/modules/pi/components/board/Kanban.tsx" },
-  { id: "board-ticket", file: "src/modules/pi/components/board/TicketCard.tsx" },
-  { id: "ticket-sheet", file: "src/modules/pi/components/board/TicketSheet.tsx" },
-  { id: "board-align", file: "src/modules/pi/components/board/TicketSheet.tsx" },
+  {
+    id: "board-ticket",
+    file: "src/modules/pi/components/board/TicketCard.tsx",
+  },
+  {
+    id: "ticket-sheet",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+  },
+  {
+    id: "board-align",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+  },
   { id: "board-land", file: "src/modules/pi/components/board/TicketSheet.tsx" },
-  { id: "board-close", file: "src/modules/pi/components/board/TicketSheet.tsx" },
-  { id: "board-rework", file: "src/modules/pi/components/board/TicketSheet.tsx" },
+  {
+    id: "board-close",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+  },
+  {
+    id: "board-rework",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+  },
   { id: "artifact-frame", file: "src/modules/pi/components/ArtifactPane.tsx" },
-  { id: "child-tab", file: "src/modules/pi/components/AgentTranscriptPane.tsx" },
-  { id: "child-transcript", file: "src/modules/pi/components/AgentTranscriptPane.tsx" },
-  { id: "terminal-composer", file: "src/modules/terminal/components/TerminalComposer.tsx" },
+  {
+    id: "child-tab",
+    file: "src/modules/pi/components/AgentTranscriptPane.tsx",
+  },
+  {
+    id: "child-transcript",
+    file: "src/modules/pi/components/AgentTranscriptPane.tsx",
+  },
+  {
+    id: "terminal-composer",
+    file: "src/modules/terminal/components/TerminalComposer.tsx",
+  },
   { id: "pi-check-panel", file: "src/settings/sections/PiFirstRun.tsx" },
   { id: "check-row", file: "src/settings/sections/PiFirstRun.tsx" },
   { id: "pi-first-run-check", file: "src/settings/sections/PiFirstRun.tsx" },
   { id: "provider-table", file: "src/settings/sections/PiSection.tsx" },
   { id: "settings-secret", file: "src/settings/sections/PiSection.tsx" },
-  { id: "terminal-composer-default", file: "src/settings/sections/GeneralSection.tsx" },
+  {
+    id: "terminal-composer-default",
+    file: "src/settings/sections/GeneralSection.tsx",
+  },
 ];
 
 /**
@@ -147,7 +179,8 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
   {
     id: "graph-node-orchestrator",
     file: "src/modules/pi/components/RunGraph.tsx",
-    state: "the run graph mounted on the active pi tab (lazy React Flow canvas)",
+    state:
+      "the run graph mounted on the active pi tab (lazy React Flow canvas)",
   },
   {
     id: "graph-node-child",
@@ -193,4 +226,27 @@ export const UAT_IDS_K4_ABSENT: { id: string; reason: string }[] = [
   { id: "board-cancel", reason: "no separate cancel control in the sheet" },
   { id: "editor-path", reason: "editor pane renders no path element" },
   { id: "editor-save", reason: "editor has no Save button (Mod-S only)" },
+];
+
+/** K6 replaces rail navigation with the strip and mutually exclusive modes. */
+export const UAT_IDS_K6: UatIdEntry[] = [
+  { id: "mode-strip", file: "src/modules/pi/components/ModeStrip.tsx" },
+  { id: "board-button", file: "src/modules/pi/components/ModeStrip.tsx" },
+  { id: "graph-button", file: "src/modules/pi/components/ModeStrip.tsx" },
+  { id: "sessions-button", file: "src/modules/pi/components/ModeStrip.tsx" },
+  { id: "artifact-button", file: "src/modules/pi/components/ModeStrip.tsx" },
+  { id: "sessions-popover", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "sessions-panel", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "sessions-fullscreen", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "sessions-expand", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "board-panel", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "board-fullscreen", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "graph-panel", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "graph-fullscreen", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "artifact-panel", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "artifact-fullscreen", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "panel-resize", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "view-close", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "view-fullscreen", file: "src/modules/pi/components/ChatView.tsx" },
+  { id: "view-back", file: "src/modules/pi/components/ChatView.tsx" },
 ];

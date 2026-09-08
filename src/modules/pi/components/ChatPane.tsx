@@ -154,6 +154,7 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
     close(tabId);
     void openSession(tabId, { cwd });
   };
+  const stop = () => void kill(tabId);
 
   const headerBtn =
     "rounded-md border border-border/60 px-2 py-0.5 text-xs hover:bg-accent hover:text-foreground";
@@ -199,7 +200,7 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
           <button
             type="button"
             data-uat="stop-button"
-            onClick={() => void kill(tabId)}
+            onClick={stop}
             className={headerBtn}
           >
             Stop
@@ -254,6 +255,7 @@ export function ChatPane({ tabId, cwd, onOpenChild }: Props) {
         }
         modelAcceptsImages={tabModelAcceptsImages}
         onSubmit={submit}
+        onStop={showStop ? stop : undefined}
       />
     </div>
   );

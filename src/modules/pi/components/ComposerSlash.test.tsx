@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Composer } from "./Composer";
 
@@ -96,12 +103,12 @@ describe("composer slash menu", () => {
     expect(screen.queryByText("/brief")).toBeNull();
   });
 
-  it("sends the completed slash line on select and closes", async () => {
-    const { onSubmit } = renderWithDraft("/rev src/main.rs");
+  it("inserts the completed template reference without sending and closes", async () => {
+    const { onSubmit, pm } = renderWithDraft("/rev src/main.rs");
     await waitFor(() => expect(menu()).toBeTruthy());
     fireEvent.mouseDown(screen.getByText("/review").closest("button")!);
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(onSubmit).toHaveBeenCalledWith("/review src/main.rs", []);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(pm.textContent).toBe("/review src/main.rs");
     await waitFor(() => expect(menu()).toBeNull());
   });
 
@@ -113,5 +120,27 @@ describe("composer slash menu", () => {
     expect(onSubmit).not.toHaveBeenCalled();
     // A fresh slash line re-arms the menu.
     expect(pm.textContent).toBe("/");
+  });
+
+  it("Enter inserts a template reference, then a separate Enter sends it", async () => {
+    const { onSubmit, pm } = renderWithDraft("/rev src/main.rs");
+    await waitFor(() => expect(screen.getByText("/review")).toBeTruthy());
+    fireEvent.keyDown(pm, { key: "Enter" });
+    expect(menu()).toBeNull();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(pm.textContent).toBe("/review src/main.rs");
+    fireEvent.keyDown(pm, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledWith("/review src/main.rs", []);
+  });
+
+  it("supports Escape and template selection when a menu option itself has focus", async () => {
+    const { onSubmit, pm } = renderWithDraft("/rev");
+    await waitFor(() => expect(screen.getByText("/review")).toBeTruthy());
+    const option = screen.getByRole("option");
+    option.focus();
+    fireEvent.keyDown(option, { key: "Escape" });
+    expect(menu()).toBeNull();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(pm.textContent).toBe("/rev");
   });
 });

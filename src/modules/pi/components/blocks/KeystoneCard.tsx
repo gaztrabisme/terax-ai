@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { useState } from "react";
 import {
   effectiveQuestionId,
   type PiAskAnswer,
@@ -23,6 +24,7 @@ export function recommendedAnswers(block: PiAskBlock): PiAskAnswer[] {
 }
 
 export function KeystoneCard({ block, onAnswer, onDismiss }: Props) {
+  const [rejectArmed, setRejectArmed] = useState(false);
   if (block.state !== "pending") {
     return (
       <div
@@ -39,7 +41,26 @@ export function KeystoneCard({ block, onAnswer, onDismiss }: Props) {
       data-uat="keystone-card"
       data-uat-key={block.requestId}
       className="space-y-1.5 rounded-md border border-yellow-500/40 bg-yellow-500/5 p-2"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.repeat) return;
+        if (rejectArmed) {
+          setRejectArmed(false);
+          onDismiss();
+        } else setRejectArmed(true);
+      }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget))
+          setRejectArmed(false);
+      }}
     >
+      {rejectArmed && (
+        <p role="status" className="text-xs">
+          Press Escape again to reject this decision.
+        </p>
+      )}
       {block.questions.map((q, qi) => {
         const questionId = effectiveQuestionId(q, qi);
         return (

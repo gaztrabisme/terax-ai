@@ -9,6 +9,10 @@ export type ShortcutId =
   | "tab.newPrivate"
   | "tab.newEditor"
   | "pi.new"
+  | "pi.toggleBoard"
+  | "pi.toggleGraph"
+  | "pi.sessions"
+  | "pi.toggleArtifact"
   | "tab.close"
   | "tab.next"
   | "tab.prev"
@@ -33,6 +37,7 @@ export type ShortcutId =
   | "editor.redo";
 
 export type ShortcutGroup =
+  | "Pi"
   | "General"
   | "Tabs"
   | "Panes"
@@ -58,6 +63,30 @@ export type Shortcut = {
 };
 
 export const SHORTCUTS: Shortcut[] = [
+  {
+    id: "pi.toggleBoard",
+    label: "Board",
+    group: "Pi",
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "b" }],
+  },
+  {
+    id: "pi.toggleGraph",
+    label: "Graph",
+    group: "Pi",
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "g" }],
+  },
+  {
+    id: "pi.sessions",
+    label: "Sessions",
+    group: "Pi",
+    defaultBindings: [{ [MOD_PROP]: true, key: "j" }],
+  },
+  {
+    id: "pi.toggleArtifact",
+    label: "Artifact",
+    group: "Pi",
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "a" }],
+  },
   {
     id: "settings.open",
     label: "Open settings",
@@ -123,7 +152,7 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Focus previous pane",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, key: "[" }],
-  },  
+  },
   {
     id: "pane.source",
     label: "Toggle source panel",
@@ -135,7 +164,7 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Clear terminal",
     group: "Terminal",
     // macOS Terminal's ⌘K (clear scrollback, keep the prompt). Default only on
-    // macOS — on other platforms Ctrl+K is readline's kill-line, so we leave it
+    // macOS; on other platforms Ctrl+K is readline's kill-line, so we leave it
     // unbound and let users assign their own in settings.
     defaultBindings: IS_MAC ? [{ meta: true, key: "k" }] : [],
   },
@@ -215,7 +244,7 @@ export const SHORTCUTS: Shortcut[] = [
   },
   // Editor entries are display-only: CodeMirror's historyKeymap binds these
   // keys natively. We register them here so the shortcuts dialog can surface
-  // them — they don't have App-level handlers, so `useGlobalShortcuts` falls
+  // them; they don't have App-level handlers, so `useGlobalShortcuts` falls
   // through without `preventDefault`, leaving CodeMirror to handle the event.
   // Also excluded from the customization UI in ShortcutsSection.
   {
@@ -235,6 +264,7 @@ export const SHORTCUTS: Shortcut[] = [
 export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "General",
   "Tabs",
+  "Pi",
   "Panes",
   "Terminal",
   "View",
@@ -248,7 +278,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
 export function matchBinding(
   e: KeyboardEvent,
   binding: KeyBinding,
-  id?: ShortcutId
+  id?: ShortcutId,
 ): boolean {
   const eventKey = e.key.toLowerCase();
   const bindingKey = binding.key.toLowerCase();

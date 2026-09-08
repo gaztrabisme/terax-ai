@@ -1,18 +1,36 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { PanelImperativeHandle, PanelSize } from "react-resizable-panels";
 import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "@/components/ui/resizable";
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { cn } from "@/lib/utils";
 import type { PiTab as PiTabData, Tab } from "@/modules/tabs";
 import { ArtifactPane } from "./components/ArtifactPane";
 import { BoardView } from "./components/BoardPane";
 import { ChatPane } from "./components/ChatPane";
-import { RailPane } from "./components/RailPane";
+import { ChatView } from "./components/ChatView";
+import { ModeStrip } from "./components/ModeStrip";
+import { useGlobalShortcuts } from "@/modules/shortcuts";
+import {
+  isTerminalTarget,
+  isModalTarget,
+} from "@/modules/shortcuts/lib/eventPriority";
+import { awaitingDecisionCount, useBoardData } from "./lib/useBoardData";
+import {
+  CLOSED_VIEW,
+  MODE_STRIP_WIDTH,
+  isNarrowContent,
+  panelWidth,
+  viewReducer,
+  type ChatView as View,
+  type ViewEvent,
+} from "./lib/viewMachine";
 import { RunGraph } from "./components/RunGraph";
-import { SessionSearch } from "./components/SessionSearch";
+import { SessionSearch, scrollToSnippet } from "./components/SessionSearch";
+import type { PiSessionHit } from "./lib/sessions";
 import { useChildStore } from "./lib/childStore";
 import { detectArtifacts, type ArtifactDoc } from "./lib/artifacts";
 import { usePiLayout } from "./lib/layoutStore";
@@ -47,6 +65,7 @@ export function PiStack({
         <div
           key={t.id}
           aria-hidden={t.id !== activeId}
+          inert={t.id !== activeId}
           className={cn(
             "absolute inset-0",
             t.id !== activeId && "invisible pointer-events-none",
@@ -87,113 +106,123 @@ export function PiTab({
   const entry = usePiStore((s) => s.tabs[tabId]);
   const openSession = usePiStore((s) => s.openSession);
   const [boardTick, setBoardTick] = useState(0);
-  const seenBoardTool = useRef(false);
-
-  // Layout persists per cwd, so the same project restores the same geometry.
+  const seenBoardTools = useRef(new Set<string>());
+  const boardData = useBoardData({
+    cwd,
+    refreshKey: boardTick,
+    enabled: active,
+  });
+  const runningChildren = useChildStore(
+    (s) =>
+      Object.values(s.children).filter((child) =>
+        ["thinking", "tool", "awaiting-ask"].includes(child.status),
+      ).length,
+  );
   const { layout, update } = usePiLayout(cwd);
-  const railRef = useRef<PanelImperativeHandle | null>(null);
-  const graphRef = useRef<PanelImperativeHandle | null>(null);
-  const boardRef = useRef<PanelImperativeHandle | null>(null);
-  const artifactRef = useRef<PanelImperativeHandle | null>(null);
-  const sessionsRef = useRef<PanelImperativeHandle | null>(null);
-
-  // Sessions pane collapse is local state, not the persisted layout: the
-  // pane starts closed so the rail keeps today's geometry.
-  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
-
-  // Which artifact the pane shows; null means "the latest one".
+  const [viewState, dispatch] = useReducer(viewReducer, CLOSED_VIEW);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<HTMLElement>(null);
+  const buttons = useRef<Partial<Record<View, HTMLButtonElement>>>({});
+  const searchRef = useRef<HTMLInputElement>(null);
+  const lastFocus = useRef<HTMLElement | null>(null);
+  const focusAfterTransition = useRef<"view" | View | null>(null);
+  const [contentWidth, setContentWidth] = useState<number | null>(null);
+  const narrow = contentWidth !== null && isNarrowContent(contentWidth);
   const [artifactSel, setArtifactSel] = useState<{
     turn: number;
     n: number;
   } | null>(null);
+  const [pendingHit, setPendingHit] = useState<PiSessionHit | null>(null);
 
-  const handleRailResize = (
-    size: PanelSize,
-    _id: string | number | undefined,
-    prev: PanelSize | undefined,
-  ) => {
-    if (prev === undefined) return; // initial mount event
-    if (size.inPixels <= 0) update({ railCollapsed: true });
-    else
-      update({
-        rail: Math.round(size.asPercentage * 10) / 10,
-        railCollapsed: false,
-      });
+  const transition = (event: ViewEvent) => {
+    const next = viewReducer(viewState, event);
+    if (next === viewState) return;
+    focusAfterTransition.current = next.view ? "view" : viewState.view;
+    dispatch(event);
   };
+  const toggle = (view: View) => transition({ type: "toggle", view, narrow });
 
-  const handleGraphResize = (
-    size: PanelSize,
-    _id: string | number | undefined,
-    prev: PanelSize | undefined,
-  ) => {
-    if (prev === undefined) return;
-    if (size.inPixels <= 0) update({ graphCollapsed: true });
-    else
-      update({
-        graph: Math.round(size.asPercentage * 10) / 10,
-        graphCollapsed: false,
-      });
-  };
+  useLayoutEffect(() => {
+    if (!active || !rootRef.current) return;
+    const root = rootRef.current;
+    const measure = (width: number) => {
+      if (width <= 0) return;
+      const available = Math.max(0, width - MODE_STRIP_WIDTH);
+      setContentWidth(available);
+      dispatch({ type: "resize", narrow: isNarrowContent(available) });
+    };
+    measure(root.getBoundingClientRect().width);
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries)
+        if (entry.target === root) measure(entry.contentRect.width);
+    });
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [active]);
 
-  const handleBoardResize = (
-    size: PanelSize,
-    _id: string | number | undefined,
-    prev: PanelSize | undefined,
-  ) => {
-    if (prev === undefined) return;
-    update({ boardCollapsed: size.inPixels <= 0 });
-  };
+  const previousView = useRef(viewState);
+  useLayoutEffect(() => {
+    if (!active) return;
+    const previous = previousView.current;
+    const changed = previous !== viewState;
+    previousView.current = viewState;
+    let target: HTMLElement | null | undefined;
+    if (
+      focusAfterTransition.current &&
+      focusAfterTransition.current !== "view"
+    ) {
+      target = buttons.current[focusAfterTransition.current];
+    } else if (
+      viewState.view &&
+      (changed || focusAfterTransition.current === "view")
+    ) {
+      target =
+        viewState.view === "sessions"
+          ? searchRef.current
+          : viewRef.current?.querySelector<HTMLElement>("button");
+    } else if (!viewState.view && previous.view) {
+      target = buttons.current[previous.view];
+    } else if (lastFocus.current?.isConnected) {
+      target = lastFocus.current;
+    }
+    target?.focus({ preventScroll: true });
+    focusAfterTransition.current = null;
+  }, [active, viewState]);
 
-  const handleArtifactResize = (
-    size: PanelSize,
-    _id: string | number | undefined,
-    prev: PanelSize | undefined,
-  ) => {
-    if (prev === undefined) return;
-    if (size.inPixels <= 0) update({ artifactCollapsed: true });
-    else
-      update({
-        artifact: Math.round(size.asPercentage * 10) / 10,
-        artifactCollapsed: false,
-      });
-  };
+  useEffect(() => {
+    if (!active || viewState.mode !== "popover" || !viewState.view) return;
+    const outside = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element) || isModalTarget(target)) return;
+      if (
+        viewRef.current?.contains(target) ||
+        target.closest('[data-uat="mode-strip"]')
+      )
+        return;
+      transition({ type: "dismiss-popover" });
+    };
+    window.addEventListener("pointerdown", outside);
+    return () => window.removeEventListener("pointerdown", outside);
+  }, [active, viewState]);
 
-  const toggleGraph = () => {
-    const panel = graphRef.current;
-    if (!panel) return;
-    if (panel.isCollapsed()) panel.expand();
-    else panel.collapse();
-  };
-
-  const toggleBoard = () => {
-    const panel = boardRef.current;
-    if (!panel) return;
-    if (panel.isCollapsed()) panel.expand();
-    else panel.collapse();
-  };
-
-  const toggleArtifact = () => {
-    const panel = artifactRef.current;
-    if (!panel) return;
-    if (panel.isCollapsed()) panel.expand();
-    else panel.collapse();
-  };
-
-  const toggleSessions = () => {
-    const panel = sessionsRef.current;
-    if (!panel) return;
-    if (panel.isCollapsed()) panel.expand();
-    else panel.collapse();
-  };
-
-  const handleSessionsResize = (
-    size: PanelSize,
-    _id: string | number | undefined,
-    prev: PanelSize | undefined,
-  ) => {
-    if (prev === undefined) return;
-    setSessionsCollapsed(size.inPixels <= 0);
-  };
+  useGlobalShortcuts(
+    {
+      "pi.toggleBoard": () => toggle("board"),
+      "pi.toggleGraph": () => toggle("graph"),
+      "pi.sessions": () => {
+        transition({ type: "open", view: "sessions", narrow });
+      },
+      "pi.toggleArtifact": () => {
+        if (selectedArtifact) toggle("artifact");
+      },
+    },
+    {
+      enabled: active,
+      isDisabled: (id, event) =>
+        isTerminalTarget(event.target) ||
+        (id === "pi.toggleArtifact" && !selectedArtifact),
+    },
+  );
 
   useEffect(() => {
     void openSession(tabId, { cwd, launcherDir });
@@ -223,6 +252,19 @@ export function PiTab({
   }, [cwd]);
 
   const blocks = entry?.state.blocks ?? [];
+  useEffect(() => {
+    const id = entry?.state.sessionId;
+    if (
+      active &&
+      pendingHit &&
+      id &&
+      pendingHit.path.endsWith(`_${id}.jsonl`) &&
+      scrollToSnippet(pendingHit.snippet, tabId)
+    ) {
+      transition({ type: "dismiss-popover" });
+      setPendingHit(null);
+    }
+  }, [active, pendingHit, entry?.state, tabId, viewState]);
 
   // Artifact documents over the finished answers, in session order; the
   // pane shows the latest by default, the transcript's chip picks an older
@@ -254,146 +296,157 @@ export function PiTab({
     return artifacts[artifacts.length - 1] ?? null;
   }, [artifacts, artifactSel]);
 
-  // The transcript's "Open artifact" chip selects in the pane and expands it
-  // (DOM CustomEvent in the same window, the same bridge as pi:open-file).
   useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ turn?: unknown; n?: unknown }>).detail;
+    if (!active) return;
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ turn?: unknown; n?: unknown }>)
+        .detail;
       if (
-        !detail ||
-        typeof detail.turn !== "number" ||
-        typeof detail.n !== "number"
-      ) {
+        !artifacts.some(
+          (doc) => doc.turn === detail?.turn && doc.n === detail?.n,
+        )
+      )
         return;
-      }
-      setArtifactSel({ turn: detail.turn, n: detail.n });
-      if (artifactRef.current?.isCollapsed()) artifactRef.current.expand();
+      setArtifactSel({ turn: detail.turn as number, n: detail.n as number });
+      transition({ type: "open", view: "artifact", narrow });
     };
     window.addEventListener("pi:open-artifact", handler);
     return () => window.removeEventListener("pi:open-artifact", handler);
-  }, []);
+  }, [active, artifacts, narrow, viewState]);
 
-  // Any board_ tool execution may have mutated the board: refresh the pane.
   useEffect(() => {
-    const last = blocks[blocks.length - 1];
     if (
-      last?.kind === "tool" &&
-      last.status === "done" &&
-      last.toolName.startsWith("board_") &&
-      !seenBoardTool.current
+      !selectedArtifact &&
+      (viewState.view === "artifact" ||
+        viewState.narrowRestoreView === "artifact")
     ) {
-      seenBoardTool.current = true;
-      setBoardTick((t) => t + 1);
+      dispatch({ type: "close" });
+      if (active) buttons.current.sessions?.focus();
     }
-    if (!last || last.kind !== "tool" || last.toolName.startsWith("board_")) {
-      seenBoardTool.current = false;
+  }, [active, selectedArtifact, viewState]);
+
+  useEffect(() => {
+    let changed = false;
+    for (const block of blocks) {
+      if (
+        block.kind === "tool" &&
+        block.status === "done" &&
+        block.toolName.startsWith("board_") &&
+        !seenBoardTools.current.has(block.toolCallId)
+      ) {
+        seenBoardTools.current.add(block.toolCallId);
+        changed = true;
+      }
     }
+    if (changed) setBoardTick((tick) => tick + 1);
+    if (!blocks.length) seenBoardTools.current.clear();
   }, [blocks]);
 
+  const view = viewState.view;
+  const fullscreen = view !== null && viewState.mode === "fullscreen";
   return (
-    <ResizablePanelGroup
-      orientation="horizontal"
-      className="min-h-0 flex-1 gap-2"
+    <div
+      ref={rootRef}
+      data-uat="pi-tab"
+      data-uat-key={String(tabId)}
+      aria-hidden={!active}
+      inert={!active}
+      className="relative flex h-full min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg border border-border/60"
+      onFocusCapture={(event) => {
+        lastFocus.current = event.target;
+      }}
+      onKeyDown={(event) => {
+        if (
+          !active ||
+          event.key !== "Escape" ||
+          event.defaultPrevented ||
+          event.nativeEvent.isComposing
+        )
+          return;
+        if (isModalTarget(event.target) || isTerminalTarget(event.target))
+          return;
+        if (!view && !viewState.narrowRestoreView) return;
+        event.preventDefault();
+        event.stopPropagation();
+        transition({ type: view ? "escape" : "close", narrow });
+      }}
     >
-      <ResizablePanel id={`pi-chat-${tabId}`} minSize="20%">
-        <div
-          data-pi-chat={tabId}
-          data-uat="pi-tab"
-          data-uat-key={String(tabId)}
-          className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border/60"
-        >
-          <ChatPane tabId={tabId} cwd={cwd} onOpenChild={onOpenChild} />
-        </div>
-      </ResizablePanel>
-      <ResizableHandle withHandle className="bg-transparent" />
-      <ResizablePanel
-        id={`pi-rail-${tabId}`}
-        panelRef={railRef}
-        defaultSize={layout.railCollapsed ? 0 : `${layout.rail}%`}
-        minSize="240px"
-        collapsible
-        onResize={handleRailResize}
+      <div
+        data-pi-chat={tabId}
+        hidden={fullscreen}
+        inert={fullscreen}
+        className={cn("min-h-0 min-w-0 flex-1", fullscreen && "hidden")}
       >
-        <ResizablePanelGroup orientation="vertical" className="min-h-0 gap-2">
-          <ResizablePanel
-            id={`pi-graph-${tabId}`}
-            panelRef={graphRef}
-            defaultSize={layout.graphCollapsed ? 0 : `${layout.graph}%`}
-            minSize="48px"
-            collapsible
-            onResize={handleGraphResize}
-          >
-            <RailPane
-              title="Run graph"
-              collapsed={layout.graphCollapsed}
-              onToggleCollapse={toggleGraph}
-              onExpand={
-                onOpenRunGraph ? () => onOpenRunGraph(cwd, tabId) : undefined
-              }
-            >
-              {active ? (
-                <RunGraph tabId={tabId} onOpenChild={onOpenChild} />
-              ) : null}
-            </RailPane>
-          </ResizablePanel>
-          <ResizableHandle withHandle className="bg-transparent" />
-          <ResizablePanel
-            id={`pi-board-${tabId}`}
-            panelRef={boardRef}
-            defaultSize={
-              layout.boardCollapsed
-                ? 0
-                : `${Math.max(0, 100 - layout.graph - layout.artifact)}%`
-            }
-            minSize="48px"
-            collapsible
-            onResize={handleBoardResize}
-          >
-            <RailPane
-              title="Board"
-              collapsed={layout.boardCollapsed}
-              onToggleCollapse={toggleBoard}
-              onExpand={onOpenBoard && cwd ? () => onOpenBoard(cwd) : undefined}
-            >
-              <BoardView cwd={cwd} refreshKey={boardTick} mode="rail" />
-            </RailPane>
-          </ResizablePanel>
-          <ResizableHandle withHandle className="bg-transparent" />
-          <ResizablePanel
-            id={`pi-artifact-${tabId}`}
-            panelRef={artifactRef}
-            defaultSize={layout.artifactCollapsed ? 0 : `${layout.artifact}%`}
-            minSize="48px"
-            collapsible
-            onResize={handleArtifactResize}
-          >
-            <RailPane
-              title="Artifact"
-              collapsed={layout.artifactCollapsed}
-              onToggleCollapse={toggleArtifact}
-            >
-              <ArtifactPane doc={selectedArtifact} cwd={cwd} />
-            </RailPane>
-          </ResizablePanel>
-          <ResizableHandle withHandle className="bg-transparent" />
-          <ResizablePanel
-            id={`pi-sessions-${tabId}`}
-            panelRef={sessionsRef}
-            defaultSize="18%"
-            minSize="48px"
-            collapsible
-            onResize={handleSessionsResize}
-          >
-            <RailPane
-              title="Sessions"
-              collapsed={sessionsCollapsed}
-              onToggleCollapse={toggleSessions}
-            >
-              <SessionSearch tabId={tabId} cwd={cwd} />
-            </RailPane>
-          </ResizablePanel>
-        </ResizablePanelGroup>
-      </ResizablePanel>
-    </ResizablePanelGroup>
+        <ChatPane tabId={tabId} cwd={cwd} onOpenChild={onOpenChild} />
+      </div>
+      {view && (
+        <ChatView
+          key={view}
+          view={view}
+          mode={viewState.mode}
+          width={panelWidth(layout.views[view].widthCss, contentWidth ?? 800)}
+          contentWidth={contentWidth ?? 800}
+          popoverTop={buttons.current.sessions?.offsetTop ?? 80}
+          viewRef={viewRef}
+          onClose={() => transition({ type: "close" })}
+          onBack={() => transition({ type: "back", narrow })}
+          onFullscreen={() => transition({ type: "fullscreen" })}
+          onExpand={() => transition({ type: "expand", narrow })}
+          onOpenTab={
+            view === "board" && cwd && onOpenBoard
+              ? () => onOpenBoard(cwd)
+              : view === "graph" && onOpenRunGraph
+                ? () => onOpenRunGraph(cwd, tabId)
+                : undefined
+          }
+          onWidthCommit={(widthCss) =>
+            update({ views: { [view]: { widthCss } } })
+          }
+        >
+          {view === "board" && (
+            <BoardView
+              cwd={cwd}
+              data={boardData}
+              framed
+              active={active}
+              mode={viewState.mode === "fullscreen" ? "full" : "rail"}
+            />
+          )}
+          {view === "graph" && active && (
+            <RunGraph tabId={tabId} onOpenChild={onOpenChild} />
+          )}
+          {view === "artifact" && (
+            <ArtifactPane doc={selectedArtifact} cwd={cwd} />
+          )}
+          {view === "sessions" && (
+            <SessionSearch
+              tabId={tabId}
+              cwd={cwd}
+              query={cwd ? layout.sessionsQuery : undefined}
+              onQueryChange={(sessionsQuery) => update({ sessionsQuery })}
+              inputRef={searchRef}
+              onActivate={(hit) => {
+                if (
+                  !entry?.state.sessionId ||
+                  !hit.path.endsWith(`_${entry.state.sessionId}.jsonl`)
+                ) {
+                  setPendingHit(hit);
+                } else {
+                  transition({ type: "dismiss-popover" });
+                }
+              }}
+            />
+          )}
+        </ChatView>
+      )}
+      <ModeStrip
+        view={view}
+        hasArtifact={selectedArtifact !== null}
+        boardCount={awaitingDecisionCount(boardData.snapshot)}
+        graphCount={runningChildren}
+        buttons={buttons}
+        onToggle={toggle}
+      />
+    </div>
   );
 }

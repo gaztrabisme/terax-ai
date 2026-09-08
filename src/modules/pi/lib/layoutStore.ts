@@ -1,10 +1,13 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { create } from "zustand";
+import { CHAT_VIEWS, type ChatView } from "./viewMachine";
 
 /** localStorage bucket holding per-cwd pi layouts. */
 export const PI_LAYOUT_STORAGE_KEY = "terax.pi.layout.v1";
 
 export type PiLayout = {
+  views: Record<ChatView, { widthCss: number | null }>;
+  sessionsQuery: string;
   /** Rail width as a percentage of the horizontal [chat | rail] group. */
   rail: number;
   railCollapsed: boolean;
@@ -21,6 +24,13 @@ export type PiLayout = {
 };
 
 export const DEFAULT_PI_LAYOUT: PiLayout = {
+  views: {
+    board: { widthCss: null },
+    graph: { widthCss: null },
+    sessions: { widthCss: null },
+    artifact: { widthCss: null },
+  },
+  sessionsQuery: "",
   rail: 30,
   railCollapsed: false,
   graph: 40,
@@ -75,7 +85,20 @@ export function parseLayouts(raw: string | null): Record<string, PiLayout> {
       continue;
     }
     const v = value as Record<string, unknown>;
+    const views = { ...DEFAULT_PI_LAYOUT.views };
+    for (const view of CHAT_VIEWS) {
+      const rawView = (v.views as Record<string, unknown> | null)?.[view];
+      const width = (rawView as { widthCss?: unknown } | null)?.widthCss;
+      views[view] = {
+        widthCss:
+          typeof width === "number" && Number.isFinite(width) && width > 0
+            ? width
+            : null,
+      };
+    }
     out[cwd] = {
+      views,
+      sessionsQuery: typeof v.sessionsQuery === "string" ? v.sessionsQuery : "",
       rail: num(v.rail, DEFAULT_PI_LAYOUT.rail, 0, 100),
       railCollapsed: bool(v.railCollapsed, DEFAULT_PI_LAYOUT.railCollapsed),
       graph: num(v.graph, DEFAULT_PI_LAYOUT.graph, 0, 100),
@@ -107,16 +130,25 @@ function persistLayouts(layouts: Record<string, PiLayout>): void {
   }
 }
 
+export type PiLayoutPatch = Partial<Omit<PiLayout, "views">> & {
+  views?: Partial<PiLayout["views"]>;
+};
+
 type PiLayoutStore = {
   layouts: Record<string, PiLayout>;
-  update: (cwd: string, patch: Partial<PiLayout>) => void;
+  update: (cwd: string, patch: PiLayoutPatch) => void;
 };
 
 export const usePiLayoutStore = create<PiLayoutStore>()((set) => ({
   layouts: loadLayouts(),
   update: (cwd, patch) =>
     set((s) => {
-      const next = { ...(s.layouts[cwd] ?? DEFAULT_PI_LAYOUT), ...patch };
+      const previous = s.layouts[cwd] ?? DEFAULT_PI_LAYOUT;
+      const next = {
+        ...previous,
+        ...patch,
+        views: { ...previous.views, ...patch.views },
+      };
       const layouts = { ...s.layouts, [cwd]: next };
       persistLayouts(layouts);
       return { layouts };
@@ -125,12 +157,20 @@ export const usePiLayoutStore = create<PiLayoutStore>()((set) => ({
 
 /** Per-cwd view over the store; unknown cwds fall back to the default. */
 export function usePiLayout(cwd?: string) {
+  const [localLayout, setLocalLayout] = useState(DEFAULT_PI_LAYOUT);
   const layouts = usePiLayoutStore((s) => s.layouts);
   const update = usePiLayoutStore((s) => s.update);
-  const layout = (cwd !== undefined && layouts[cwd]) || DEFAULT_PI_LAYOUT;
+  const layout =
+    cwd === undefined ? localLayout : (layouts[cwd] ?? DEFAULT_PI_LAYOUT);
   const updateLayout = useCallback(
-    (patch: Partial<PiLayout>) => {
+    (patch: PiLayoutPatch) => {
       if (cwd !== undefined) update(cwd, patch);
+      else
+        setLocalLayout((previous) => ({
+          ...previous,
+          ...patch,
+          views: { ...previous.views, ...patch.views },
+        }));
     },
     [cwd, update],
   );

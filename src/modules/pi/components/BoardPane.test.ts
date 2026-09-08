@@ -4,12 +4,29 @@ import {
   DEFAULT_AGENT_BIN,
   RAIL_STATES,
   stateLabel,
+  parseBoard,
 } from "../lib/board";
 import { POLL_MS } from "./BoardPane";
+import { awaitingDecisionCount } from "../lib/useBoardData";
 
 // Pane-level expectations: the compact rail lists the four active states, and
 // the binary defaults stay empty so the resolver decides per machine.
 describe("BoardView rail configuration", () => {
+  it("counts distinct tickets in every human-decision column", () => {
+    const tickets = [
+      "align",
+      "verify",
+      "review",
+      "land",
+      "in_progress",
+      "done",
+    ].map((status, i) => ({ id: `t${i}`, status }));
+    tickets.push({ id: "t0", status: "align" });
+    expect(awaitingDecisionCount(parseBoard(JSON.stringify({ tickets })))).toBe(
+      4,
+    );
+    expect(awaitingDecisionCount(null)).toBe(0);
+  });
   it("lists exactly the four active states on the rail", () => {
     expect(RAIL_STATES).toEqual(["align", "in_progress", "verify", "review"]);
   });

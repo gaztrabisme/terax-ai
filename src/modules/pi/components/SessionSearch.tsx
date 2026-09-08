@@ -1,6 +1,6 @@
 import { SearchIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Ref } from "react";
 import {
   piSessionsList,
   piSessionsSearch,
@@ -36,11 +36,7 @@ export function snippetProbe(snippet: string): string {
 
 function findTextElement(root: ParentNode, needle: string): Element | null {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  for (
-    let node = walker.nextNode();
-    node !== null;
-    node = walker.nextNode()
-  ) {
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
     if (node.nodeValue && node.nodeValue.toLowerCase().includes(needle)) {
       return node.parentElement;
     }
@@ -61,7 +57,10 @@ export function scrollToSnippet(snippet: string, tabId: number): boolean {
   if (!target) return false;
   target.scrollIntoView({ block: "center" });
   const prev = target.getAttribute("style") ?? "";
-  target.setAttribute("style", `${prev};outline: 2px solid var(--ring)`.replace(/^;/, ""));
+  target.setAttribute(
+    "style",
+    `${prev};outline: 2px solid var(--ring)`.replace(/^;/, ""),
+  );
   window.setTimeout(() => {
     target.setAttribute("style", prev);
   }, 1500);
@@ -80,9 +79,24 @@ function pathLabel(path: string): string {
  * session to it (switch_session), or, when the hit is in the session already
  * open in this tab, scrolls the transcript to that turn instead.
  */
-export function SessionSearch({ tabId, cwd }: { tabId: number; cwd?: string }) {
+export function SessionSearch({
+  tabId,
+  cwd,
+  query: savedQuery,
+  onQueryChange,
+  inputRef,
+  onActivate,
+}: {
+  tabId: number;
+  cwd?: string;
+  query?: string;
+  onQueryChange?: (query: string) => void;
+  inputRef?: Ref<HTMLInputElement>;
+  onActivate?: (hit: PiSessionHit) => void;
+}) {
   const [agentDir, setAgentDir] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+  const [localQuery, setQuery] = useState("");
+  const query = savedQuery ?? localQuery;
   const [sessions, setSessions] = useState<PiSessionSummary[] | null>(null);
   const [hits, setHits] = useState<PiSessionHit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -122,14 +136,12 @@ export function SessionSearch({ tabId, cwd }: { tabId: number; cwd?: string }) {
                 setHits(null);
               }
             })
-          : piSessionsSearch(cwd, agentDir, trimmed, SEARCH_LIMIT).then(
-              (r) => {
-                if (alive) {
-                  setHits(r);
-                  setSessions(null);
-                }
-              },
-            );
+          : piSessionsSearch(cwd, agentDir, trimmed, SEARCH_LIMIT).then((r) => {
+              if (alive) {
+                setHits(r);
+                setSessions(null);
+              }
+            });
       load.catch((e: unknown) => {
         if (alive) setError(errorMessage(e));
       });
@@ -146,14 +158,20 @@ export function SessionSearch({ tabId, cwd }: { tabId: number; cwd?: string }) {
     // The current session's file name ends with the id pi reported at
     // agent_start: <timestamp>_<id>.jsonl.
     if (sessionId !== null && hit.path.endsWith(`_${sessionId}.jsonl`)) {
-      scrollToSnippet(hit.snippet, tabId);
+      if (scrollToSnippet(hit.snippet, tabId)) onActivate?.(hit);
+      else setError("Matching turn is not available in this session.");
       return;
     }
     const session = entry?.session;
     if (!session) return;
     void session
       .send(JSON.stringify({ type: "switch_session", sessionPath: hit.path }))
-      .catch(() => {});
+      .then(() => {
+        if (mounted.current) onActivate?.(hit);
+      })
+      .catch((e: unknown) => {
+        if (mounted.current) setError(errorMessage(e));
+      });
   };
 
   const openSummary = (summary: PiSessionSummary) => {
@@ -183,9 +201,13 @@ export function SessionSearch({ tabId, cwd }: { tabId: number; cwd?: string }) {
           className="pointer-events-none absolute top-1/2 start-2 -translate-y-1/2 text-muted-foreground"
         />
         <input
+          ref={inputRef}
           type="text"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            onQueryChange?.(e.target.value);
+          }}
           placeholder="Search sessions"
           aria-label="Search pi sessions"
           data-uat="sessions-search"
@@ -202,7 +224,10 @@ export function SessionSearch({ tabId, cwd }: { tabId: number; cwd?: string }) {
           Open the tab in a project directory to list its sessions.
         </p>
       ) : null}
-      <div data-uat="sessions-list" className="min-h-0 flex-1 overflow-y-auto text-xs">
+      <div
+        data-uat="sessions-list"
+        className="min-h-0 flex-1 overflow-y-auto text-xs"
+      >
         {hits !== null
           ? groupHits(hits).map(([path, group]) => (
               <div key={path} className="mb-2">

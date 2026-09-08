@@ -215,6 +215,7 @@ type Props = {
    *  pi decides what to do with the images. */
   modelAcceptsImages?: boolean;
   onSubmit: (markdown: string, images: PiImageAttachment[]) => void;
+  onStop?: () => void;
 };
 
 /**
@@ -257,7 +258,10 @@ export function Composer({
   placeholder = "Message pi (markdown)",
   modelAcceptsImages,
   onSubmit,
+  onStop,
 }: Props) {
+  const stopRef = useRef(onStop);
+  stopRef.current = onStop;
   const submitRef = useRef(onSubmit);
   submitRef.current = onSubmit;
   const disabledRef = useRef(disabled);
@@ -274,8 +278,8 @@ export function Composer({
 
   /// Slash menu (prompt library). pi expands "/name args" lines itself on the
   /// rpc prompt path (vendor rpc.rs calls ResourceLoader::expand_input), so a
-  /// selection completes the typed name and sends the line unchanged; pi
-  /// echoes the expanded body back as the user message.
+  /// selection completes the typed name in the draft. On send, pi echoes
+  /// the expanded body back as the user message.
   const [prompts, setPrompts] = useState<PiPromptEntry[]>([]);
   const promptsLoadedRef = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -305,18 +309,10 @@ export function Composer({
   const selectPrompt = (prompt: PiPromptEntry) => {
     if (!editor) return;
     const line = completeSlashLine(editor.getMarkdown(), prompt.name);
-    submitRef.current(
-      line,
-      imagesRef.current.map((img) => ({
-        mediaType: img.mediaType,
-        data: img.data,
-      })),
-    );
-    editor.commands.clearContent();
-    setChips([]);
-    setNotice(null);
+    menuDismissedRef.current = true;
     setMenu(false);
-    if (cwd) void clearDraft(cwd, tabId);
+    editor.commands.setContent(line, { contentType: "markdown" });
+    editor.commands.focus("end");
   };
 
   const setChips = (next: PendingImage[]) => {
@@ -460,9 +456,17 @@ export function Composer({
             Enter: () => performSelectRef.current(),
             "Shift-Enter": () => this.editor.commands.splitBlock(),
             Escape: () => {
-              if (!menuOpenRef.current) return false;
-              dismissMenuRef.current();
-              return true;
+              if (menuOpenRef.current) {
+                dismissMenuRef.current();
+                return true;
+              }
+              // During a turn, Escape in the focused composer interrupts just
+              // like Stop. The partial answer stays in the transcript.
+              if (stopRef.current) {
+                stopRef.current();
+                return true;
+              }
+              return false;
             },
             ArrowDown: () => moveHighlightRef.current(1),
             ArrowUp: () => moveHighlightRef.current(-1),
@@ -514,11 +518,13 @@ export function Composer({
   highlightRef.current = highlight;
 
   performSelectRef.current = () => {
-    if (menuOpenRef.current && filteredRef.current.length > 0) {
+    if (menuOpenRef.current) {
       const list = filteredRef.current;
-      selectPromptRef.current(
-        list[Math.min(highlightRef.current, list.length - 1)],
-      );
+      if (list.length > 0 && !disabledRef.current) {
+        selectPromptRef.current(
+          list[Math.min(highlightRef.current, list.length - 1)],
+        );
+      }
       return true;
     }
     if (disabledRef.current) return false;
@@ -713,6 +719,10 @@ export function Composer({
             highlighted={Math.min(highlight, Math.max(0, filtered.length - 1))}
             onHighlight={setHighlight}
             onSelect={selectPrompt}
+            onDismiss={() => {
+              dismissMenuRef.current();
+              editor?.commands.focus();
+            }}
           />
         ) : null}
         <EditorContent editor={editor} />

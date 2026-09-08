@@ -11,6 +11,7 @@ type Props = {
   highlighted: number;
   onHighlight: (index: number) => void;
   onSelect: (prompt: PiPromptEntry) => void;
+  onDismiss?: () => void;
 };
 
 /**
@@ -26,6 +27,7 @@ export function PromptMenu({
   highlighted,
   onHighlight,
   onSelect,
+  onDismiss,
 }: Props) {
   const filtered = filterPrompts(prompts, query);
 
@@ -34,6 +36,12 @@ export function PromptMenu({
       role="listbox"
       aria-label="Prompt templates"
       data-uat="prompt-menu"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onDismiss?.();
+      }}
       className="absolute bottom-full left-0 right-0 z-20 mb-1 max-h-56 overflow-y-auto rounded-md border border-border/60 bg-popover p-1 shadow-md"
     >
       {filtered.length === 0 ? (
@@ -54,8 +62,14 @@ export function PromptMenu({
               e.preventDefault();
               onSelect(prompt);
             }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              event.stopPropagation();
+              onSelect(prompt);
+            }}
             className={cn(
-              "flex w-full items-baseline gap-2 rounded-sm px-2 py-1 text-left text-xs",
+              "flex w-full items-baseline gap-2 rounded-sm px-2 py-1 text-left text-xs focus-visible:outline-2 focus-visible:outline-ring",
               index === highlighted
                 ? "bg-accent text-accent-foreground"
                 : "hover:bg-accent/50",
