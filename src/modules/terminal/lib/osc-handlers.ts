@@ -109,7 +109,7 @@ function parseOsc7(data: string): string | null {
 export function parseOsc133CommandText(data: string): string | null {
   const rest = data.slice(1);
   if (!rest.startsWith(";")) return null;
-  const text = rest.slice(1);
+  const text = [...rest.slice(1)].slice(0, 256).map((c) => /\p{Cc}/u.test(c) ? " " : c).join("");
   return text.length > 0 ? text : null;
 }
 
@@ -119,6 +119,6 @@ export function parseOsc133CommandText(data: string): string | null {
  * reported as success without evidence.
  */
 export function parseOsc133ExitCode(data: string): number | null {
-  const m = data.match(/^D;(-?\d+)/);
+  const m = data.match(/^D;(-?\d+)$/);
   return m ? Number.parseInt(m[1], 10) : null;
 }

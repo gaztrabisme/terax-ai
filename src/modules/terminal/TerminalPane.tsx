@@ -2,8 +2,11 @@ import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setTerminalComposer } from "@/modules/settings/store";
 import { useTheme } from "@/modules/theme";
 import type { SearchAddon } from "@xterm/addon-search";
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { BlockChrome } from "./components/BlockChrome";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { TerminalHistory } from "@/modules/terminal/components/TerminalHistory";
+import { storageError, type StorageError } from "@/modules/terminal/lib/journal";
+import { retryTerminalStorage } from "@/modules/terminal/lib/useTerminalSession";
+import { BlockChrome, type BlockErrorHandler } from "./components/BlockChrome";
 import { TerminalComposer } from "./components/TerminalComposer";
 import type { BlockStore } from "./lib/blocks";
 import { useTerminalSession, writeToSession } from "./lib/useTerminalSession";
@@ -49,6 +52,31 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
     // written from another window.
     const composerEnabled = usePreferencesStore((s) => s.terminalComposer);
     const [blockStore, setBlockStore] = useState<BlockStore | null>(null);
+    const [identity, setIdentity] = useState<{ terminalId: string; project: string } | null>(null);
+    const [journalError, setJournalError] = useState<StorageError | null>(null);
+    const [actionError, setActionError] = useState<StorageError | null>(null);
+    const [retrying, setRetrying] = useState(false);
+    const retryAction = useRef<(() => Promise<void>) | null>(null);
+    const initialProject = useRef(initialCwd);
+    const project = identity?.project ?? initialProject.current;
+    const reportError = useCallback<BlockErrorHandler>((error, retry) => {
+      setActionError(error);
+      retryAction.current = retry;
+    }, []);
+    const error = journalError ?? actionError;
+    const retry = async () => {
+      setRetrying(true);
+      try {
+        if (journalError) await retryTerminalStorage(leafId);
+        else {
+          await retryAction.current?.();
+          setActionError(null);
+        }
+      } catch (failure) {
+        const next = storageError(failure, error?.path ?? `${project}/.pi/terminal`);
+        if (journalError) setJournalError(next); else setActionError(next);
+      } finally { setRetrying(false); }
+    };
 
     const session = useTerminalSession({
       leafId,
@@ -60,6 +88,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onExit: (c) => onExit?.(leafId, c),
       onCwd: (c) => onCwd?.(leafId, c),
       onBlockStore: setBlockStore,
+      onJournalError: setJournalError,
+      onTerminalIdentity: setIdentity,
     });
 
     useEffect(() => {
@@ -89,6 +119,14 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
           pointerEvents: visible ? "auto" : "none",
         }}
       >
+        {error && (
+          <div data-uat="storage-error" role="status" className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-destructive/10 p-2 text-xs font-medium text-destructive">
+            <span className="min-w-0 flex-1 break-words">Storage error: {error.path}: {error.message}. Unsaved.</span>
+            <button type="button" data-uat="storage-retry" aria-label="Retry save" disabled={retrying} onClick={() => void retry()}
+              className="shrink-0 rounded px-2 focus-visible:outline focus-visible:outline-ring disabled:opacity-50">{retrying ? "Retrying" : "Retry"}</button>
+          </div>
+        )}
+        {project && <TerminalHistory project={project} terminalId={identity?.terminalId} leafId={leafId} onError={reportError} />}
         {/* The pooled slot host is appended into this inner node. */}
         <div
           ref={containerRef}
@@ -104,14 +142,15 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
             onFocusEmulator={session.focus}
           />
         ) : null}
-        <BlockChrome leafId={leafId} store={blockStore} />
+        <BlockChrome leafId={leafId} store={blockStore} onError={reportError} />
         <button
           type="button"
           data-uat="composer-toggle"
           onClick={() => void setTerminalComposer(!composerEnabled)}
+          aria-label={composerEnabled ? "Hide composer" : "Show composer"}
           aria-pressed={composerEnabled}
           title={composerEnabled ? "Hide composer" : "Show composer"}
-          className="absolute right-2 top-1 z-20 rounded-md border border-border/60 bg-background/80 px-2 py-0.5 text-[11px] text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+          className="absolute right-2 bottom-2 z-20 rounded-md border border-border/60 bg-background/80 px-2 py-0.5 text-[11px] text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
         >
           {composerEnabled ? "Composer on" : "Composer off"}
         </button>

@@ -1,3 +1,4 @@
+import type { BlockFile, JournalRecord } from "@/modules/terminal/lib/journal";
 import type { IMarker } from "@xterm/xterm";
 
 /**
@@ -15,6 +16,10 @@ export type BlockStatus = "running" | "ok" | "error" | "unknown";
 export type Block = {
   /** Monotonic per-store id, stable across status changes. */
   id: number;
+  file?: BlockFile;
+  commandTruncated?: boolean;
+  interrupted?: boolean;
+  durationMs?: number | null;
   /** Command text carried by the OSC 133 C payload, when the shell sends one. */
   command: string | null;
   /** Wall-clock ms at the C event, null for shells without C (bash 3.2, PowerShell). */
@@ -114,6 +119,19 @@ export class BlockStore {
     if (this.closeOpenBlock(null)) this.notify();
   }
 
+  applyJournal(block: Block, record: JournalRecord, project: string): void {
+    block.file = { project, record };
+    block.command = record.command || null;
+    block.commandTruncated = record.commandTruncated;
+    block.interrupted = record.event === "interrupted";
+    block.startedAt = record.startedAt === null ? null : Date.parse(record.startedAt);
+    block.endedAt = record.endedAt === null ? null : Date.parse(record.endedAt);
+    block.durationMs = record.durationMs;
+    block.exitCode = typeof record.exit === "number" ? record.exit : null;
+    block.status = record.exit === "running" ? "running" : record.exit === "unknown" ? "unknown" : record.exit === 0 ? "ok" : "error";
+    this.notify();
+  }
+
   /** Live ring contents, oldest first. */
   getBlocks(): readonly Block[] {
     return this.blocks;
@@ -208,6 +226,7 @@ export function liveMarker(m: IMarker | null | undefined): m is IMarker {
 }
 
 export function blockDurationMs(b: Block): number | null {
+  if (b.durationMs !== undefined) return b.durationMs;
   if (b.startedAt === null || b.endedAt === null) return null;
   return Math.max(0, b.endedAt - b.startedAt);
 }
@@ -263,7 +282,7 @@ export type BlockDecorationEntry = {
 };
 
 export function blockSignature(b: Block): string {
-  return [b.status, b.exitCode ?? "", b.endedAt ?? "", b.command ?? ""].join("|");
+  return [b.status, b.exitCode ?? "", b.endedAt ?? "", b.command ?? "", b.commandTruncated, b.interrupted, b.file?.record.blockId].join("|");
 }
 
 /**

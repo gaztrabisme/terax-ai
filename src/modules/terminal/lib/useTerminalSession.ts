@@ -4,6 +4,7 @@ import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { BlockStore } from "./blocks";
+import { parseJournalRecord, storageError, type JournalRecord, type StorageError } from "@/modules/terminal/lib/journal";
 import { DormantRing } from "./dormantRing";
 import {
   createShellIntegrationState,
@@ -35,11 +36,17 @@ type Callbacks = {
   onCwd?: (cwd: string) => void;
   /** The per-session block store, replaced on every slot bind, nulled on unbind. */
   onBlockStore?: (store: BlockStore | null) => void;
+  onJournalError?: (error: StorageError | null) => void;
+  onTerminalIdentity?: (identity: { terminalId: string; project: string }) => void;
 };
 
 type Session = {
   pty: PtySession | null;
   ptyOpening: boolean;
+  project: string | undefined;
+  journalRecords: Map<string, JournalRecord>;
+  journalStarts: JournalRecord[];
+  journalError: StorageError | null;
   initialCwd: string | undefined;
   lastCwd: string | null;
   pendingExit: number | null;
@@ -173,6 +180,10 @@ function ensureSession(leafId: number, initialCwd?: string): Session {
   const session: Session = {
     pty: null,
     ptyOpening: false,
+    project: initialCwd,
+    journalRecords: new Map(),
+    journalStarts: [],
+    journalError: null,
     initialCwd,
     lastCwd: null,
     pendingExit: null,
@@ -210,6 +221,21 @@ function deliverPtyBytes(leafId: number, bytes: Uint8Array): void {
   else s.dormantRing.push(bytes);
 }
 
+function bindCommittedRecords(s: Session): void {
+  if (!s.blockStore || !s.project) return;
+  for (const block of s.blockStore.getBlocks()) {
+    if (!block.file) {
+      const index = s.journalStarts.findIndex((r) => (r.command || null) === block.command);
+      if (index < 0) continue;
+      const [start] = s.journalStarts.splice(index, 1);
+      s.blockStore.applyJournal(block, s.journalRecords.get(start.blockId) ?? start, s.project);
+    } else {
+      const record = s.journalRecords.get(block.file.record.blockId);
+      if (record && record.seq !== block.file.record.seq) s.blockStore.applyJournal(block, record, s.project);
+    }
+  }
+}
+
 async function openPtyForSession(
   leafId: number,
   s: Session,
@@ -222,9 +248,33 @@ async function openPtyForSession(
     startRows,
     {
       onData: (bytes) => deliverPtyBytes(leafId, bytes),
+      onJournal: (event) => {
+        if (event.kind === "storage-error") {
+          s.journalError = storageError(event, `${s.project}/.pi/terminal`);
+          s.callbacks.onJournalError?.(s.journalError);
+        } else if (event.kind === "saved") {
+          s.journalError = null;
+          s.callbacks.onJournalError?.(null);
+        } else {
+          let record: JournalRecord;
+          try { record = parseJournalRecord(event.record); }
+          catch (error) {
+            s.journalError = storageError(error, `${s.project}/.pi/terminal`);
+            s.callbacks.onJournalError?.(s.journalError);
+            return;
+          }
+          s.journalRecords.set(record.blockId, record);
+          if (record.event === "start") s.journalStarts.push(record);
+          while (s.journalRecords.size > 200) {
+            const oldest = s.journalRecords.keys().next().value!;
+            s.journalRecords.delete(oldest);
+            s.journalStarts = s.journalStarts.filter((r) => r.blockId !== oldest);
+          }
+          bindCommittedRecords(s);
+        }
+      },
       onExit: (code) => {
         s.shellExited = true;
-        s.pty = null;
         const slot = getSlotForLeaf(leafId);
         if (slot) slot.term.options.disableStdin = true;
         if (s.callbacks.onExit) s.callbacks.onExit(code);
@@ -232,12 +282,15 @@ async function openPtyForSession(
       },
     },
     cwd,
+    s.project,
   );
 }
 
 function bindLeafToSlot(leafId: number, s: Session): void {
   if (!s.container) return;
   const altScreen = s.altScreenAtRelease;
+  let acceptBlocks = false;
+  s.journalStarts = [];
   s.altScreenAtRelease = false;
   acquireSlot({
     leafId,
@@ -271,15 +324,35 @@ function bindLeafToSlot(leafId: number, s: Session): void {
       s.blockStore = blocks;
       s.callbacks.onBlockStore?.(blocks);
       let tracker: PromptTracker | null = null;
+      let currentBlock: ReturnType<BlockStore["getBlocks"]>[number] | null = null;
+      const attachRecord = (block: ReturnType<BlockStore["getBlocks"]>[number]) => {
+        const index = s.journalStarts.findIndex((r) => (r.command || null) === block.command);
+        if (index < 0 || !s.project) return;
+        const [start] = s.journalStarts.splice(index, 1);
+        const record = s.journalRecords.get(start.blockId) ?? start;
+        blocks.applyJournal(block, record, s.project);
+      };
       const prompt = registerPromptTracker(term, shellState, (event: PromptEvent) => {
+        if (!acceptBlocks) return;
         if (event.type === "A") {
           blocks.onPromptStart();
+          currentBlock = null;
         } else if (event.type === "C") {
           blocks.onCommandStart(event.command);
+          currentBlock = blocks.getBlocks()[blocks.getBlocks().length - 1] ?? null;
+          if (currentBlock) attachRecord(currentBlock);
         } else {
           // Shells without C (bash 3.2, PowerShell) anchor their blind block
           // at the prompt marker drawn by the previous A.
-          blocks.onCommandDone(event.exitCode, tracker?.getMarker() ?? null);
+          if (currentBlock?.file) {
+            const record = s.journalRecords.get(currentBlock.file.record.blockId);
+            if (record && s.project) blocks.applyJournal(currentBlock, record, s.project);
+          } else {
+            blocks.onCommandDone(event.exitCode, tracker?.getMarker() ?? null);
+            const block = blocks.getBlocks()[blocks.getBlocks().length - 1];
+            if (block && !block.file) attachRecord(block);
+          }
+          currentBlock = null;
         }
       });
       tracker = prompt;
@@ -303,6 +376,7 @@ function bindLeafToSlot(leafId: number, s: Session): void {
     },
     onSearchReady: (addon) => s.callbacks.onSearchReady?.(addon),
   });
+  getSlotForLeaf(leafId)?.term.write("", () => { acceptBlocks = true; });
   s.snapshot = null;
   s.hasSlot = true;
   if (s.lastCwd !== null) s.callbacks.onCwd?.(s.lastCwd);
@@ -335,6 +409,8 @@ function attachSession(
   const s = sessions.get(leafId);
   if (!s || s.disposed) return;
   s.callbacks = callbacks;
+  callbacks.onJournalError?.(s.journalError);
+  if (s.pty) callbacks.onTerminalIdentity?.(s.pty);
   s.container = container;
 
   if (s.visibleNow) bindLeafToSlot(leafId, s);
@@ -349,10 +425,15 @@ function attachSession(
           return;
         }
         s.pty = pty;
+        s.project = pty.project;
+        bindCommittedRecords(s);
+        s.callbacks.onTerminalIdentity?.(pty);
         if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
       })
       .catch((e) => {
         s.ptyOpening = false;
+        s.journalError = storageError(e, `${s.project}/.pi/terminal`);
+        s.callbacks.onJournalError?.(s.journalError);
         console.error("[terax] openPty failed:", e);
       });
   }
@@ -372,9 +453,13 @@ export async function respawnSession(
 ): Promise<void> {
   const s = sessions.get(leafId);
   if (!s || s.disposed) return;
-  s.pty?.close();
+  await s.pty?.close();
   s.pty = null;
   s.snapshot = null;
+  s.journalError = null;
+  s.callbacks.onJournalError?.(null);
+  s.journalRecords.clear();
+  s.journalStarts = [];
   s.dormantRing = new DormantRing();
   s.shellExited = false;
   s.pendingExit = null;
@@ -395,8 +480,9 @@ export async function respawnSession(
     pty = await openPtyForSession(leafId, s, cwd ?? s.initialCwd);
   } catch (e) {
     s.ptyOpening = false;
-    console.error("[terax] respawn openPty failed:", e);
-    return;
+    s.journalError = storageError(e, `${s.project}/.pi/terminal`);
+    s.callbacks.onJournalError?.(s.journalError);
+    throw e;
   }
   s.ptyOpening = false;
   if (s.disposed) {
@@ -404,7 +490,26 @@ export async function respawnSession(
     return;
   }
   s.pty = pty;
+  s.project = pty.project;
+  bindCommittedRecords(s);
+  s.callbacks.onTerminalIdentity?.(pty);
   if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
+}
+
+export async function retryTerminalStorage(leafId: number): Promise<void> {
+  const s = sessions.get(leafId);
+  if (!s) return;
+  if (s.pty) await s.pty.retry();
+  else if (!s.ptyOpening) await respawnSession(leafId);
+}
+
+export async function terminalHistoryCanReplace(leafId: number): Promise<boolean> {
+  const s = sessions.get(leafId);
+  if (!s?.pty || s.shellExited) return true;
+  const busy = await invoke<boolean>("pty_has_foreground_process", { id: s.pty.id });
+  if (!busy) return true;
+  const { confirm } = await import("@tauri-apps/plugin-dialog");
+  return confirm("This terminal has a running process. Close it and open a fresh shell with the selected history?", { title: "Reopen terminal history", kind: "warning" });
 }
 
 export async function leafHasForegroundProcess(leafId: number): Promise<boolean> {
@@ -449,6 +554,8 @@ type Options = {
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
   onBlockStore?: (store: BlockStore | null) => void;
+  onJournalError?: (error: StorageError | null) => void;
+  onTerminalIdentity?: (identity: { terminalId: string; project: string }) => void;
 };
 
 export function useTerminalSession({
@@ -461,9 +568,11 @@ export function useTerminalSession({
   onExit,
   onCwd,
   onBlockStore,
+  onJournalError,
+  onTerminalIdentity,
 }: Options) {
-  const cbRef = useRef({ onSearchReady, onExit, onCwd, onBlockStore });
-  cbRef.current = { onSearchReady, onExit, onCwd, onBlockStore };
+  const cbRef = useRef({ onSearchReady, onExit, onCwd, onBlockStore, onJournalError, onTerminalIdentity });
+  cbRef.current = { onSearchReady, onExit, onCwd, onBlockStore, onJournalError, onTerminalIdentity };
 
   useEffect(() => {
     let cancelled = false;
@@ -477,6 +586,8 @@ export function useTerminalSession({
         onExit: (c) => cbRef.current.onExit?.(c),
         onCwd: (c) => cbRef.current.onCwd?.(c),
         onBlockStore: (st) => cbRef.current.onBlockStore?.(st),
+        onJournalError: (error) => cbRef.current.onJournalError?.(error),
+        onTerminalIdentity: (identity) => cbRef.current.onTerminalIdentity?.(identity),
       });
       if (s.visibleNow && s.focusedNow) focusSlot(leafId);
     });

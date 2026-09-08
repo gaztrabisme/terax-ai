@@ -127,6 +127,11 @@ export type UatStatefulEntry = { id: string; file: string; state: string };
 
 export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
   {
+    id: "terminal-history-reopen",
+    file: "src/modules/terminal/components/TerminalHistory.tsx",
+    state: "the terminal history list contains a past terminal for this project",
+  },
+  {
     id: "terminal-tab",
     file: "src/modules/terminal/TerminalPane.tsx",
     state: "a mounted terminal pane backed by a live pty session",

@@ -11,6 +11,7 @@ use tauri::{AppHandle, Emitter};
 use super::agent_detect::AgentDetector;
 use super::da_filter::DaFilter;
 use super::shell_init;
+use super::journal::{Journal, Record, StorageError};
 use crate::modules::workspace::WorkspaceEnv;
 
 const AGENT_EVENT: &str = "terax:agent-signal";
@@ -46,6 +47,7 @@ pub struct Session {
     _job: Option<super::job::PtyJob>,
     /// PID of the shell process. 0 means unknown; callers must skip checks when 0.
     pub shell_pid: u32,
+    pub journal: Arc<JournalControl>,
     pub killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub master: Mutex<Box<dyn MasterPty + Send>>,
@@ -53,6 +55,7 @@ pub struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.journal.cancel();
         // If the session Arc is dropped without an explicit pty_close (e.g.
         // frontend disconnected, window crashed, dev HMR), the reader/flusher
         // threads would otherwise stay alive forever holding the child. Kill
@@ -95,6 +98,80 @@ impl Drop for ChildKillGuard {
     }
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum JournalEvent {
+    Record { record: Record },
+    StorageError { path: String, message: String },
+    Saved,
+}
+
+impl From<StorageError> for JournalEvent {
+    fn from(error: StorageError) -> Self {
+        Self::StorageError { path: error.path, message: error.message }
+    }
+}
+
+#[derive(Default)]
+struct RetryState {
+    requested: bool,
+    cancelled: bool,
+    closing: bool,
+    paused: bool,
+}
+
+pub struct JournalControl {
+    pub journal: Mutex<Journal>,
+    pub active: AtomicBool,
+    retry: Mutex<RetryState>,
+    wake: Condvar,
+    channel: Channel<JournalEvent>,
+}
+
+impl JournalControl {
+    pub fn new(journal: Journal, channel: Channel<JournalEvent>) -> Self {
+        Self { journal: Mutex::new(journal), active: AtomicBool::new(true), retry: Mutex::default(), wake: Condvar::new(), channel }
+    }
+
+    pub fn retry(&self) {
+        self.retry.lock().unwrap().requested = true;
+        self.wake.notify_all();
+    }
+
+    pub fn cancel(&self) {
+        let mut retry = self.retry.lock().unwrap();
+        retry.closing = true;
+        if retry.paused { retry.cancelled = true; }
+        self.wake.notify_all();
+    }
+
+    pub(super) fn persist(&self, bytes: &[u8], eof: bool) -> bool {
+        let mut failed = false;
+        loop {
+            if self.retry.lock().unwrap().cancelled { return false; }
+            let result = self.journal.lock().unwrap().commit(bytes, eof);
+            match result {
+                Ok(records) => {
+                    for record in records { let _ = self.channel.send(JournalEvent::Record { record }); }
+                    if failed { let _ = self.channel.send(JournalEvent::Saved); }
+                    return true;
+                }
+                Err(error) => {
+                    failed = true;
+                    let _ = self.channel.send(error.into());
+                    let mut retry = self.retry.lock().unwrap();
+                    if retry.closing { return false; }
+                    retry.paused = true;
+                    while !retry.requested && !retry.cancelled { retry = self.wake.wait(retry).unwrap(); }
+                    if retry.cancelled { return false; }
+                    retry.requested = false;
+                    retry.paused = false;
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     id: u32,
@@ -105,6 +182,7 @@ pub fn spawn(
     workspace: WorkspaceEnv,
     on_data: Channel<Response>,
     on_exit: Channel<i32>,
+    journal: Arc<JournalControl>,
 ) -> Result<(Arc<Session>, PtySize), String> {
     #[cfg(windows)]
     let _spawn_guard = CONPTY_LIFECYCLE_LOCK.lock().unwrap();
@@ -150,6 +228,7 @@ pub fn spawn(
         #[cfg(windows)]
         _job: job,
         shell_pid,
+        journal: journal.clone(),
         killer: Mutex::new(killer),
         writer: writer.clone(),
         master: Mutex::new(pair.master),
@@ -168,6 +247,10 @@ pub fn spawn(
     let reader_thread = thread::Builder::new()
         .name("terax-pty-reader".into())
         .spawn(move || {
+            if !journal.persist(&[], false) {
+                journal.active.store(false, Ordering::Release);
+                return;
+            }
             let mut buf = [0u8; READ_BUF];
             let mut filtered: Vec<u8> = Vec::with_capacity(READ_BUF);
             let mut da_filter = DaFilter::new();
@@ -178,6 +261,7 @@ pub fn spawn(
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        if !journal.persist(&buf[..n], false) { break; }
                         if !logged_first {
                             logged_first = true;
                             log::debug!("pty first byte after {}ms", spawn_at.elapsed().as_millis());
@@ -210,6 +294,8 @@ pub fn spawn(
                     }
                 }
             }
+            journal.persist(&[], true);
+            journal.active.store(false, Ordering::Release);
             agent_detect.finish(|t| {
                 let _ = app_reader.emit(AGENT_EVENT, t.into_signal(id));
             });
@@ -301,6 +387,15 @@ mod tests {
     use super::*;
     use portable_pty::CommandBuilder;
 
+    fn test_journal() -> Arc<JournalControl> {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let registry = crate::modules::workspace::WorkspaceRegistry::default();
+        registry.authorize(root).unwrap();
+        let project = super::super::journal::ProjectRoot::authorized(&registry, root.to_str().unwrap(), &WorkspaceEnv::Local).unwrap();
+        Arc::new(JournalControl::new(Journal::new(project, super::super::journal::opaque_id(), String::new()).unwrap(), Channel::new(|_| Ok(()))))
+    }
+
     #[test]
     fn drop_kills_child_process() {
         let pty_system = native_pty_system();
@@ -324,6 +419,7 @@ mod tests {
 
         let session = Arc::new(Session {
             shell_pid: child.process_id().unwrap_or(0),
+            journal: test_journal(),
             killer: Mutex::new(killer),
             writer,
             master: Mutex::new(pair.master),
@@ -372,6 +468,7 @@ mod tests {
 
         let session = Arc::new(Session {
             shell_pid: 0,
+            journal: test_journal(),
             killer: Mutex::new(killer),
             writer,
             master: Mutex::new(pair.master),

@@ -1,11 +1,10 @@
 import type { Terminal } from "@xterm/xterm";
+import { exportBlock, plainOutput, readBlockOutput, storageError, type StorageError } from "@/modules/terminal/lib/journal";
 import { useEffect, useRef } from "react";
 import {
   blockDurationMs,
-  extractBlockText,
   formatDuration,
   liveMarker,
-  nextBlockStartLine,
   reconcileBlockDecorations,
   safeDispose,
   type Block,
@@ -23,8 +22,7 @@ import {
 /**
  * Block chrome for one pane (philosophy 9): one decoration pair per block
  * anchored to its marker. The left decoration carries the status dot and the
- * hover action row (Copy as plain text, Copy ANSI via serialize({range}),
- * Rerun); the right decoration shows the duration once the block closed.
+ * action row (file-backed Copy, Copy ANSI, editor export and Rerun); the right decoration shows the duration once the block closed.
  * Renders nothing itself: the decorations live inside the pooled emulator,
  * and the store notifies this component to create or dispose them.
  */
@@ -50,7 +48,7 @@ const BLOCK_CSS = `
 .terax-block-duration {
   pointer-events: none;
   position: absolute;
-  right: 6px;
+  right: 8px;
   top: 50%;
   transform: translateY(-50%);
   white-space: pre;
@@ -68,33 +66,42 @@ const BLOCK_CSS = `
   transform: translateY(-50%);
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
-  padding: 2px 4px;
+  gap: 8px;
+  padding: 8px;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--background);
   box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
 }
 .terax-block-dot:hover ~ .terax-block-row,
-.terax-block-row:hover { display: flex; }
+.terax-block-row:hover,
+.terax-block:focus-within > .terax-block-row { display: flex; }
 .terax-block-btn {
   pointer-events: auto;
   border: 0;
   border-radius: 4px;
-  padding: 1px 6px;
+  padding: 0 8px;
   font-size: 10px;
   line-height: 1.4;
   color: var(--muted-foreground);
   background: transparent;
   cursor: pointer;
 }
+.terax-block-btn:disabled { opacity: 0.5; cursor: default; }
+.terax-block-btn:focus-visible { outline: 1px solid var(--ring); }
+.terax-block-recovered { position: relative; pointer-events: auto; min-height: 1.4em; }
+.terax-block-recovered { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.terax-block-command { padding-left: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.terax-block-recovered > .terax-block-duration { position: static; transform: none; line-height: 1.4; white-space: normal; text-align: right; max-width: 24ch; }
+.terax-block-recovered > .terax-block-row { z-index: 2; flex-wrap: wrap; }
+.terax-block-state { font-size: 10px; color: var(--muted-foreground); white-space: nowrap; }
 .terax-block-btn:hover {
   background: var(--muted);
   color: var(--foreground);
 }
 `;
 
-function injectStyleOnce(): void {
+export function injectStyleOnce(): void {
   if (typeof document === "undefined") return;
   if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement("style");
@@ -106,9 +113,12 @@ function injectStyleOnce(): void {
 type Props = {
   leafId: number;
   store: BlockStore | null;
+  onError?: BlockErrorHandler;
 };
 
-export function BlockChrome({ leafId, store }: Props) {
+export type BlockErrorHandler = (error: StorageError, retry: () => Promise<void>) => void;
+
+export function BlockChrome({ leafId, store, onError }: Props) {
   const entriesRef = useRef(new Map<number, BlockDecorationEntry>());
 
   useEffect(() => {
@@ -127,7 +137,7 @@ export function BlockChrome({ leafId, store }: Props) {
         return;
       }
       reconcileBlockDecorations(store.getBlocks(), entries, (block) =>
-        createBlockDecorations(slot, leafId, store, block),
+        createBlockDecorations(slot, leafId, store, block, onError),
       );
     };
     const unsubscribe = store.subscribe(reconcile);
@@ -136,7 +146,7 @@ export function BlockChrome({ leafId, store }: Props) {
       unsubscribe();
       disposeAll();
     };
-  }, [store, leafId]);
+  }, [store, leafId, onError]);
 
   return null;
 }
@@ -151,6 +161,7 @@ function createBlockDecorations(
   leafId: number,
   store: BlockStore,
   block: Block,
+  onError?: BlockErrorHandler,
 ): DecorationLike | undefined {
   if (!liveMarker(block.marker)) return undefined;
   const term = slot.term;
@@ -171,7 +182,7 @@ function createBlockDecorations(
         })
       : undefined;
   if (!dot && !duration) return undefined;
-  dot?.onRender((el) => renderDot(el, term, slot, leafId, store, block));
+  dot?.onRender((el) => renderDot(el, term, slot, leafId, store, block, onError));
   duration?.onRender((el) => renderDuration(el, block));
   return {
     dispose: () => {
@@ -199,15 +210,18 @@ function exitDotUatId(status: Block["status"]): string | null {
 function renderDot(
   el: HTMLElement,
   term: Terminal,
-  slot: Slot,
+  _slot: Slot,
   leafId: number,
   store: BlockStore,
   block: Block,
+  onError?: BlockErrorHandler,
 ): void {
   // Never overwrite className: xterm positions the element through it.
   el.classList.add("terax-block");
   el.setAttribute("data-uat", "terminal-block");
-  el.setAttribute("data-uat-key", String(block.id));
+  el.setAttribute("data-uat-key", block.file?.record.blockId ?? String(block.id));
+  el.tabIndex = 0;
+  el.setAttribute("aria-label", `Terminal block ${block.command ?? "command unavailable"}`);
   el.setAttribute(
     "data-uat-index",
     String(Math.max(0, store.getBlocks().indexOf(block))),
@@ -223,12 +237,13 @@ function renderDot(
   if (exitDotId) dot.setAttribute("data-uat", exitDotId);
   else dot.removeAttribute("data-uat");
   // Only "unknown" carries a title: ok and error are self-evident.
-  if (block.status === "unknown") dot.title = "exit status unknown";
+  dot.setAttribute("aria-label", block.interrupted ? "interrupted / exit unknown" : `exit ${block.exitCode ?? block.status}`);
+  if (block.status === "unknown") dot.title = block.interrupted ? "interrupted / exit unknown" : "exit status unknown";
   else dot.removeAttribute("title");
 
   let row = el.querySelector<HTMLDivElement>(":scope > .terax-block-row");
   if (!row) {
-    row = buildActionRow(slot, leafId, store, block);
+    row = buildActionRow(leafId, block, onError);
     el.appendChild(row);
   }
   // The row spans the terminal width so its actions right-align; width
@@ -236,81 +251,69 @@ function renderDot(
   row.style.width = `${term.element?.clientWidth ?? 0}px`;
 }
 
-function buildActionRow(
-  slot: Slot,
+export function buildActionRow(
   leafId: number,
-  store: BlockStore,
   block: Block,
+  onError?: BlockErrorHandler,
 ): HTMLDivElement {
   const row = document.createElement("div");
   row.className = "terax-block-row";
-  const term = slot.term;
-
-  row.appendChild(
-    makeButton(
-      "Copy",
-      () => {
-        if (!liveMarker(block.marker)) return;
-        const buf = term.buffer.active;
-        const start = block.marker.line;
-        const end = nextBlockStartLine(store.getBlocks(), block, buf.length);
-        void navigator.clipboard
-          .writeText(extractBlockText((y) => buf.getLine(y), start, end))
-          .catch(() => {});
-      },
-      "block-copy",
-      block.id,
-    ),
-  );
-
-  row.appendChild(
-    makeButton(
-      "Copy ANSI",
-      () => {
-        if (!liveMarker(block.marker)) return;
-        const start = block.marker.line;
-        const end = Math.max(
-          start,
-          nextBlockStartLine(store.getBlocks(), block, term.buffer.active.length) - 1,
-        );
-        try {
-          const text = slot.serializeAddon.serialize({
-            range: { start, end },
-          });
-          void navigator.clipboard.writeText(text).catch(() => {});
-        } catch (e) {
-          console.warn("[terax] block serialize failed:", e);
-        }
-      },
-      "block-copy-ansi",
-      block.id,
-    ),
-  );
-
-  if (block.command) {
-    row.appendChild(
-      makeButton(
-        "Rerun",
-        () => {
-          writeToSession(leafId, `${block.command}\r`);
-        },
-        "block-rerun",
-        block.id,
-      ),
-    );
+  const key = block.file?.record.blockId ?? block.id;
+  const perform = (task: () => Promise<void>) => {
+    void task().catch((error) => onError?.(storageError(error, block.file ? `${block.file.project}/${block.file.record.outputPath}` : "Terminal output"), task));
+  };
+  const fileAction = (label: string, uat: string, task: () => Promise<void>) => {
+    const button = makeButton(label, () => perform(task), uat, key);
+    button.disabled = !block.file || block.status === "running";
+    row.appendChild(button);
+  };
+  fileAction("Copy", "block-copy", async () => {
+    if (block.file) await navigator.clipboard.writeText(plainOutput(await readBlockOutput(block.file)));
+  });
+  fileAction("Copy ANSI", "block-copy-ansi", async () => {
+    if (block.file) await navigator.clipboard.writeText(await readBlockOutput(block.file));
+  });
+  fileAction("Open in editor", "open-in-editor", async () => {
+    if (block.file) await exportBlock(block.file);
+  });
+  const rerun = makeButton("Rerun", () => {
+    if (!block.interrupted && block.command) writeToSession(leafId, `${block.command}\r`);
+  }, "block-rerun", key);
+  rerun.disabled = block.interrupted === true || !block.command || block.status === "running";
+  row.appendChild(rerun);
+  const send = makeSendToChatButton(leafId, block, async () => block.file ? plainOutput(await readBlockOutput(block.file)) : "", onError);
+  send.disabled = !block.file || block.status === "running";
+  row.appendChild(send);
+  if (block.commandTruncated || block.interrupted || block.status === "unknown") {
+    const state = document.createElement("span");
+    state.className = "terax-block-state";
+    state.textContent = [block.commandTruncated ? "Truncated command" : "", block.interrupted ? "interrupted / exit unknown" : block.status === "unknown" ? "exit unknown" : ""].filter(Boolean).join(" / ");
+    row.appendChild(state);
   }
-
-  row.appendChild(
-    makeSendToChatButton(leafId, block, () => {
-      // The same captured, ANSI-stripped text the Copy button produces; the
-      // button callback has already checked the marker is live.
-      const buf = term.buffer.active;
-      const start = block.marker?.line ?? 0;
-      const end = nextBlockStartLine(store.getBlocks(), block, buf.length);
-      return extractBlockText((y) => buf.getLine(y), start, end);
-    }),
-  );
   return row;
+}
+
+export function renderRecoveredChrome(el: HTMLElement, leafId: number, block: Block, onError?: BlockErrorHandler): void {
+  injectStyleOnce();
+  el.replaceChildren();
+  el.className = "terax-block terax-block-recovered";
+  el.tabIndex = 0;
+  el.setAttribute("aria-label", `Terminal block ${block.command ?? "command unavailable"}`);
+  const dot = document.createElement("span");
+  dot.className = `terax-block-dot is-${block.status}`;
+  dot.setAttribute("data-uat", exitDotUatId(block.status) ?? "exit-dot-unknown");
+  dot.setAttribute("aria-label", block.interrupted ? "interrupted / exit unknown" : `exit ${block.exitCode ?? "unknown"}`);
+  el.appendChild(dot);
+  const command = document.createElement("span");
+  command.className = "terax-block-command";
+  command.textContent = block.command ?? "Command unavailable";
+  el.appendChild(command);
+  const duration = document.createElement("span");
+  renderDuration(duration, block);
+  el.appendChild(duration);
+  const row = buildActionRow(leafId, block, onError);
+  row.style.width = "100%";
+  el.appendChild(row);
 }
 
 /** Output lines carried into a transfer quotation before truncation. */
@@ -365,27 +368,26 @@ export async function sha256Hex(text: string): Promise<string> {
 export function makeSendToChatButton(
   leafId: number,
   block: Block,
-  getRawOutput: () => string,
+  getRawOutput: () => string | Promise<string>,
+  onError?: BlockErrorHandler,
 ): HTMLButtonElement {
   const btn = makeButton(
     "Send to chat",
     () => {
-      if (!liveMarker(block.marker)) return;
-      const raw = getRawOutput();
-      void sha256Hex(raw)
-        .catch(() => "")
-        .then((sha256) => {
-          const detail: SendToChatDetail = {
-            text: buildQuotation(block.command, raw, block.id),
-            source: { blockId: block.id, terminalId: leafId, sha256 },
-          };
-          window.dispatchEvent(
-            new CustomEvent<SendToChatDetail>(SEND_TO_CHAT_EVENT, { detail }),
-          );
-        });
+      if (!block.file && !liveMarker(block.marker)) return;
+      const transfer = async () => {
+        const raw = await getRawOutput();
+        const sha256 = await sha256Hex(raw);
+        const detail: SendToChatDetail = {
+          text: buildQuotation(block.command, raw, block.id),
+          source: { blockId: block.id, terminalId: leafId, sha256 },
+        };
+        window.dispatchEvent(new CustomEvent<SendToChatDetail>(SEND_TO_CHAT_EVENT, { detail }));
+      };
+      void transfer().catch((error) => onError?.(storageError(error, block.file?.record.outputPath ?? "Terminal output"), transfer));
     },
     "block-send-to-chat",
-    block.id,
+    block.file?.record.blockId ?? block.id,
   );
   btn.setAttribute("aria-label", "Send to chat");
   return btn;
@@ -395,17 +397,18 @@ export function makeSendToChatButton(
 function renderDuration(el: HTMLElement, block: Block): void {
   el.classList.add("terax-block", "terax-block-duration");
   const duration = blockDurationMs(block);
-  el.textContent = duration === null ? "" : formatDuration(duration);
+  el.textContent = [block.commandTruncated ? "Truncated command" : "", block.interrupted ? "interrupted / exit unknown" : block.status === "unknown" ? "exit unknown" : "", duration === null ? (block.endedAt ? "duration unknown" : "") : formatDuration(duration)].filter(Boolean).join(" / ");
 }
 
 function makeButton(
   label: string,
   onClick: () => void,
   uatId?: string,
-  uatKey?: number,
+  uatKey?: number | string,
 ): HTMLButtonElement {
   const btn = document.createElement("button");
   btn.type = "button";
+  btn.setAttribute("aria-label", label);
   btn.className = "terax-block-btn";
   btn.textContent = label;
   if (uatId) {

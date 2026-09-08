@@ -47,5 +47,9 @@ end
 
 function __terax_preexec --on-event fish_preexec
     set -l cmd (string replace -ra '[\x00-\x1f\x7f]' ' ' -- "$argv")
-    printf '\e]133;C;%s\e\\' (string sub -l 256 -- "$cmd")
+    set -l truncated 0
+    if test (string length -- "$cmd") -gt 256
+        set truncated 1
+    end
+    printf '\e]133;T;%s\e\\\e]133;C;%s\e\\' "$truncated" (string sub -l 256 -- "$cmd")
 end
