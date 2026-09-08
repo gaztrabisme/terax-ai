@@ -349,3 +349,21 @@ export const UAT_IDS_K12_STATEFUL: UatStatefulEntry[] = [
     state: "a board poll or command failure standing (stale content beneath)",
   },
 ];
+
+export const UAT_IDS_K12F_STATEFUL: UatStatefulEntry[] = [
+  ...["action-row", "action-role", "action-agent", "action-ticket", "action-tokens", "action-cost", "action-duration"].map((id) => ({
+    id,
+    file: "src/modules/pi/components/blocks/ActionRow.tsx",
+    state: "an expanded action in the turn fold or run graph with a persisted ledger record",
+  })),
+  {
+    id: "graph-error",
+    file: "src/modules/pi/components/RunGraph.tsx",
+    state: "a ledger read, transcript watcher, transcript parse or graph layout failure",
+  },
+  ...["child-return-chat", "child-open-ticket"].map((id) => ({
+    id,
+    file: "src/modules/pi/components/AgentTranscriptPane.tsx",
+    state: "a child transcript tab, with navigation enabled by its owning delegation",
+  })),
+];

@@ -195,11 +195,11 @@ describe("cache qualifier (K10)", () => {
     expect(html).toContain(`aria-label="${CACHE_QUALIFIER_TEXT}"`);
   });
 
-  it("renders the qualifier on a zero-usage turn and reports cache unknown", () => {
+  it("replaces a zero-usage footer with an empty completion card", () => {
     const html = render(turnBlocks(zeroUsage));
-    expect(html).toContain('data-uat="cache-qualifier"');
-    expect(html).toContain(`title="${CACHE_QUALIFIER_TEXT}"`);
-    expect(html).toContain("cache unknown");
+    expect(html).toContain('data-uat="error-card"');
+    expect(html).toContain("empty completion: no usage reported");
+    expect(html).not.toContain('data-uat="usage-footer"');
   });
 
   it("renders the qualifier on a turn whose usage is unknown", () => {

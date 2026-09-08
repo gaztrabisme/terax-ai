@@ -17,6 +17,7 @@ import {
   UAT_IDS_K6,
   UAT_IDS_K4_ABSENT,
   UAT_IDS_K4_STATEFUL,
+  UAT_IDS_K12F_STATEFUL,
 } from "./lib/uatIds";
 
 // Entries are repo-root-relative; this test lives in src/.
@@ -70,6 +71,18 @@ describe("UAT_IDS_K4_STATEFUL", () => {
     const reachable = new Set(UAT_IDS_K4.map((entry) => entry.id));
     for (const entry of UAT_IDS_K4_STATEFUL) {
       expect(reachable.has(entry.id)).toBe(false);
+    }
+  });
+});
+
+describe("UAT_IDS_K12F_STATEFUL", () => {
+  it("registers all ten action, graph error and child navigation ids without overlap", () => {
+    expect(UAT_IDS_K12F_STATEFUL).toHaveLength(10);
+    const known = [...UAT_IDS_K4, ...UAT_IDS_K6, ...UAT_IDS_K4_STATEFUL, ...UAT_IDS_K12F_STATEFUL].map((entry) => entry.id);
+    expect(new Set(known).size).toBe(known.length);
+    for (const entry of UAT_IDS_K12F_STATEFUL) {
+      expect(carriesUatId(sourceOf(entry.file), entry.id), entry.id).toBe(true);
+      expect(entry.state.length).toBeGreaterThan(0);
     }
   });
 });

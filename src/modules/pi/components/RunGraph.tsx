@@ -1,12 +1,18 @@
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useChildStore } from "@/modules/pi/lib/childStore";
+import { loadChildTranscript, useChildStore, watchChildTranscripts } from "@/modules/pi/lib/childStore";
 import {
   buildRunGraph,
+  actionTranscriptPath,
+  childAgentId,
   formatNodeStatus,
   type PiRunNode,
 } from "@/modules/pi/lib/runGraph";
 import { usePiStore } from "@/modules/pi/lib/piStore";
+import { initialPiSessionState } from "@/modules/pi/lib/parse";
+import { actionTurnKey, ledgerDiscrepancies, ledgerPath, useLedger } from "@/modules/pi/lib/ledgerStore";
+import { LedgerActionRow, usageFooterId } from "@/modules/pi/components/blocks/ActionRow";
+import { ErrorCard } from "@/modules/pi/components/Transcript";
 
 // React Flow and dagre load only when the pane first mounts.
 const ReactFlow = lazy(() =>
@@ -52,7 +58,7 @@ async function layout(
   g.setGraph({ rankdir: "LR", nodesep: 24, ranksep: 60 });
   g.setDefaultEdgeLabel(() => ({}));
   for (const n of nodes) {
-    g.setNode(n.id, { width: 190, height: 56 });
+    g.setNode(n.id, { width: 190, height: 84 });
   }
   for (const e of edges) {
     g.setEdge(e.source, e.target);
@@ -60,22 +66,45 @@ async function layout(
   dagre.layout(g);
   return nodes.map((n) => {
     const pos = g.node(n.id);
-    return { x: pos.x - 95, y: pos.y - 28 };
+    return { x: pos.x - 95, y: pos.y - 42 };
   });
 }
 
 export function RunGraph({ tabId, onOpenChild }: Props) {
   // tabId keeps the parent in sync with the pane's own session.
-  const parent = usePiStore((s) => s.tabs[tabId]?.state);
+  const entry = usePiStore((s) => s.tabs[tabId]);
+  const parent = entry?.state;
+  const cwd = entry?.cwd;
+  const sessionId = parent?.sessionId;
+  const inFlight = !!parent && ["thinking", "tool", "awaiting-ask"].includes(parent.status);
+  const ledger = useLedger(cwd, sessionId, inFlight);
   const children = useChildStore((s) => s.children);
+  const owners = useChildStore((s) => s.owners);
+  const childErrors = useChildStore((s) => s.errors);
+  const owner = cwd && sessionId ? ledgerPath(cwd, sessionId) : null;
+  const paths = useMemo(() => [...new Set(Object.values(ledger.actions).map((action) => actionTranscriptPath(action, cwd)).filter((path): path is string => !!path))], [ledger.actions, cwd]);
+  useEffect(() => {
+    for (const path of paths) void loadChildTranscript(path, owner ?? undefined);
+  }, [paths, owner]);
+  useEffect(() => {
+    if (!cwd) return;
+    return watchChildTranscripts(cwd, () => {
+      const current = usePiStore.getState().tabs[tabId]?.state;
+      return current?.sessionId && ["thinking", "tool", "awaiting-ask"].includes(current.status)
+        ? ledgerPath(cwd, current.sessionId) : null;
+    });
+  }, [cwd, tabId]);
+  const scopedChildren = useMemo(() => Object.fromEntries(Object.entries(children).filter(([path]) =>
+    paths.includes(path) || (!!owner && owners[path] === owner) || Object.values(ledger.actions).some((action) => action.agentId !== null && action.agentId === childAgentId(path)),
+  )), [children, owners, owner, paths, ledger.actions]);
   const graph = useMemo(
-    () => buildRunGraph(parent ?? { ...emptyParent }, children),
-    [parent, children],
+    () => buildRunGraph(parent ?? emptyParent, scopedChildren, ledger, cwd),
+    [parent, scopedChildren, ledger, cwd],
   );
   const [positions, setPositions] = useState<
     Record<string, { x: number; y: number }>
   >({});
-  const [layoutError, setLayoutError] = useState(false);
+  const [layoutError, setLayoutError] = useState<string | null>(null);
   // React Flow instance + a snapshot of what the viewport was last fitted
   // for. The `fitView` prop only applies at mount, which is before the async
   // dagre layout has placed anything: the fitted viewport then stays behind
@@ -100,14 +129,14 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
     void layout(graph.nodes, graph.edges)
       .then((pos) => {
         if (!alive) return;
-        setLayoutError(false);
+        setLayoutError(null);
         setPositions(
           Object.fromEntries(graph.nodes.map((n, i) => [n.id, pos[i]])),
         );
         fit(fitKey(graph.nodes, pos));
       })
-      .catch(() => {
-        if (alive) setLayoutError(true);
+      .catch((error: unknown) => {
+        if (alive) setLayoutError(`Run graph layout: ${String(error)} (${cwd ?? "."}/.pi/logs/graph.jsonl)`);
       });
     return () => {
       alive = false;
@@ -127,6 +156,7 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
     () =>
       graph.nodes.map((n) => ({
         id: n.id,
+        style: { width: 190, minHeight: 84 },
         position: positions[n.id] ?? { x: 0, y: 0 },
         data: {
           label: (
@@ -150,11 +180,13 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
               <div className="text-xs text-muted-foreground">
                 {formatNodeStatus(n)}
               </div>
+              {n.path ? <button type="button" aria-label={`Open transcript ${n.label}`} className="nodrag rounded text-xs text-muted-foreground underline hover:text-foreground" onClick={(event) => { event.stopPropagation(); onOpenChild(n.path!); }}>Open transcript</button> : null}
+              {n.role === "child" && !n.path ? <div className="text-xs text-muted-foreground">Transcript path not reported</div> : null}
             </div>
           ),
         },
       })),
-    [graph.nodes, positions],
+    [graph.nodes, positions, onOpenChild],
   );
 
   const flowEdges: Edge[] = useMemo(
@@ -168,16 +200,19 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
     [graph.edges],
   );
 
-  if (layoutError) {
-    return (
-      <div className="p-3 text-xs text-muted-foreground">
-        Run graph layout unavailable.
-      </div>
-    );
-  }
+  const errors = [ledger.error, layoutError, ...Object.entries(childErrors)
+    .filter(([path]) => paths.includes(path) || (owner && owners[path] === owner) || (cwd && (path === cwd || path === `${cwd}/.pi/agent-hub`)) || Object.values(ledger.actions).some((action) => action.agentId !== null && action.agentId === childAgentId(path)))
+    .map(([, error]) => error)].filter((error): error is string => !!error);
+  const discrepancies = ledgerDiscrepancies(ledger, inFlight);
 
   return (
-    <div className="h-full w-full">
+    <div className="flex h-full w-full flex-col">
+      {errors.length > 0 ? <div data-uat="graph-error" aria-label="Run graph error" role="alert" className="space-y-2 p-2">
+        {errors.map((text) => <ErrorCard key={text} block={{ kind: "error", text, at: 0 }} />)}
+        <div className="text-xs text-muted-foreground">Previous graph content is stale.</div>
+      </div> : null}
+      {discrepancies.map((text) => <ErrorCard key={text} block={{ kind: "error", text, at: 0 }} />)}
+      <div className="min-h-0 flex-1" aria-label={errors.length ? "Stale run graph" : "Run graph"}>
       <SuspenseWithFallback>
         <ReactFlow
           nodes={flowNodes}
@@ -196,12 +231,20 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
             fittedFor.current = null;
           }}
           onNodeClick={(_, node) => {
-            if (node.id !== "parent") onOpenChild(node.id);
+            const path = graph.nodes.find((n) => n.id === node.id)?.path;
+            if (path) onOpenChild(path);
           }}
         >
           <Background />
         </ReactFlow>
       </SuspenseWithFallback>
+      </div>
+      {Object.keys(ledger.actions).length > 0 ? <div className="max-h-[40%] space-y-1 overflow-auto border-t border-border/60 p-2" aria-label="Run actions">
+        {Object.values(ledger.actions).map((action) => {
+          const turnKey = actionTurnKey(action, ledger, parent?.blocks ?? []);
+          return <LedgerActionRow key={action.actionId} action={action} footerId={turnKey ? usageFooterId(sessionId, turnKey) : undefined} />;
+        })}
+      </div> : null}
     </div>
   );
 }
@@ -222,17 +265,4 @@ function SuspenseWithFallback({ children }: { children: React.ReactNode }) {
   );
 }
 
-const emptyParent = {
-  status: "idle" as const,
-  sessionId: null,
-  blocks: [],
-  openMessageId: null,
-  toolPos: {},
-  askPos: {},
-  tokens: null,
-  seq: 0,
-  startedMs: null,
-  lastMs: null,
-  turnTokens: 0,
-  lastErrorText: null,
-};
+const emptyParent = initialPiSessionState();

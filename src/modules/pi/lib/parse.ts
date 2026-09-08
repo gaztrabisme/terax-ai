@@ -47,6 +47,9 @@ export type PiMessageBlock = {
   parts: PiContentPart[];
   model: string | null;
   usage: PiUsage | null;
+  sourceKey?: string;
+  eventUsage?: PiUsage | null;
+  stopReason?: string | null;
   streaming: boolean;
   /** Creation epoch ms; applyEvent pins it from its optional `now` argument. */
   at: number;
@@ -230,7 +233,7 @@ function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function asUsage(value: unknown): PiUsage | null {
+export function asUsage(value: unknown): PiUsage | null {
   if (!isRecord(value) || typeof value.totalTokens !== "number") return null;
   // usage.cost.total comes from pi's pricing catalog; a missing cost object
   // (or a zero-priced row, local providers included) means no bill.
@@ -243,6 +246,17 @@ function asUsage(value: unknown): PiUsage | null {
     totalTokens: value.totalTokens,
     costTotal: cost && typeof cost.total === "number" ? cost.total : 0,
   };
+}
+
+export function messageSourceKey(message: unknown): string {
+  const stable = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+  };
+  if (!isRecord(message)) return "";
+  const { usage: _usage, ...identity } = message;
+  return JSON.stringify(stable(identity));
 }
 
 // User messages carry a plain string content; assistant messages carry the
@@ -409,13 +423,30 @@ export function applyEvent(
       const usage = asUsage(
         isRecord(event.message) ? event.message.usage : null,
       );
-      if (!usage) return state;
+      const key = messageSourceKey(event.message);
+      const assistant = [...state.blocks].reverse().find(
+        (b) => b.kind === "message" && b.role === "assistant" && b.sourceKey === key,
+      );
+      const previous = assistant?.kind === "message" ? assistant.eventUsage : null;
+      let next = assistant?.kind === "message"
+        ? withMessageBlock(state, assistant.id, (block) => ({
+            ...block,
+            eventUsage: usage,
+            ...(block.eventUsage !== undefined && { usage }),
+          }))
+        : state;
+      if (!usage) return next;
+      if (assistant?.kind === "message" && previous && (usage.input > 0 || usage.output > 0)) {
+        const index = next.blocks.findIndex((b) => b.kind === "message" && b.id === assistant.id);
+        const nextUser = next.blocks.findIndex((b, i) => i > index && b.kind === "message" && b.role === "user");
+        next = { ...next, blocks: next.blocks.filter((b, i) => i <= index || (nextUser >= 0 && i >= nextUser) || b.kind !== "error" || b.text !== "empty completion: no usage reported") };
+      }
       return {
-        ...state,
+        ...next,
         tokens: usage,
         turnUsage: usage,
-        turnTokens: state.turnTokens + usage.totalTokens,
-        sessionCost: state.sessionCost + usage.costTotal,
+        turnTokens: state.turnTokens + usage.totalTokens - (previous?.totalTokens ?? 0),
+        sessionCost: state.sessionCost + usage.costTotal - (previous?.costTotal ?? 0),
       };
     }
     case "auto_retry_start":
@@ -425,6 +456,13 @@ export function applyEvent(
     case "agent_end": {
       const error = asString(event.error);
       if (error === null) {
+        const latestUser = state.blocks.map((b) => b.kind === "message" && b.role === "user").lastIndexOf(true);
+        const currentBlocks = state.blocks.slice(Math.max(0, latestUser));
+        const usages = currentBlocks.flatMap((b) => b.kind === "message" && b.role === "assistant" && b.usage ? [b.eventUsage ?? b.usage] : []);
+        const completed = !currentBlocks.some((b) => b.kind === "message" && (b.stopReason === "error" || b.stopReason === "aborted"));
+        const empty = completed && (usages.length > 0 ? usages.every((usage) => usage.input === 0 && usage.output === 0)
+          : state.turnUsage?.input === 0 && state.turnUsage.output === 0);
+        const text = "empty completion: no usage reported";
         // The retry lifecycle always closes before agent_end, but clear the
         // pending state here too so nothing outlives the run.
         return {
@@ -432,6 +470,9 @@ export function applyEvent(
           status: "done",
           lastErrorText: null,
           retry: null,
+          blocks: empty && !currentBlocks.some((b) => b.kind === "error" && b.text === text)
+            ? [...state.blocks, { kind: "error", text, at: now }]
+            : state.blocks,
         };
       }
       // Failed model request: pi ends every auto-retry attempt with the same
@@ -601,6 +642,8 @@ function applyMessageEnd(
     parts: toParts(message.content),
     model: asString(message.model) ?? block.model,
     usage: usage ?? block.usage,
+    sourceKey: messageSourceKey(message),
+    stopReason: asString(message.stopReason),
     streaming: false,
   }));
   return {

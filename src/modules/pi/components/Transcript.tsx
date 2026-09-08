@@ -52,7 +52,9 @@ import {
   type ArtifactFileRef,
 } from "@/modules/pi/lib/artifacts";
 import type { PiFailedSubmission, PiQueued } from "@/modules/pi/lib/piStore";
-import { CACHE_QUALIFIER_TEXT, cacheShareLabel } from "@/modules/pi/lib/usage";
+import { CACHE_QUALIFIER_TEXT, cacheShareLabel, addUsage, turnUsageIssues } from "@/modules/pi/lib/usage";
+import { actionTurnKey, ledgerDiscrepancies, SESSION_LOG, useLedger, type LedgerSnapshot } from "@/modules/pi/lib/ledgerStore";
+import { LedgerActionRow, usageFooterId } from "@/modules/pi/components/blocks/ActionRow";
 import { KeystoneCard } from "./blocks/KeystoneCard";
 import { ToolStep } from "./blocks/ToolRow";
 
@@ -83,6 +85,7 @@ type Props = {
   /** Returns a queued prompt's text to the composer. Only called pre-ack:
    *  it cannot cancel pi's queue (pi 0.3.0 has no command for that). */
   onRemoveQueued?: (id: string) => void;
+  inFlight?: boolean;
 };
 
 /** Event the artifact pane listens for: select this turn's artifact and
@@ -257,17 +260,6 @@ function cardsByTurn(
   return map;
 }
 
-function addUsage(a: PiUsage, b: PiUsage): PiUsage {
-  return {
-    input: a.input + b.input,
-    output: a.output + b.output,
-    cacheRead: a.cacheRead + b.cacheRead,
-    cacheWrite: a.cacheWrite + b.cacheWrite,
-    totalTokens: a.totalTokens + b.totalTokens,
-    costTotal: a.costTotal + b.costTotal,
-  };
-}
-
 /**
  * Per-turn usage, summed over the turn's assistant messages (a turn with
  * tool calls makes several model requests; pi closes each with its own
@@ -301,7 +293,7 @@ export function formatCost(cost: number): string {
   return cost >= 0.01 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(4)}`;
 }
 
-function ErrorCard({
+export function ErrorCard({
   block,
   retry,
 }: {
@@ -326,7 +318,7 @@ function ErrorCard({
         className="mt-0.5 shrink-0"
       />
       <span className="select-text whitespace-pre-wrap wrap-break-word">
-        {block.text}
+        {block.text.startsWith("prompt rejected:") && !block.text.includes(SESSION_LOG) ? `${block.text} (${SESSION_LOG})` : block.text}
       </span>
       {retry ? (
         <button
@@ -460,6 +452,7 @@ function ChildCard({
         <button
           type="button"
           data-uat="open-transcript"
+          aria-label="Open transcript"
           onClick={() => onOpenChild(path)}
           className="shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-xs hover:bg-accent hover:text-foreground"
         >
@@ -496,6 +489,10 @@ function ActivityFold({
   onToggle,
   cwd,
   onOpenChild,
+  ledger,
+  actionTurns,
+  sessionId,
+  usageError,
 }: {
   turn: Turn;
   usage: PiUsage | null;
@@ -503,21 +500,30 @@ function ActivityFold({
   onToggle: () => void;
   cwd?: string;
   onOpenChild?: (path: string) => void;
+  ledger: LedgerSnapshot;
+  actionTurns: Map<string, string | null>;
+  sessionId?: string | null;
+  usageError?: string;
 }) {
+  const footerId = usageFooterId(sessionId, turn.key);
+  const toolIds = new Set(turn.activity.flatMap((entry) => entry.kind === "tool" ? [entry.block.toolCallId] : []));
+  const extraActions = Object.values(ledger.actions).filter((action) => actionTurns.get(action.actionId) === turn.key && !toolIds.has(action.actionId));
   return (
     <div className="w-full">
       <button
         type="button"
         data-uat="turn-fold"
         data-uat-key={turn.key}
+        aria-label={`Inspect turn ${turn.index + 1} activity`}
+        aria-expanded={open}
         onClick={onToggle}
         className="group flex w-full items-center gap-1.5 rounded-md py-0.5 text-left text-xs text-muted-foreground hover:text-foreground"
       >
         {turn.status === "streaming" ? (
-          <Shimmer duration={1.4}>{streamingLabel(turn)}</Shimmer>
-        ) : (
+          <span id={footerId} tabIndex={-1}><Shimmer duration={1.4}>{streamingLabel(turn)}</Shimmer></span>
+        ) : usageError ? <span>Usage unavailable</span> : (
           <>
-            <span data-uat="usage-footer" data-uat-key={turn.key}>
+            <span id={footerId} tabIndex={-1} data-uat="usage-footer" data-uat-key={turn.key}>
               {workedLabel(turn, usage)}
             </span>
             {/* The unstable cache segment, split out of the footer string:
@@ -552,7 +558,8 @@ function ActivityFold({
                 </div>
               ) : null}
               {entry.kind === "tool" ? (
-                isSubagentTool(entry.block) ? (
+                <ToolStep block={entry.block} action={ledger.actions[entry.block.toolCallId]} footerId={actionTurns.get(entry.block.toolCallId) ? usageFooterId(sessionId, actionTurns.get(entry.block.toolCallId)!) : undefined}>
+                {isSubagentTool(entry.block) ? (
                   <ChildCard
                     block={entry.block}
                     cwd={cwd}
@@ -560,12 +567,12 @@ function ActivityFold({
                   />
                 ) : isBoardTool(entry.block) ? (
                   <BoardChip block={entry.block} />
-                ) : (
-                  <ToolStep block={entry.block} />
-                )
+                ) : null}
+                </ToolStep>
               ) : null}
             </div>
           ))}
+          {extraActions.map((action) => <LedgerActionRow key={action.actionId} action={action} footerId={footerId} />)}
         </div>
       ) : null}
     </div>
@@ -715,6 +722,9 @@ function TurnView({
   onAnswer,
   onDismiss,
   artifactFiles,
+  ledger,
+  actionTurns,
+  usageError,
 }: {
   turn: Turn;
   usage: PiUsage | null;
@@ -727,6 +737,9 @@ function TurnView({
   onAnswer: (requestId: string, answers: PiAskAnswer[]) => void;
   onDismiss: (requestId: string) => void;
   artifactFiles?: Record<string, ArtifactFileRef>;
+  ledger: LedgerSnapshot;
+  actionTurns: Map<string, string | null>;
+  usageError?: string;
 }) {
   // Artifacts only once the answer is final: a streaming document would
   // redraw the pane on every chunk.
@@ -773,7 +786,7 @@ function TurnView({
           </div>
         </div>
       ) : null}
-      {turn.activity.length > 0 || turn.asks.length > 0 ? (
+      {turn.status === "done" || turn.activity.length > 0 || turn.asks.length > 0 ? (
         <ActivityFold
           turn={turn}
           usage={usage}
@@ -781,8 +794,13 @@ function TurnView({
           onToggle={onToggle}
           cwd={cwd}
           onOpenChild={onOpenChild}
+          ledger={ledger}
+          actionTurns={actionTurns}
+          sessionId={sessionId}
+          usageError={usageError}
         />
       ) : null}
+      {usageError ? <div id={usageFooterId(sessionId, turn.key)} tabIndex={-1}><ErrorCard block={{ kind: "error", text: usageError, at: 0 }} /></div> : null}
       {turn.asks.map((ask) => (
         <KeystoneCard
           key={ask.requestId}
@@ -833,19 +851,25 @@ export function Transcript({
   onRetrySubmission,
   queued,
   onRemoveQueued,
+  inFlight,
 }: Props) {
   // Error and retry blocks render as their own cards attached to the turn
   // they belong to, so the turn model never sees them.
   const turns = useMemo(() => groupTurns(messageBlocks(blocks)), [blocks]);
   const cards = useMemo(() => cardsByTurn(blocks), [blocks]);
   const usage = useMemo(() => usageByTurn(blocks), [blocks]);
+  const busy = inFlight ?? turns.some((turn) => turn.status === "streaming");
+  const ledger = useLedger(cwd, sessionId, busy);
+  const actionTurns = useMemo(() => new Map(Object.values(ledger.actions).map((action) => [action.actionId, actionTurnKey(action, ledger, blocks)])), [ledger, blocks]);
+  const usageIssues = useMemo(() => turnUsageIssues(blocks, ledger), [blocks, ledger]);
+  const discrepancies = ledgerDiscrepancies(ledger, busy);
   // Fold state is remembered per turn for as long as this tab lives.
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({});
   const toggle = useCallback((key: string) => {
     setOpenTurns((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
 
-  if (turns.length === 0 && cards.size === 0 && (queued?.length ?? 0) === 0) {
+  if (turns.length === 0 && cards.size === 0 && (queued?.length ?? 0) === 0 && !ledger.error && discrepancies.length === 0) {
     return (
       <div
         data-uat="transcript"
@@ -866,6 +890,8 @@ export function Transcript({
     >
       <Conversation className="min-h-0 flex-1">
         <ConversationContent className="gap-6 p-4">
+          {ledger.error ? <ErrorCard block={{ kind: "error", text: ledger.error, at: 0 }} /> : null}
+          {discrepancies.map((text) => <ErrorCard key={text} block={{ kind: "error", text, at: 0 }} />)}
           {turns.map((turn, i) => (
             <Fragment key={turn.key}>
               <TurnView
@@ -881,8 +907,16 @@ export function Transcript({
                 onAnswer={onAnswer}
                 onDismiss={onDismiss}
                 artifactFiles={artifactFiles}
+                ledger={ledger}
+                actionTurns={actionTurns}
+                usageError={usageIssues.get(i) ?? (
+                  (cards.get(i) ?? []).some((card) => card.kind === "error" && card.text === "empty completion: no usage reported") ? "empty completion: no usage reported" :
+                  turn.status === "done" && (!busy || i < turns.length - 1) && usage.get(i)?.input === 0 && usage.get(i)?.output === 0 &&
+                  !(cards.get(i) ?? []).some((card) => card.kind === "error")
+                    ? "empty completion: no usage reported" : undefined
+                )}
               />
-              {(cards.get(i) ?? []).map((block, j) =>
+              {(cards.get(i) ?? []).filter((block) => block.kind !== "error" || block.text !== "empty completion: no usage reported").map((block, j) =>
                 block.kind === "error" ? (
                   <ErrorCard key={`card-${i}-${j}`} block={block} />
                 ) : (
@@ -910,7 +944,7 @@ export function Transcript({
                 at: 0,
                 text: `submission ${failedSubmission.submissionId} failed: ${
                   failedSubmission.error ?? "the send was refused"
-                }`,
+                } (${SESSION_LOG})`,
               }}
               retry={{
                 submissionId: failedSubmission.submissionId,

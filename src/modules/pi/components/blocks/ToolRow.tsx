@@ -16,6 +16,8 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useState } from "react";
 import type { PiToolBlock } from "@/modules/pi/lib/parse";
+import type { ActionRecord } from "@/modules/pi/lib/ledgerStore";
+import { ActionFields } from "@/modules/pi/components/blocks/ActionRow";
 import { boardOp, isBoardTool } from "@/modules/pi/lib/turns";
 import { panelForTool } from "../renderers/registry";
 
@@ -62,7 +64,7 @@ export function toolSummary(block: PiToolBlock): string {
   return (result.split("\n")[0] ?? "").replace(/\s+/g, " ").slice(0, 160);
 }
 
-function StatusMark({ status }: { status: PiToolBlock["status"] }) {
+function StatusMark({ status }: { status: PiToolBlock["status"] | ActionRecord["status"] }) {
   if (status === "running") {
     return (
       <HugeiconsIcon
@@ -74,14 +76,14 @@ function StatusMark({ status }: { status: PiToolBlock["status"] }) {
       />
     );
   }
-  if (status === "error") {
+  if (status === "error" || status === "failed" || status === "cancelled") {
     return (
       <HugeiconsIcon
         icon={CancelCircleIcon}
         size={13}
         strokeWidth={1.75}
         className="shrink-0 text-destructive"
-        aria-label="error"
+        aria-label={status}
       />
     );
   }
@@ -99,6 +101,9 @@ function StatusMark({ status }: { status: PiToolBlock["status"] }) {
 export type ToolRowProps = {
   block: PiToolBlock;
   defaultOpen?: boolean;
+  action?: ActionRecord;
+  footerId?: string;
+  children?: React.ReactNode;
 };
 
 /**
@@ -107,7 +112,7 @@ export type ToolRowProps = {
  * through the renderer registry when a panel is registered for the tool,
  * otherwise they stay as plain mono text.
  */
-export function ToolStep({ block, defaultOpen = false }: ToolRowProps) {
+export function ToolStep({ block, defaultOpen = false, action, footerId, children }: ToolRowProps) {
   const [open, setOpen] = useState(defaultOpen);
   const Icon = toolFamilyIcon(block.toolName);
   const PanelRenderer = panelForTool(block.toolName)?.renderer;
@@ -119,10 +124,12 @@ export function ToolStep({ block, defaultOpen = false }: ToolRowProps) {
     >
       <button
         type="button"
+        aria-label={`Inspect ${block.toolName} ${block.toolCallId}`}
+        aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[13px] hover:bg-accent/40"
       >
-        <StatusMark status={block.status} />
+        <StatusMark status={action?.status ?? block.status} />
         <HugeiconsIcon
           icon={Icon}
           size={13}
@@ -150,6 +157,10 @@ export function ToolStep({ block, defaultOpen = false }: ToolRowProps) {
       </button>
       {open ? (
         <div className="space-y-2 border-t border-border/60 px-2 py-2">
+          {action ? <ActionFields action={action} footerId={footerId} /> : (
+            <div className="text-xs text-muted-foreground">Action record unavailable</div>
+          )}
+          {children}
           {block.args != null ? (
             <div className="space-y-1">
               <div className="text-xs font-medium text-muted-foreground">
@@ -173,7 +184,7 @@ export function ToolStep({ block, defaultOpen = false }: ToolRowProps) {
                 </pre>
               )
             ) : (
-              <div className="text-xs text-muted-foreground">running...</div>
+              <div className="text-xs text-muted-foreground">{action && action.status !== "running" ? action.status : "running..."}</div>
             )}
           </div>
         </div>

@@ -1,4 +1,5 @@
-import type { PiSessionState } from "./parse";
+import { asUsage, type PiSessionState } from "./parse";
+import { actionDuration, EMPTY_LEDGER, type ActionRecord, type LedgerSnapshot } from "@/modules/pi/lib/ledgerStore";
 
 export type PiRunNodeStatus = "idle" | "running" | "done" | "error";
 
@@ -12,6 +13,7 @@ export type PiRunNode = {
   /** Sum of turn_end usage.totalTokens. */
   tokens: number;
   toolCalls: number;
+  path?: string;
 };
 
 export type PiRunEdge = { source: string; target: string };
@@ -43,7 +45,7 @@ export function formatNodeStatus(node: PiRunNode): string {
  * back to running once its stream has ended.
  */
 export function childStatus(state: PiSessionState): PiRunNodeStatus {
-  if (state.blocks.some((b) => b.kind === "tool" && b.status === "error")) {
+  if (state.status === "error" || state.blocks.some((b) => b.kind === "tool" && b.status === "error")) {
     return "error";
   }
   return state.status === "done" ? "done" : "running";
@@ -56,7 +58,7 @@ export function childStatus(state: PiSessionState): PiRunNodeStatus {
  * the node in error.
  */
 export function parentStatus(state: PiSessionState): PiRunNodeStatus {
-  if (state.blocks.some((b) => b.kind === "tool" && b.status === "error")) {
+  if (state.status === "error" || state.blocks.some((b) => b.kind === "tool" && b.status === "error")) {
     return "error";
   }
   if (state.status === "idle") return "idle";
@@ -67,6 +69,7 @@ export function summarizeChild(file: string, state: PiSessionState): PiRunNode {
   const name = file.split(/[\\/]/).pop() ?? file;
   return {
     id: file,
+    path: file,
     label: name.replace(/\.transcript\.jsonl$/, ""),
     role: "child",
     status: childStatus(state),
@@ -88,28 +91,68 @@ export function summarizeChild(file: string, state: PiSessionState): PiRunNode {
 export function buildRunGraph(
   parent: PiSessionState,
   children: Record<string, PiSessionState>,
+  ledger: LedgerSnapshot = EMPTY_LEDGER,
+  cwd?: string,
 ): PiRunGraph {
-  const parentTokens = parent.tokens?.totalTokens ?? parent.turnTokens;
+  const records = Object.values(ledger.actions);
+  const realChildren = Object.entries(children).filter(([, state]) => hasTask(state));
+  const childNodes = new Map(realChildren.map(([file, state]) => [file, summarizeChild(file, state)]));
+  for (const action of records.filter((r) => r.kind === "delegation")) {
+    const file = actionTranscriptPath(action, cwd) ?? realChildren.find(([file]) => childAgentId(file) === action.agentId)?.[0];
+    const id = file ?? `action:${action.actionId}`;
+    const existing = childNodes.get(id);
+    childNodes.set(id, {
+      id, path: file, label: action.role ?? action.agentId ?? "delegation", role: "child",
+      status: action.status === "failed" || action.status === "cancelled" ? "error"
+        : action.status === "done" ? "done" : existing?.status ?? "running",
+      elapsedMs: actionDuration(action),
+      tokens: action.usage.input !== null && action.usage.output !== null ? action.usage.input + action.usage.output + (action.usage.cacheRead ?? 0) : existing?.tokens ?? 0,
+      toolCalls: existing?.toolCalls ?? 0,
+    });
+  }
+  if (!hasTask(parent) && records.length === 0 && childNodes.size === 0) return { nodes: [], edges: [] };
+  const sourceIds = new Set(records.map((r) => r.usage.sourceEventId).filter((id): id is string => !!id));
+  const sourceTokens = [...sourceIds].reduce((total, id) => {
+    const message = ledger.sources[id]?.event.message as { usage?: unknown } | undefined;
+    return total + (asUsage(message?.usage)?.totalTokens ?? 0);
+  }, 0);
+  const parentTokens = records.length ? sourceTokens : parent.turnTokens;
+  const recordedStatus = records.some((r) => r.status === "failed" || r.status === "cancelled") ? "error"
+    : records.some((r) => r.status === "running") ? "running" : "done";
   const nodes: PiRunNode[] = [
     {
       id: PARENT_NODE_ID,
       label: "pi (parent)",
       role: "parent",
-      status: parentStatus(parent),
+      status: hasTask(parent) ? parentStatus(parent) : recordedStatus,
       elapsedMs:
         parent.startedMs !== null && parent.lastMs !== null
           ? Math.max(0, parent.lastMs - parent.startedMs)
           : null,
       tokens: parentTokens,
-      toolCalls: parent.blocks.filter((b) => b.kind === "tool").length,
+      toolCalls: records.length ? records.filter((r) => r.kind === "tool" || r.kind === "delegation").length : parent.blocks.filter((b) => b.kind === "tool").length,
     },
-    ...Object.entries(children).map(([file, state]) =>
-      summarizeChild(file, state),
-    ),
+    ...childNodes.values(),
   ];
-  const edges: PiRunEdge[] = Object.keys(children).map((file) => ({
+  const edges: PiRunEdge[] = [...childNodes.keys()].map((file) => ({
     source: PARENT_NODE_ID,
     target: file,
   }));
   return { nodes, edges };
+}
+
+export function hasTask(state: PiSessionState): boolean {
+  return state.blocks.some((block) => block.kind === "message" || block.kind === "tool" || block.kind === "ask");
+}
+
+export function childAgentId(file: string): string {
+  return (file.split(/[\\/]/).pop() ?? file).replace(/\.transcript\.jsonl$/, "");
+}
+
+export function actionTranscriptPath(action: ActionRecord, cwd?: string): string | undefined {
+  const path = action.evidencePath?.replace(/\\/g, "/");
+  if (!path?.endsWith(".transcript.jsonl")) return undefined;
+  if (path.startsWith("/") || /^[A-Za-z]:\//.test(path)) return path;
+  if (!cwd || path.split("/").includes("..")) return undefined;
+  return `${cwd.replace(/[\\/]+$/, "")}/${path.replace(/^\.\//, "")}`;
 }

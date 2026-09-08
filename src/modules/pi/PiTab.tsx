@@ -33,7 +33,10 @@ import { RunGraph } from "./components/RunGraph";
 import { SessionSearch, scrollToSnippet } from "./components/SessionSearch";
 import { viewButtonClass } from "./components/ModeStrip";
 import type { PiSessionHit } from "./lib/sessions";
-import { useChildStore } from "./lib/childStore";
+import { useChildStore, watchChildTranscripts } from "./lib/childStore";
+import { ledgerPath } from "./lib/ledgerStore";
+import { activatePiTab, CHILD_NAVIGATION_EVENT, SHOW_USAGE_EVENT, type ChildNavigation } from "./lib/childNavigation";
+import { TicketSheet } from "./components/board/TicketSheet";
 import { invoke } from "@tauri-apps/api/core";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import {
@@ -49,7 +52,6 @@ import { uiStatePath, useUiStateStore } from "@/modules/state/uiState";
 import { usePiLayout } from "./lib/layoutStore";
 import { messageBlocks } from "./lib/parse";
 import { usePiStore } from "./lib/piStore";
-import { watchTranscripts } from "./lib/rpc-client";
 import { PI_MODULE_PREFS_DEFAULTS } from "./lib/settingsSchema";
 import { groupTurns } from "./lib/turns";
 
@@ -150,6 +152,7 @@ export function PiTab({
     n: number;
   } | null>(null);
   const [pendingHit, setPendingHit] = useState<PiSessionHit | null>(null);
+  const [childTicketId, setChildTicketId] = useState<string | null>(null);
 
   const transition = (event: ViewEvent) => {
     const next = viewReducer(viewState, event);
@@ -158,6 +161,34 @@ export function PiTab({
     dispatch(event);
   };
   const toggle = (view: View) => transition({ type: "toggle", view, narrow });
+
+  useEffect(() => {
+    const navigate = (event: Event) => {
+      const detail = (event as CustomEvent<ChildNavigation>).detail;
+      if (detail?.tabId !== tabId) return;
+      setChildTicketId(detail.ticketId);
+      if (detail.ticketId) {
+        if (viewState.view !== "board") transition({ type: "toggle", view: "board", narrow });
+      } else transition({ type: "close" });
+    };
+    const showUsage = (event: Event) => {
+      const id = (event as CustomEvent<{ footerId: string }>).detail?.footerId;
+      const footer = id ? document.getElementById(id) : null;
+      if (!footer || !rootRef.current?.contains(footer)) return;
+      activatePiTab(tabId);
+      transition({ type: "close" });
+      requestAnimationFrame(() => {
+        footer.scrollIntoView({ block: "center", behavior: "smooth" });
+        footer.focus({ preventScroll: true });
+      });
+    };
+    window.addEventListener(CHILD_NAVIGATION_EVENT, navigate);
+    window.addEventListener(SHOW_USAGE_EVENT, showUsage);
+    return () => {
+      window.removeEventListener(CHILD_NAVIGATION_EVENT, navigate);
+      window.removeEventListener(SHOW_USAGE_EVENT, showUsage);
+    };
+  }, [tabId, viewState, narrow]);
 
   useLayoutEffect(() => {
     if (!active || !rootRef.current) return;
@@ -253,21 +284,12 @@ export function PiTab({
   // child store, feeding the run graph and transcript tabs.
   useEffect(() => {
     if (!cwd) return;
-    let watch: { close: () => Promise<void> } | null = null;
-    let released = false;
-    void watchTranscripts(cwd, (line) => {
-      if (!released) useChildStore.getState().applyLine(line.file, line.line);
-    })
-      .then((w) => {
-        if (released) void w.close();
-        else watch = w;
-      })
-      .catch(() => {});
-    return () => {
-      released = true;
-      void watch?.close();
-    };
-  }, [cwd]);
+    return watchChildTranscripts(cwd, () => {
+      const state = usePiStore.getState().tabs[tabId]?.state;
+      return state?.sessionId && ["thinking", "tool", "awaiting-ask"].includes(state.status)
+        ? ledgerPath(cwd, state.sessionId) : null;
+    });
+  }, [cwd, tabId]);
 
   const blocks = entry?.state.blocks ?? [];
   useEffect(() => {
@@ -531,13 +553,17 @@ export function PiTab({
             }
           >
             {view === "board" && (
+              <>
               <BoardView
+                key={childTicketId ?? "board"}
                 cwd={cwd}
                 data={boardData}
                 framed
                 active={active}
                 mode={viewState.mode === "fullscreen" ? "full" : "rail"}
               />
+              <TicketSheet cwd={cwd} boardBin={PI_MODULE_PREFS_DEFAULTS.boardBin} ticketId={active ? childTicketId : null} onOpenChange={(open) => { if (!open) setChildTicketId(null); }} onRefresh={() => setBoardTick((tick) => tick + 1)} />
+              </>
             )}
             {view === "graph" && active && (
               <RunGraph tabId={tabId} onOpenChild={onOpenChild} />

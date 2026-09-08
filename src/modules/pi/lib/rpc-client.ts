@@ -27,11 +27,17 @@ export type TranscriptWatch = { id: number; close: () => Promise<void> };
 export async function watchTranscripts(
   agentDir: string,
   onLine: (line: PiTranscriptLine) => void,
+  onError?: (error: string) => void,
 ): Promise<TranscriptWatch> {
   const channel = new Channel<PiTranscriptLine>();
   let released = false;
   channel.onmessage = (line) => {
-    if (!released) onLine(line);
+    if (released) return;
+    if (!line || typeof line.file !== "string" || typeof line.line !== "string") {
+      onError?.("invalid transcript watcher frame");
+      return;
+    }
+    onLine(line);
   };
   const id = await invoke<number>("pi_watch_transcripts", {
     agentDir,

@@ -151,11 +151,10 @@ describe("runGraph over the q6 child transcript", () => {
     expect(graph.edges).toEqual([]);
   });
 
-  it("an idle parent keeps its own idle status, not running", () => {
+  it("an idle parent keeps its own idle status without creating a graph node", () => {
     expect(parentStatus(initialPiSessionState())).toBe("idle");
     const graph = buildRunGraph(initialPiSessionState(), {});
-    expect(graph.nodes).toHaveLength(1);
-    expect(graph.nodes[0].status).toBe("idle");
+    expect(graph.nodes).toHaveLength(0);
   });
 
   it("a finished child keeps error as its final status when a tool failed", () => {

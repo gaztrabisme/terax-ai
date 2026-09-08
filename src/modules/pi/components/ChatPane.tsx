@@ -316,6 +316,7 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
         onDismiss={(requestId) => void dismissAsk(tabId, requestId)}
         cwd={cwd}
         sessionId={state?.sessionId ?? null}
+        inFlight={!!state && ["thinking", "tool", "awaiting-ask"].includes(state.status)}
         artifactFiles={artifactFiles}
         failedSubmission={entry?.failedSubmission ?? null}
         onRetrySubmission={retryFailed}

@@ -1,4 +1,5 @@
-import type { PiUsage } from "./parse";
+import { asUsage, messageSourceKey, type PiFeedItem, type PiUsage } from "./parse";
+import { SESSION_LOG, type LedgerSnapshot } from "@/modules/pi/lib/ledgerStore";
 
 /**
  * K10: the provider-neutral qualifier sentence every usage footer carries
@@ -18,4 +19,44 @@ export function cacheShareLabel(usage: PiUsage): string {
   const prompt = usage.input + usage.cacheRead;
   if (prompt <= 0) return "cache unknown";
   return `${Math.round((usage.cacheRead / prompt) * 100)}% cached`;
+}
+
+export function addUsage(a: PiUsage, b: PiUsage): PiUsage {
+  return Object.fromEntries(Object.keys(a).map((key) => [
+    key, a[key as keyof PiUsage] + b[key as keyof PiUsage],
+  ])) as PiUsage;
+}
+
+export function turnUsageIssues(blocks: PiFeedItem[], ledger: LedgerSnapshot): Map<number, string> {
+  const sources = new Map<string, PiUsage | null>();
+  for (const source of Object.values(ledger.sources)) {
+    if (source.type !== "turn_end") continue;
+    const message = source.event.message as { usage?: unknown } | null;
+    sources.set(messageSourceKey(message), asUsage(message?.usage));
+  }
+  const groups = new Map<number, { displayed: PiUsage | null; source: PiUsage | null; missing: boolean; known: boolean }>();
+  let turn = -1;
+  for (const block of blocks) {
+    if (block.kind === "message" && block.role === "user") { turn += 1; continue; }
+    if (block.kind !== "message" || block.role !== "assistant" || block.streaming) continue;
+    const index = Math.max(0, turn);
+    const group = groups.get(index) ?? { displayed: null, source: null, missing: false, known: true };
+    if (block.usage) group.displayed = group.displayed ? addUsage(group.displayed, block.usage) : block.usage;
+    const committed = block.sourceKey && sources.has(block.sourceKey);
+    const source = committed ? sources.get(block.sourceKey!) : block.eventUsage;
+    if (source) group.source = group.source ? addUsage(group.source, source) : source;
+    if (source === undefined) group.known = false;
+    if (source === null) group.missing = true;
+    groups.set(index, group);
+  }
+  const issues = new Map<number, string>();
+  for (const [turn, group] of groups) {
+    if (!group.known) continue;
+    const equal = group.displayed && group.source && !group.missing &&
+      Object.keys(group.displayed).every((key) =>
+        Math.abs(group.displayed![key as keyof PiUsage] - group.source![key as keyof PiUsage]) < 1e-9,
+      );
+    if (!equal) issues.set(turn, `usage-discrepancy: displayed=${JSON.stringify(group.displayed)}; source=${group.missing ? "missing usage " : ""}${JSON.stringify(group.source)} (${SESSION_LOG})`);
+  }
+  return issues;
 }

@@ -19,6 +19,7 @@ import {
 } from "./lib/parse";
 import { usePiStore } from "./lib/piStore";
 import { useChildStore } from "./lib/childStore";
+import { CHILD_NAVIGATION_EVENT } from "./lib/childNavigation";
 import {
   loadLayouts,
   PI_LAYOUT_STORAGE_KEY,
@@ -275,6 +276,16 @@ afterEach(() => {
 });
 
 describe("PiTab mode strip", () => {
+  it("opens the requested child ticket on its owning Board and returns to chat", async () => {
+    boardTickets = [{ id: "ticket-1", status: "align", title: "Decision" }];
+    render(<PiStack tabs={tabs()} activeId={1} onOpenChild={() => {}} />);
+    act(() => window.dispatchEvent(new CustomEvent(CHILD_NAVIGATION_EVENT, { detail: { tabId: 1, ticketId: "ticket-1" } })));
+    await waitFor(() => expect(uat("board-panel")).toBeTruthy());
+    await waitFor(() => expect(uat("ticket-sheet")?.getAttribute("data-uat-key")).toBe("ticket-1"));
+    act(() => window.dispatchEvent(new CustomEvent(CHILD_NAVIGATION_EVENT, { detail: { tabId: 1, ticketId: null } })));
+    await waitFor(() => expect(uat("board-panel")).toBeNull());
+    expect(uat("ticket-sheet")).toBeNull();
+  });
   it("starts with a quiet 40px toolbar, in order, and no view bodies", () => {
     mount();
     const strip = screen.getByRole("toolbar", { name: "Chat views" });
