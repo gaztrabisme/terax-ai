@@ -1,6 +1,6 @@
 pub mod modules;
 
-use modules::{fs, git, net, pi, pty, shell, workspace};
+use modules::{fs, git, net, pi, pty, shell, uat, workspace};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
@@ -24,6 +24,11 @@ struct LaunchPi(Mutex<bool>);
 fn get_launch_pi(state: State<'_, LaunchPi>) -> bool {
     let mut flag = state.0.lock().expect("LaunchPi mutex poisoned");
     std::mem::take(&mut *flag)
+}
+
+#[tauri::command]
+fn get_launch_uat(state: State<'_, uat::UatState>) -> bool {
+    state.enabled
 }
 
 /// Drained on first read so HMR / re-mounts can't replay the launch path.
@@ -231,10 +236,13 @@ fn clamp_window_to_work_area(window: &tauri::WebviewWindow) {
 pub fn run() {
     let cli_dir = parse_launch_dir();
     let cli_pi = parse_launch_pi();
+    let cli_uat = uat::launch_uat_from_args(std::env::args().skip(1));
     let cli_launcher_dir = parse_launch_launcher_dir();
     workspace::init_launch_cwd(cli_dir.as_deref());
 
     tauri::Builder::default()
+        .manage(uat::UatState::new(cli_uat))
+        .on_window_event(uat::on_window_event)
         .plugin(tauri_plugin_process::init())
         // Skip restoring VISIBLE — frontend calls window.show() after first
         // paint so the user never sees a transparent window-shadow flash on
@@ -297,6 +305,12 @@ pub fn run() {
         .manage(LaunchPi(Mutex::new(cli_pi)))
         .manage(LaunchLauncherDir(Mutex::new(cli_launcher_dir)))
         .invoke_handler(tauri::generate_handler![
+            uat::uat_start,
+            uat::uat_stop,
+            uat::uat_geometry,
+            uat::uat_write_snapshot,
+            uat::uat_report_failure,
+            get_launch_uat,
             pty::pty_open,
             pty::pty_write,
             pty::pty_resize,

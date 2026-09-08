@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Terax UAT snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "runId", "windowId", "seq", "layoutSeq", "capturedAt", "ts", "cwd", "refreshNonce", "health", "lastError", "window", "viewport", "activeTab", "tabs", "elements", "dupes"],
+  "properties": {
+    "v": {"const": 1},
+    "runId": {"type": "string", "minLength": 1},
+    "windowId": {"type": "string", "minLength": 1},
+    "seq": {"type": "integer", "minimum": 1},
+    "layoutSeq": {"type": "integer", "minimum": 0},
+    "capturedAt": {"type": "string", "format": "date-time"},
+    "ts": {"type": "string", "format": "date-time"},
+    "cwd": {"type": "string", "minLength": 1},
+    "refreshNonce": {"type": ["string", "null"]},
+    "health": {"enum": ["ok", "error"]},
+    "lastError": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/error"}]},
+    "window": {"$ref": "#/$defs/window"},
+    "viewport": {"$ref": "#/$defs/viewport"},
+    "activeTab": {"$ref": "#/$defs/tab"},
+    "tabs": {"type": "array", "items": {"$ref": "#/$defs/tab"}},
+    "elements": {"type": "array", "items": {"oneOf": [{"$ref": "#/$defs/element"}, {"$ref": "#/$defs/secret"}]}},
+    "dupes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  },
+  "$defs": {
+    "point": {
+      "type": "object", "additionalProperties": false, "required": ["x", "y"],
+      "properties": {"x": {"type": "number"}, "y": {"type": "number"}}
+    },
+    "rect": {
+      "type": "object", "additionalProperties": false, "required": ["x", "y", "w", "h"],
+      "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "w": {"type": "number", "minimum": 0}, "h": {"type": "number", "minimum": 0}}
+    },
+    "window": {
+      "type": "object", "additionalProperties": false,
+      "required": ["x", "y", "w", "h", "scale", "cssToPoint", "driverUnits", "driverOrigin", "contentOffset", "displayId", "displayPhysicalOrigin", "displayDriverOrigin", "coordinateStatus"],
+      "properties": {
+        "x": {"type": "number"}, "y": {"type": "number"},
+        "w": {"type": "number", "exclusiveMinimum": 0}, "h": {"type": "number", "exclusiveMinimum": 0},
+        "scale": {"type": "number", "exclusiveMinimum": 0},
+        "cssToPoint": {"type": "number", "exclusiveMinimum": 0},
+        "driverUnits": {"enum": ["macos-points", "logical-pixels"]},
+        "driverOrigin": {"$ref": "#/$defs/point"},
+        "contentOffset": {"$ref": "#/$defs/point"},
+        "displayId": {"type": "string"},
+        "displayPhysicalOrigin": {"$ref": "#/$defs/point"},
+        "displayDriverOrigin": {"$ref": "#/$defs/point"},
+        "coordinateStatus": {"enum": ["supported", "unsupported-mixed-dpi", "unavailable"]}
+      }
+    },
+    "viewport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["w", "h", "scrollX", "scrollY"],
+      "properties": {"w": {"type": "number", "minimum": 0}, "h": {"type": "number", "minimum": 0}, "scrollX": {"type": "number"}, "scrollY": {"type": "number"}}
+    },
+    "tab": {
+      "type": "object", "additionalProperties": false, "required": ["uat", "key", "kind", "title", "active"],
+      "properties": {
+        "uat": {"type": "string", "minLength": 1}, "key": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["pi", "terminal", "child", "editor", "markdown", "git", "settings", "board", "graph"]},
+        "title": {"type": "string", "maxLength": 200}, "active": {"type": "boolean"}
+      }
+    },
+    "error": {
+      "type": "object", "additionalProperties": false, "required": ["code", "message", "at", "consecutiveFailures", "logPath"],
+      "properties": {
+        "code": {"type": "string"}, "message": {"type": "string", "maxLength": 200},
+        "at": {"type": "string", "format": "date-time"}, "consecutiveFailures": {"type": "integer", "minimum": 1},
+        "logPath": {"type": ["string", "null"]}
+      }
+    },
+    "props": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string"}, "status": {"type": "string"},
+        "mode": {"enum": ["closed", "popover", "panel", "fullscreen"]},
+        "returnMode": {"enum": ["closed", "popover", "panel", null]},
+        "count": {"type": "integer", "minimum": 0},
+        "runningCount": {"type": "integer", "minimum": 0}, "doneCount": {"type": "integer", "minimum": 0},
+        "role": {"type": "string"}, "agentId": {"type": ["string", "null"]},
+        "ticketId": {"type": ["string", "null"]}, "actionId": {"type": ["string", "null"]},
+        "sessionId": {"type": ["string", "null"]}, "turnId": {"type": ["string", "null"]},
+        "submissionId": {"type": ["string", "null"]}, "sourceEventId": {"type": ["string", "null"]},
+        "inputTokens": {"type": ["integer", "null"], "minimum": 0},
+        "outputTokens": {"type": ["integer", "null"], "minimum": 0},
+        "cacheReadTokens": {"type": ["integer", "null"], "minimum": 0},
+        "cost": {"type": ["number", "null"], "minimum": 0}, "currency": {"type": ["string", "null"]},
+        "durationMs": {"type": ["integer", "null"], "minimum": 0},
+        "exit": {"oneOf": [{"type": "integer"}, {"enum": ["running", "unknown"]}]},
+        "path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source": {"type": "string"}, "stale": {"type": "boolean"},
+        "gateSource": {"enum": ["human", "machine"]}, "gateVerdict": {"enum": ["pass", "fail", "pending"]}
+      }
+    },
+    "element": {
+      "type": "object", "additionalProperties": false,
+      "required": ["uat", "scope", "index", "key", "role", "label", "rect", "hitRect", "enabled", "checked", "hidden", "interactable", "unstable", "summary", "props"],
+      "properties": {
+        "uat": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+        "scope": {"type": "string", "minLength": 1},
+        "index": {"type": ["integer", "null"], "minimum": 0},
+        "key": {"type": "string", "minLength": 1},
+        "role": {"enum": ["textbox", "button", "checkbox", "radio", "tab", "group", "pane", "status", "block", "link", "list", "row", "frame", "separator"]},
+        "label": {"type": "string", "maxLength": 200},
+        "rect": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/rect"}]},
+        "hitRect": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/rect"}]},
+        "enabled": {"type": "boolean"}, "checked": {"type": ["boolean", "null"]},
+        "hidden": {"type": "boolean"}, "interactable": {"type": "boolean"},
+        "unstable": {"type": "boolean"}, "summary": {"type": "boolean"},
+        "text": {"type": "string", "maxLength": 200}, "props": {"$ref": "#/$defs/props"}
+      }
+    },
+    "secret": {
+      "type": "object", "additionalProperties": false, "required": ["uat", "scope", "index", "key", "secret"],
+      "properties": {
+        "uat": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+        "scope": {"type": "string", "minLength": 1},
+        "index": {"type": ["integer", "null"], "minimum": 0},
+        "key": {"type": "string", "minLength": 1}, "secret": {"const": true}
+      }
+    }
+  }
+}

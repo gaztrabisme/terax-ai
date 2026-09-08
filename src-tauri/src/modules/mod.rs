@@ -5,4 +5,5 @@ pub mod pi;
 pub mod proc;
 pub mod pty;
 pub mod shell;
+pub mod uat;
 pub mod workspace;

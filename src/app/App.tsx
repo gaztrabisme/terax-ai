@@ -78,6 +78,7 @@ import { SidebarRail, type SidebarViewId } from "@/modules/sidebar";
 import { SourceControlPanel, useSourceControl } from "@/modules/source-control";
 import { StatusBar } from "@/modules/statusbar";
 import { MAX_PANES_PER_TAB, useTabs, useWorkspaceCwd } from "@/modules/tabs";
+import { useUat } from "@/modules/uat/bootstrap";
 import {
   clearFocusedTerminal,
   disposeSession,
@@ -310,6 +311,7 @@ export default function App() {
   const setWorkspaceEnv = useWorkspaceEnvStore((s) => s.setEnv);
   const [launchCwd, setLaunchCwd] = useState<string | null>(null);
   const [launchCwdResolved, setLaunchCwdResolved] = useState(false);
+  useUat(tabs, activeId, launchCwdResolved ? launchCwd : null);
   const [pendingDeleteTabs, setPendingDeleteTabs] = useState<number[] | null>(
     null,
   );
