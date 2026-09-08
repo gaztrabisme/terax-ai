@@ -28,10 +28,31 @@ export const PI_LAYOUT_IMPORTED_KEY = "terax.pi.layout.v1.imported";
 
 export type UiViewWidths = Record<UiView, { widthCss: number | null }>;
 
+/**
+ * One tab of a recorded window (K11c). `id` is the tab's stable opaque id,
+ * never the numeric list position. `sessionId` is reserved for the pi session
+ * locator a later unit records once K11a's manifest exposes it.
+ */
+export type UiTabRecord = {
+  id: string;
+  kind: string;
+  cwd?: string;
+  path?: string;
+  sessionId?: string;
+};
+
+export type UiWindowState = {
+  tabs: UiTabRecord[];
+  activeTabId: string;
+};
+
+/** Window id of the single app window until multi-window lands. */
+export const MAIN_WINDOW_ID = "main";
+
 export type UiStateDoc = {
   v: 1;
-  /** Reserved for the window/tab tree; nothing writes it yet. */
-  windows: Record<string, unknown>;
+  /** Open-tab records per window, written by the tab store (K11c). */
+  windows: Record<string, UiWindowState>;
   views: UiViewWidths;
   sessionsQuery: string;
   folds: Record<string, boolean>;
@@ -60,6 +81,7 @@ export function defaultUiState(): UiStateDoc {
 
 export type UiStatePatch = {
   views?: Partial<UiViewWidths>;
+  windows?: Record<string, UiWindowState>;
   sessionsQuery?: string;
   folds?: Record<string, boolean>;
   selectedArtifact?: string | null;
@@ -91,6 +113,49 @@ function sanitizeWidths(raw: unknown): UiViewWidths {
   return views;
 }
 
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** Keep only well-formed window records; anything else is dropped. */
+export function sanitizeWindows(
+  raw: unknown,
+): Record<string, UiWindowState> {
+  const windows: Record<string, UiWindowState> = {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return windows;
+  }
+  for (const [windowId, entry] of Object.entries(
+    raw as Record<string, unknown>,
+  )) {
+    if (!nonEmptyString(windowId)) continue;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      continue;
+    }
+    const value = entry as Record<string, unknown>;
+    if (!Array.isArray(value.tabs) || !nonEmptyString(value.activeTabId)) {
+      continue;
+    }
+    const tabs: UiTabRecord[] = [];
+    for (const tab of value.tabs) {
+      if (typeof tab !== "object" || tab === null || Array.isArray(tab)) {
+        continue;
+      }
+      const t = tab as Record<string, unknown>;
+      if (!nonEmptyString(t.id) || !nonEmptyString(t.kind)) continue;
+      tabs.push({
+        id: t.id,
+        kind: t.kind,
+        ...(nonEmptyString(t.cwd) && { cwd: t.cwd }),
+        ...(nonEmptyString(t.path) && { path: t.path }),
+        ...(nonEmptyString(t.sessionId) && { sessionId: t.sessionId }),
+      });
+    }
+    windows[windowId] = { tabs, activeTabId: value.activeTabId };
+  }
+  return windows;
+}
+
 /** Parse and sanitize the file payload; unusable input yields null. */
 export function parseUiState(raw: string | null): UiStateDoc | null {
   if (!raw) return null;
@@ -106,13 +171,7 @@ export function parseUiState(raw: string | null): UiStateDoc | null {
   const value = data as Record<string, unknown>;
   if (value.v !== UI_STATE_VERSION) return null;
   const doc = defaultUiState();
-  if (
-    typeof value.windows === "object" &&
-    value.windows !== null &&
-    !Array.isArray(value.windows)
-  ) {
-    doc.windows = { ...(value.windows as Record<string, unknown>) };
-  }
+  doc.windows = sanitizeWindows(value.windows);
   doc.views = sanitizeWidths(value.views);
   if (typeof value.sessionsQuery === "string") {
     doc.sessionsQuery = value.sessionsQuery;
@@ -369,6 +428,9 @@ export const useUiStateStore = create<UiStateStore>()(() => ({
       views: patch.views
         ? { ...previous.views, ...patch.views }
         : previous.views,
+      windows: patch.windows
+        ? { ...previous.windows, ...patch.windows }
+        : previous.windows,
       sessionsQuery: patch.sessionsQuery ?? previous.sessionsQuery,
       folds: patch.folds
         ? { ...previous.folds, ...patch.folds }
@@ -406,6 +468,45 @@ export function recordUiLayout(cwd: string, patch: UiStatePatch): void {
   useUiStateStore.getState().update(cwd, { ...patch, views });
 }
 
+/**
+ * Input shape the tab store hands over for one window snapshot (K11c).
+ */
+export type WindowTabInput = {
+  id: string;
+  kind: string;
+  cwd?: string;
+  path?: string;
+  sessionId?: string;
+};
+
+/** Last serialized window record per cwd: identical snapshots never rewrite. */
+const lastWindows = new Map<string, string>();
+
+/**
+ * Record the open tabs of a window into the project's ui-state doc (K11c,
+ * design.md row "Layout and view state"). Called by the tab store on every
+ * tab change; a snapshot identical to the last one schedules no write. The
+ * record is write-only in this unit: a later unit restores from it.
+ */
+export function recordWindowTabs(
+  cwd: string,
+  tabs: WindowTabInput[],
+  activeTabId: string,
+  windowId: string = MAIN_WINDOW_ID,
+): void {
+  if (!cwd) return;
+  const windowState: UiWindowState = {
+    tabs: tabs.map((t) => ({ ...t })),
+    activeTabId,
+  };
+  const serialized = JSON.stringify({ [windowId]: windowState });
+  if (lastWindows.get(cwd) === serialized) return;
+  lastWindows.set(cwd, serialized);
+  useUiStateStore.getState().update(cwd, {
+    windows: { [windowId]: windowState },
+  });
+}
+
 /** Test seam: forget docs, pending writes, loaded cwds and the import flag. */
 export function resetUiStateForTests(): void {
   loaded.clear();
@@ -413,6 +514,7 @@ export function resetUiStateForTests(): void {
   queue.length = 0;
   ensuredDirs.clear();
   bucketConsumed = false;
+  lastWindows.clear();
   if (timer) {
     clearTimeout(timer);
     timer = null;

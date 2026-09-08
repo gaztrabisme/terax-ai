@@ -15,10 +15,12 @@ import {
   parseUiState,
   PI_LAYOUT_IMPORTED_KEY,
   PI_LAYOUT_STORAGE_KEY,
+  recordWindowTabs,
   resetUiStateForTests,
   setUiStateStorageForTests,
   uiStatePath,
   useUiStateStore,
+  type UiTabRecord,
 } from "./uiState";
 
 const WORKSPACE = { kind: "local" } as const;
@@ -273,6 +275,99 @@ describe("uiState localStorage import", () => {
         }),
       ),
     ).toEqual(Object.assign(defaultUiState(), { folds: { b: false } }));
+  });
+});
+
+describe("uiState windows record (K11c)", () => {
+  it("records the window's tabs and active tab, keeping other fields", async () => {
+    const files = fakeProjectFiles();
+    files.set(
+      uiStatePath("/w"),
+      JSON.stringify({
+        v: 1,
+        views: { board: { widthCss: 360 } },
+        sessionsQuery: "kept",
+      }),
+    );
+    await useUiStateStore.getState().load("/w");
+
+    const tabs: UiTabRecord[] = [
+      { id: "term1a", kind: "terminal", cwd: "/w" },
+      { id: "pita8b2", kind: "pi", cwd: "/w" },
+      { id: "ed1tor3", kind: "editor", path: "/w/src/a.ts" },
+    ];
+    recordWindowTabs("/w", tabs, "pita8b2");
+    await vi.advanceTimersByTimeAsync(250);
+    const written = JSON.parse(files.get(uiStatePath("/w")) ?? "null");
+    expect(written.windows.main).toEqual({
+      tabs,
+      activeTabId: "pita8b2",
+    });
+    expect(written.views.board).toEqual({ widthCss: 360 });
+    expect(written.sessionsQuery).toBe("kept");
+
+    // A second open sees the same window record from the file.
+    resetUiStateForTests();
+    await useUiStateStore.getState().load("/w");
+    expect(useUiStateStore.getState().docs["/w"].windows.main).toEqual({
+      tabs,
+      activeTabId: "pita8b2",
+    });
+  });
+
+  it("skips the write when the window snapshot is unchanged", async () => {
+    fakeProjectFiles();
+    await useUiStateStore.getState().load("/w");
+    invoke.mockClear();
+    const tabs: UiTabRecord[] = [{ id: "pita8b2", kind: "pi", cwd: "/w" }];
+    recordWindowTabs("/w", tabs, "pita8b2");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(writes()).toHaveLength(1);
+
+    recordWindowTabs("/w", tabs.map((t) => ({ ...t })), "pita8b2");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(writes()).toHaveLength(1);
+
+    recordWindowTabs("/w", tabs, "term1a");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(writes()).toHaveLength(2);
+  });
+
+  it("sanitizes windows from the file: shape-valid rows survive, junk drops", async () => {
+    const files = fakeProjectFiles();
+    files.set(
+      uiStatePath("/w"),
+      JSON.stringify({
+        v: 1,
+        windows: {
+          main: {
+            tabs: [
+              { id: "pita8b2", kind: "pi", cwd: "/w", sessionId: "s-1" },
+              { id: 7, kind: "terminal" },
+              { kind: "editor" },
+              { id: "ed1tor3", kind: "editor", path: "/w/a.ts", cwd: 9 },
+              "junk",
+            ],
+            activeTabId: "pita8b2",
+          },
+          broken: { tabs: "nope", activeTabId: "x" },
+          "": { tabs: [], activeTabId: "x" },
+        },
+      }),
+    );
+    await useUiStateStore.getState().load("/w");
+    const doc = useUiStateStore.getState().docs["/w"];
+    expect(doc.windows.main).toEqual({
+      tabs: [
+        { id: "pita8b2", kind: "pi", cwd: "/w", sessionId: "s-1" },
+        // id and kind are required; a malformed optional field only drops
+        // that field, never the row.
+        { id: "ed1tor3", kind: "editor", path: "/w/a.ts" },
+      ],
+      activeTabId: "pita8b2",
+    });
+    expect(doc.windows.broken).toBeUndefined();
+    expect(doc.windows[""]).toBeUndefined();
   });
 });
 

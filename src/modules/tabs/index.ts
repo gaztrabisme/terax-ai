@@ -15,4 +15,10 @@ export {
   useTabs,
 } from "./lib/useTabs";
 export { useWorkspaceCwd } from "./lib/useWorkspaceCwd";
+export {
+  mintSid,
+  registerStableId,
+  resetStableIdsForTests,
+  stableIdOf,
+} from "./lib/sid";
 export { TabBar } from "./TabBar";

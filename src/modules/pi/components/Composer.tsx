@@ -9,12 +9,14 @@ import { cn } from "@/lib/utils";
 import { native } from "@/lib/native";
 import {
   clearDraft,
+  emptyChatMeta,
   loadDraft,
   loadDraftMeta,
   saveDraft,
   saveDraftMeta,
-  type DraftMeta,
+  type ChatDraftMeta,
 } from "@/modules/pi/lib/drafts";
+import { stableIdOf } from "@/modules/tabs/lib/sid";
 import type { PiImageAttachment } from "@/modules/pi/lib/parse";
 import { usePiStore } from "@/modules/pi/lib/piStore";
 import {
@@ -271,6 +273,10 @@ export function Composer({
   onSubmit,
   onStop,
 }: Props) {
+  // K11c draft key: the tab's stable opaque id from the tab store. The
+  // numeric id is only the fallback for renders outside the store (tests);
+  // in-app every tab registers its stable id at creation.
+  const draftKey = stableIdOf(tabId) ?? String(tabId);
   const stopRef = useRef(onStop);
   stopRef.current = onStop;
   const submitRef = useRef(onSubmit);
@@ -515,7 +521,7 @@ export function Composer({
     editor.commands.clearContent();
     setChips([]);
     setNotice(null);
-    if (cwd) void clearDraft(cwd, tabId);
+    if (cwd) void clearDraft(cwd, draftKey);
     return true;
   };
   performSubmitRef.current = performSubmit;
@@ -596,7 +602,7 @@ export function Composer({
   useEffect(() => {
     if (!editor || !cwd) return;
     let alive = true;
-    void loadDraft(cwd, tabId).then((md) => {
+    void loadDraft(cwd, draftKey, { migrateFrom: tabId }).then((md) => {
       if (alive && md && editor.isEmpty) {
         editor.commands.setContent(md, { contentType: "markdown" });
       }
@@ -604,7 +610,7 @@ export function Composer({
     return () => {
       alive = false;
     };
-  }, [editor, cwd, tabId]);
+  }, [editor, cwd, draftKey, tabId]);
 
   // Debounced autosave; cleared on submit by clearDraft.
   useEffect(() => {
@@ -613,7 +619,7 @@ export function Composer({
     const onUpdate = () => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
-        void saveDraft(cwd, tabId, editor.getMarkdown());
+        void saveDraft(cwd, draftKey, editor.getMarkdown());
       }, 500);
     };
     editor.on("update", onUpdate);
@@ -621,7 +627,7 @@ export function Composer({
       editor.off("update", onUpdate);
       window.clearTimeout(timer);
     };
-  }, [editor, cwd, tabId]);
+  }, [editor, cwd, draftKey]);
 
   // Send to chat (K8): App forwards a terminal block's quotation to this tab
   // through pi:insert-draft. The text appends after the existing content with
@@ -651,9 +657,9 @@ export function Composer({
           .run();
       }
       if (!alive) return;
-      void saveDraft(cwd, tabId, editor.getMarkdown());
-      void loadDraftMeta(cwd, tabId)
-        .then((meta): DraftMeta => meta ?? { v: 1, sources: [] })
+      void saveDraft(cwd, draftKey, editor.getMarkdown());
+      void loadDraftMeta(cwd, draftKey)
+        .then((meta): ChatDraftMeta => meta ?? emptyChatMeta())
         .then((meta) => {
           meta.sources.push({
             blockId: detail.source.blockId,
@@ -661,7 +667,7 @@ export function Composer({
             sha256: detail.source.sha256,
             insertedAt: new Date().toISOString(),
           });
-          return saveDraftMeta(cwd, tabId, meta);
+          return saveDraftMeta(cwd, draftKey, meta);
         })
         .catch(() => {
           // The sidecar is evidence, not load-bearing: a failed write still
@@ -673,7 +679,7 @@ export function Composer({
       alive = false;
       window.removeEventListener(INSERT_DRAFT_EVENT, handler);
     };
-  }, [editor, cwd, tabId]);
+  }, [editor, cwd, draftKey, tabId]);
 
   // A send pi refused (success:false response, or the write threw) and a
   // queued Remove hand their text back through the store: put it and its

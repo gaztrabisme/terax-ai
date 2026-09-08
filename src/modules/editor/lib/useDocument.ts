@@ -10,17 +10,36 @@ type ReadResult =
 
 export type DocumentState =
   | { status: "loading" }
-  | { status: "ready"; content: string; size: number }
+  | { status: "ready"; content: string; size: number; recovered?: boolean }
   | { status: "binary"; size: number }
   | { status: "toolarge"; size: number; limit: number }
   | { status: "error"; message: string };
 
+/** K11c: what the recover hook may hand back to open with a draft buffer. */
+export type RecoveryPayload = {
+  content: string;
+  baseSha256: string;
+  draftId: string;
+};
+
 type Options = {
   path: string;
   onDirtyChange?: (dirty: boolean) => void;
+  /** After the file loads: offer the disk text, get a draft buffer back. */
+  recover?: (diskContent: string) => Promise<RecoveryPayload | null>;
+  /** Gate every write-through to disk; false refuses (K11c conflict). */
+  beforeWrite?: () => Promise<boolean>;
+  /** The buffer reached disk: the draft mirror is now stale. */
+  onWritten?: () => void;
 };
 
-export function useDocument({ path, onDirtyChange }: Options) {
+export function useDocument({
+  path,
+  onDirtyChange,
+  recover,
+  beforeWrite,
+  onWritten,
+}: Options) {
   const [doc, setDoc] = useState<DocumentState>({ status: "loading" });
   const [dirty, setDirty] = useState(false);
 
@@ -37,6 +56,13 @@ export function useDocument({ path, onDirtyChange }: Options) {
 
   const autoSaveRef = useRef({ autoSave, autoSaveDelay });
   autoSaveRef.current = { autoSave, autoSaveDelay };
+
+  const recoverRef = useRef(recover);
+  recoverRef.current = recover;
+  const beforeWriteRef = useRef(beforeWrite);
+  beforeWriteRef.current = beforeWrite;
+  const onWrittenRef = useRef(onWritten);
+  onWrittenRef.current = onWritten;
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -75,15 +101,30 @@ export function useDocument({ path, onDirtyChange }: Options) {
     setDirty(false);
 
     invoke<ReadResult>("fs_read_file", { path, workspace: currentWorkspaceEnv() })
-      .then((res) => {
+      .then(async (res) => {
         if (cancelled) return;
         if (res.kind === "text") {
+          // K11c: a draft for this file replaces the opening buffer; the
+          // saved reference stays at the disk text so the buffer is dirty.
+          let content = res.content;
+          let recovered = false;
+          const hook = recoverRef.current;
+          if (hook) {
+            const rec = await hook(res.content).catch(() => null);
+            if (cancelled) return;
+            if (rec) {
+              content = rec.content;
+              recovered = rec.content !== res.content;
+            }
+          }
           savedRef.current = res.content;
-          bufferRef.current = res.content;
+          bufferRef.current = content;
+          setDirty(recovered);
           setDoc({
             status: "ready",
-            content: res.content,
+            content,
             size: res.size,
+            ...(recovered && { recovered: true }),
           });
         } else if (res.kind === "binary") {
           setDoc({ status: "binary", size: res.size });
@@ -129,11 +170,21 @@ export function useDocument({ path, onDirtyChange }: Options) {
     return true;
   }, [path]);
 
-  const save = useCallback(async () => {
+  const save = useCallback(async (): Promise<boolean> => {
     clearAutoSaveTimer();
-    if (!dirty) return;
+    if (!dirtyRef.current) return false;
+    // K11c: every write-through passes the gate; a refused save keeps the
+    // buffer dirty (conflict surfaced by the caller).
+    if (beforeWriteRef.current && !(await beforeWriteRef.current())) {
+      return false;
+    }
     await saveNow();
-  }, [dirty, clearAutoSaveTimer, saveNow]);
+    onWrittenRef.current?.();
+    return true;
+  }, [clearAutoSaveTimer, saveNow]);
+
+  const saveRef = useRef(save);
+  saveRef.current = save;
 
   const onChange = useCallback(
     (next: string) => {
@@ -146,11 +197,11 @@ export function useDocument({ path, onDirtyChange }: Options) {
       const { autoSave: active, autoSaveDelay: delay } = autoSaveRef.current;
       if (active && isDirty) {
         timeoutRef.current = setTimeout(() => {
-          saveNow().catch((e) => console.error("[autosave]", e));
+          saveRef.current().catch((e) => console.error("[autosave]", e));
         }, delay);
       }
     },
-    [clearAutoSaveTimer, saveNow],
+    [clearAutoSaveTimer],
   );
 
   useEffect(() => clearAutoSaveTimer, [path, clearAutoSaveTimer]);

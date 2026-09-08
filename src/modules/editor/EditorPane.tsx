@@ -11,10 +11,12 @@ import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { EDITOR_THEME_EXT } from "./lib/themes";
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import { Prec, type Extension } from "@codemirror/state";
 import { vim } from "@replit/codemirror-vim";
@@ -27,6 +29,10 @@ import { initVimGlobals, vimHandlersExtension } from "./lib/vim";
 
 initVimGlobals();
 import { resolveLanguage } from "./lib/languageResolver";
+import {
+  createEditorDraftController,
+  type EditorDraftUiState,
+} from "./lib/editorDraft";
 import { useDocument } from "./lib/useDocument";
 
 export type EditorPaneHandle = {
@@ -46,6 +52,10 @@ export type EditorPaneHandle = {
 
 type Props = {
   path: string;
+  /** Stable tab id (K11c); without it no draft mirror is kept. */
+  sid?: string;
+  /** Project the draft files belong to; null disables persistence. */
+  projectCwd?: string | null;
   onDirtyChange?: (dirty: boolean) => void;
   onSaved?: () => void;
   onClose?: () => void;
@@ -58,8 +68,50 @@ function formatBytes(n: number): string {
 }
 
 export const EditorPane = forwardRef<EditorPaneHandle, Props>(
-  function EditorPane({ path, onDirtyChange, onSaved, onClose }, ref) {
-    const { doc, onChange, save, reload } = useDocument({ path, onDirtyChange });
+  function EditorPane(
+    { path, sid, projectCwd, onDirtyChange, onSaved, onClose },
+    ref,
+  ) {
+    // K11c: one persistence controller per (tab, project, path). A path
+    // change (preview slot reuse) rebuilds it with fresh state.
+    const [draftState, setDraftState] = useState<EditorDraftUiState>({
+      recovered: false,
+      conflict: null,
+    });
+    const onDirtyChangeRef = useRef(onDirtyChange);
+    onDirtyChangeRef.current = onDirtyChange;
+    const dirtyRef = useRef(false);
+    const controller = useMemo(
+      () =>
+        sid && projectCwd
+          ? createEditorDraftController({
+              cwd: projectCwd,
+              path,
+              sid,
+              isDirty: () => dirtyRef.current,
+              onState: (next) => setDraftState(next),
+            })
+          : null,
+      [sid, projectCwd, path],
+    );
+    useEffect(() => () => controller?.stop(), [controller]);
+
+    const handleDirty = useCallback(
+      (dirty: boolean) => {
+        dirtyRef.current = dirty;
+        if (!dirty) void controller?.onClean();
+        onDirtyChangeRef.current?.(dirty);
+      },
+      [controller],
+    );
+
+    const { doc, onChange, save, reload } = useDocument({
+      path,
+      onDirtyChange: handleDirty,
+      recover: controller?.recover,
+      beforeWrite: controller?.beforeWrite,
+      onWritten: controller?.onWritten,
+    });
     const reloadRef = useRef(reload);
     reloadRef.current = reload;
     const cmRef = useRef<ReactCodeMirrorRef>(null);
@@ -244,12 +296,45 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       );
     }
 
+    // Feed the controller the latest buffer; the debounced mirror writes it
+    // while the document is dirty.
+    const onDocChange = useCallback(
+      (next: string) => {
+        controller?.scheduleSave(next);
+        onChange(next);
+      },
+      [controller, onChange],
+    );
+
     return (
       <div className="flex h-full min-h-0 flex-col">
+        {(draftState.recovered || draftState.conflict) && (
+          <div className="shrink-0 border-b border-border/60 px-2 py-1 text-xs">
+            {draftState.recovered && (
+              <div
+                data-uat="editor-recovered"
+                className="text-amber-600 dark:text-amber-400"
+              >
+                Unsaved, recovered
+              </div>
+            )}
+            {draftState.conflict && (
+              <div
+                data-uat="editor-conflict"
+                className="text-destructive"
+                role="alert"
+              >
+                Save refused: {draftState.conflict.path} changed on disk since
+                this buffer was last saved; the unsaved buffer is kept at{" "}
+                {draftState.conflict.draftPath}.
+              </div>
+            )}
+          </div>
+        )}
         <CodeMirror
           ref={cmRef}
           value={doc.content}
-          onChange={onChange}
+          onChange={onDocChange}
           theme={themeExt}
           extensions={extensions}
           height="100%"

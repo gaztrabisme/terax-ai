@@ -1,7 +1,8 @@
 import { cn } from "@/lib/utils";
 import type { EditorTab, Tab } from "@/modules/tabs";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { EditorPane, type EditorPaneHandle } from "./EditorPane";
+import { windowProjectCwd } from "./lib/editorDraft";
 
 type Props = {
   tabs: Tab[];
@@ -19,6 +20,9 @@ export function EditorStack({
   onCloseTab,
 }: Props) {
   const editors = tabs.filter((t): t is EditorTab => t.kind === "editor");
+  // K11c: drafts belong to the project; the window's project is the first
+  // project-scoped cwd in tab order (pi, board, run-graph).
+  const projectCwd = useMemo(() => windowProjectCwd(tabs), [tabs]);
 
   // Stable per-tab callbacks. Inline arrows in `ref` and `onDirtyChange`
   // change identity every render, which makes React detach+reattach the ref
@@ -102,6 +106,8 @@ export function EditorStack({
               <EditorPane
                 ref={getRefCallback(t.id)}
                 path={t.path}
+                sid={t.sid}
+                projectCwd={projectCwd}
                 onDirtyChange={getDirtyCallback(t.id)}
                 onClose={getCloseCallback(t.id)}
               />

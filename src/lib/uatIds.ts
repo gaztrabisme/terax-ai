@@ -203,6 +203,12 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
     state: "an open editor tab with its document loaded",
   },
   {
+    id: "editor-recovered",
+    file: "src/modules/editor/EditorPane.tsx",
+    state:
+      "an editor tab whose unsaved buffer was restored from its draft (K11c recovery marker)",
+  },
+  {
     id: "turn-queued",
     file: "src/modules/pi/components/Transcript.tsx",
     state: "a chat entry with a queued follow-up prompt",

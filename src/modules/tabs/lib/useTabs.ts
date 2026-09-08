@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   findLeafCwd,
   hasLeaf,
@@ -12,12 +12,19 @@ import {
   splitLeaf,
 } from "@/modules/terminal/lib/panes";
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
+import { recordWindowTabs } from "@/modules/state/uiState";
+import { mintSid, registerStableId } from "./sid";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
 export const MAX_PANES_PER_TAB = 4;
 
+/**
+ * Stable opaque id (K11c) minted at creation and kept beside the numeric id.
+ * Names the tab in `.pi/ui-state.json` and in `.pi/drafts/` filenames.
+ */
 export type TerminalTab = {
   id: number;
+  sid?: string;
   kind: "terminal";
   title: string;
   cwd?: string;
@@ -31,6 +38,7 @@ export type TerminalTab = {
 
 export type EditorTab = {
   id: number;
+  sid?: string;
   kind: "editor";
   title: string;
   path: string;
@@ -45,6 +53,7 @@ export type EditorTab = {
 
 export type MarkdownTab = {
   id: number;
+  sid?: string;
   kind: "markdown";
   title: string;
   path: string;
@@ -52,6 +61,7 @@ export type MarkdownTab = {
 
 export type PiTab = {
   id: number;
+  sid?: string;
   kind: "pi";
   title: string;
   cwd?: string;
@@ -60,6 +70,7 @@ export type PiTab = {
 /** Full-window kanban for a project's board. One per cwd. */
 export type BoardTab = {
   id: number;
+  sid?: string;
   kind: "board";
   title: string;
   cwd: string;
@@ -68,6 +79,7 @@ export type BoardTab = {
 /** Full-window run graph for a pi session. One per cwd. */
 export type RunGraphTab = {
   id: number;
+  sid?: string;
   kind: "run-graph";
   title: string;
   cwd?: string;
@@ -77,6 +89,7 @@ export type RunGraphTab = {
 
 export type AgentTranscriptTab = {
   id: number;
+  sid?: string;
   kind: "agent-transcript";
   title: string;
   path: string;
@@ -84,6 +97,7 @@ export type AgentTranscriptTab = {
 
 export type GitDiffTab = {
   id: number;
+  sid?: string;
   kind: "git-diff";
   title: string;
   path: string;
@@ -94,6 +108,7 @@ export type GitDiffTab = {
 
 export type GitHistoryTab = {
   id: number;
+  sid?: string;
   kind: "git-history";
   title: string;
   repoRoot: string;
@@ -101,6 +116,7 @@ export type GitHistoryTab = {
 
 export type GitCommitFileDiffTab = {
   id: number;
+  sid?: string;
   kind: "git-commit-file";
   title: string;
   repoRoot: string;
@@ -141,9 +157,12 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const [tabs, setTabs] = useState<Tab[]>(() => {
     const tabId = 1;
     const leafId = 2;
+    const sid = mintSid();
+    registerStableId(tabId, sid);
     return [
       {
         id: tabId,
+        sid,
         kind: "terminal",
         title: initial?.title ?? "shell",
         cwd: initial?.cwd,
@@ -163,10 +182,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const newTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
+    const sid = mintSid();
+    registerStableId(tabId, sid);
     setTabs((t) => [
       ...t,
       {
         id: tabId,
+        sid,
         kind: "terminal",
         title: "shell",
         cwd,
@@ -181,10 +203,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const newPrivateTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
+    const sid = mintSid();
+    registerStableId(tabId, sid);
     setTabs((t) => [
       ...t,
       {
         id: tabId,
+        sid,
         kind: "terminal",
         title: "private",
         cwd,
@@ -225,11 +250,14 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           return curr;
         }
         const id = nextIdRef.current++;
+        const sid = mintSid();
+        registerStableId(id, sid);
         targetId = id;
         return [
           ...curr,
           {
             id,
+            sid,
             kind: "editor",
             title: basename(path),
             path,
@@ -261,9 +289,12 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           (t) => t.kind === "editor" && (t as EditorTab).preview,
         );
         const id = nextIdRef.current++;
+        const sid = mintSid();
+        registerStableId(id, sid);
         targetId = id;
         const tab: EditorTab = {
           id,
+          sid,
           kind: "editor",
           title: basename(path),
           path,
@@ -303,8 +334,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         return curr;
       }
       const id = nextIdRef.current++;
+      const sid = mintSid();
+      registerStableId(id, sid);
       targetId = id;
-      return [...curr, { id, kind: "markdown", title: basename(path), path }];
+      return [
+        ...curr,
+        { id, sid, kind: "markdown", title: basename(path), path },
+      ];
     });
     if (targetId !== null) setActiveId(targetId);
     return targetId;
@@ -321,10 +357,12 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         return curr;
       }
       const id = nextIdRef.current++;
+      const sid = mintSid();
+      registerStableId(id, sid);
       targetId = id;
       return [
         ...curr,
-        { id, kind: "agent-transcript", title: basename(path), path },
+        { id, sid, kind: "agent-transcript", title: basename(path), path },
       ];
     });
     if (targetId !== null) setActiveId(targetId);
@@ -333,7 +371,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
 
   const newPiTab = useCallback((cwd?: string) => {
     const id = nextIdRef.current++;
-    setTabs((t) => [...t, { id, kind: "pi", title: "pi", cwd }]);
+    const sid = mintSid();
+    registerStableId(id, sid);
+    setTabs((t) => [...t, { id, sid, kind: "pi", title: "pi", cwd }]);
     setActiveId(id);
     return id;
   }, []);
@@ -347,9 +387,11 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       return existing.id;
     }
     const id = nextIdRef.current++;
+    const sid = mintSid();
+    registerStableId(id, sid);
     const nextTabs = [
       ...curr,
-      { id, kind: "board", title: "Board", cwd } satisfies BoardTab,
+      { id, sid, kind: "board", title: "Board", cwd } satisfies BoardTab,
     ];
     tabsRef.current = nextTabs;
     setTabs(nextTabs);
@@ -378,10 +420,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         return existing.id;
       }
       const id = nextIdRef.current++;
+      const sid = mintSid();
+      registerStableId(id, sid);
       const nextTabs = [
         ...curr,
         {
           id,
+          sid,
           kind: "run-graph",
           title: "Run graph",
           cwd,
@@ -429,10 +474,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       }
 
       const id = nextIdRef.current++;
+      const sid = mintSid();
+      registerStableId(id, sid);
       const nextTabs = [
         ...curr,
         {
           id,
+          sid,
           kind: "git-diff",
           title: computedTitle,
           path: input.path,
@@ -466,10 +514,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         return existing.id;
       }
       const id = nextIdRef.current++;
+      const sid = mintSid();
+      registerStableId(id, sid);
       const nextTabs = [
         ...curr,
         {
           id,
+          sid,
           kind: "git-history",
           title,
           repoRoot: input.repoRoot,
@@ -518,10 +569,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         return existing.id;
       }
       const id = nextIdRef.current++;
+      const sid = mintSid();
+      registerStableId(id, sid);
       const nextTabs = [
         ...curr,
         {
           id,
+          sid,
           kind: "git-commit-file",
           title,
           repoRoot: input.repoRoot,
@@ -746,9 +800,43 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return closedTab;
   }, []);
 
+  // K11c: mirror the open tabs into the project's ui-state.json so a later
+  // unit can restore them (nothing reads windows back yet). The project is
+  // the first project-scoped cwd in tab order: pi, board and run-graph tabs
+  // carry it, while a terminal's cwd is a shell location, not the project.
+  const projectCwd = useMemo(() => {
+    for (const t of tabs) {
+      if (t.kind === "pi" || t.kind === "board" || t.kind === "run-graph") {
+        if (typeof t.cwd === "string" && t.cwd.length > 0) return t.cwd;
+      }
+    }
+    return null;
+  }, [tabs]);
+
+  useEffect(() => {
+    if (!projectCwd) return;
+    const activeSid =
+      tabs.find((t) => t.id === activeId)?.sid ?? tabs[0]?.sid;
+    if (!activeSid) return;
+    recordWindowTabs(
+      projectCwd,
+      tabs.map((t) => ({
+        id: t.sid ?? String(t.id),
+        kind: t.kind,
+        ...("cwd" in t && t.cwd !== undefined && { cwd: t.cwd }),
+        ...(t.kind !== "terminal" &&
+          t.kind !== "board" &&
+          "path" in t && { path: t.path }),
+      })),
+      activeSid,
+    );
+  }, [tabs, activeId, projectCwd]);
+
   const resetWorkspace = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
+    const sid = mintSid();
+    registerStableId(tabId, sid);
     let toDispose: number[] = [];
     setTabs((curr) => {
       toDispose = curr.flatMap((t) =>
@@ -757,6 +845,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       return [
         {
           id: tabId,
+          sid,
           kind: "terminal",
           title: "shell",
           cwd,

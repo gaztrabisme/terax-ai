@@ -647,7 +647,7 @@ describe("composer pi:insert-draft", () => {
     expect(draft!.content).toContain("From terminal block 3");
 
     const sidecar = writeCalls().find(
-      (w) => w.path === "/tmp/proj/.pi/drafts/7.md.json",
+      (w) => w.path === "/tmp/proj/.pi/drafts/7.json",
     );
     expect(sidecar).toBeTruthy();
     const meta = JSON.parse(sidecar!.content) as {
@@ -710,7 +710,7 @@ describe("composer pi:insert-draft", () => {
     const draft = drafts[drafts.length - 1];
     expect(draft.content).toContain("From terminal block 3");
     expect(draft.content).toContain("From terminal block 4");
-    const sidecars = writeCalls().filter((w) => w.path.endsWith("7.md.json"));
+    const sidecars = writeCalls().filter((w) => w.path.endsWith("7.json"));
     const sidecar = sidecars[sidecars.length - 1];
     const meta = JSON.parse(sidecar.content) as {
       sources: { blockId: number }[];
