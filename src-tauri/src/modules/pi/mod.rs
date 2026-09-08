@@ -3,16 +3,17 @@ pub mod auth;
 pub mod attachments;
 mod launch;
 mod launcher;
+mod manifest;
 pub mod prompts;
 pub mod secrets;
 mod session;
 pub mod sessions;
 pub mod transcripts;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use tauri::ipc::Channel;
@@ -235,9 +236,20 @@ pub async fn pi_open(
                 }
             }
         };
+        // K11a session locator: when a pi event names a session, record the
+        // session's exact file in <project>/.pi/session-manifest.json.
+        // Direct-route sessions land under the project store, so the
+        // resolution succeeds once pi saves the file; the checkout route
+        // leaves the locator untouched because no project-store file exists.
+        let manifest_cwd = canonical.clone();
+        let recorded_sessions = Arc::new(Mutex::new(HashSet::new()));
+        let recorded_for_events = Arc::clone(&recorded_sessions);
         session::spawn_session(
             spec,
             move |line| {
+                if let Some(dir) = manifest_cwd.as_deref() {
+                    manifest::note_session_event(dir, &line, &recorded_for_events);
+                }
                 if let Err(e) = on_event.send(line) {
                     log::debug!("pi event send failed (channel closed): {e}");
                 }

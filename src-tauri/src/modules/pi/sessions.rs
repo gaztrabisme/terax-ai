@@ -1,11 +1,14 @@
 //! Read-only listing and search over pi's on-disk session store.
 //!
 //! pi writes sessions as JSONL under
-//! `<agent dir>/sessions/<encoded cwd>/<timestamp>_<id>.jsonl` (vendor
+//! `<sessions root>/<encoded cwd>/<timestamp>_<id>.jsonl` (vendor
 //! pi_agent_rust src/session.rs: Session::create derives the per-project
-//! directory with encode_cwd). This module only ever opens session files for
-//! reading and never writes to the store: the disk is the truth and the app
-//! is a view over the files pi already wrote (philosophy 1, 2).
+//! directory with encode_cwd). Since K11a routes pi's `--session-dir` to the
+//! project, the primary root is `<project>/.pi/sessions`; the runtime agent
+//! dir's own `sessions/` stays readable as a fallback so sessions pi wrote
+//! before the switch still list. This module only ever opens session files
+//! for reading and never writes to the store: the disk is the truth and the
+//! app is a view over the files pi already wrote (philosophy 1, 2).
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -83,26 +86,28 @@ struct FileScan {
 /// src/session.rs encode_cwd: trim leading slashes, replace `/`, `\` and `:`
 /// with `-`, then wrap the whole name in `--`. `/Users/me/Work/Terax` becomes
 /// `--Users-me-Work-Terax--`; `C:\dev\app` becomes `--C--dev-app--`.
-fn encode_cwd(path: &Path) -> String {
+/// Shared with the session manifest, whose exact-path rule needs the same
+/// encoding pi writes.
+pub(crate) fn encode_cwd(path: &Path) -> String {
     let s = path.to_string_lossy();
     let s = s.trim_start_matches(['/', '\\']);
     let s = s.replace(['/', '\\', ':'], "-");
     format!("--{s}--")
 }
 
-/// Session directories to scan for `cwd`: the encoded dir pi writes for it,
-/// or, when that dir is missing (the path was recorded through a symlink or
-/// an older pi laid sessions out differently), every directory under the
-/// sessions root, filtered afterwards by the cwd in each file header.
-fn candidate_dirs(agent_dir: &Path, cwd: &str) -> Vec<PathBuf> {
-    let root = agent_dir.join("sessions");
+/// Session directories under one store root to scan for `cwd`: the encoded
+/// dir pi writes for it, or, when that dir is missing (the path was recorded
+/// through a symlink or an older pi laid sessions out differently), every
+/// directory under the root, filtered afterwards by the cwd in each file
+/// header.
+pub(crate) fn candidate_dirs(root: &Path, cwd: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let primary = root.join(encode_cwd(Path::new(cwd)));
     if primary.is_dir() {
         dirs.push(primary);
         return dirs;
     }
-    let Ok(entries) = fs::read_dir(&root) else {
+    let Ok(entries) = fs::read_dir(root) else {
         return dirs;
     };
     for entry in entries.flatten() {
@@ -112,6 +117,19 @@ fn candidate_dirs(agent_dir: &Path, cwd: &str) -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+/// The session-store roots for one project, in read priority: the project's
+/// own `.pi/sessions` first (sessions routed there since K11a), then the
+/// runtime agent dir's store so sessions pi wrote before the switch still
+/// list. Read-only over both.
+fn session_roots(project_cwd: &str, agent_dir: &str) -> Vec<PathBuf> {
+    let mut roots = vec![Path::new(project_cwd).join(".pi").join("sessions")];
+    let agent = agent_dir.trim();
+    if !agent.is_empty() {
+        roots.push(Path::new(agent).join("sessions"));
+    }
+    roots
 }
 
 /// The header line's cwd and timestamp (vendor SessionHeader, the fields
@@ -288,20 +306,27 @@ fn scan_session_file(path: &Path, cwd: &str, query: Option<&Query>) -> Option<Fi
 
 /// Every session for `cwd`, newest first (RFC 3339 UTC timestamps sort
 /// lexicographically); files without a timestamp sort last, path-descending
-/// for a stable order.
+/// for a stable order. Scans the project store first, then the agent dir's
+/// legacy store; a file found under both is listed once.
 fn collect_sessions(agent_dir: &str, cwd: &str, query: Option<&Query>) -> Vec<FileScan> {
     let mut out = Vec::new();
-    for dir in candidate_dirs(Path::new(agent_dir), cwd) {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for root in session_roots(cwd, agent_dir) {
+        for dir in candidate_dirs(&root, cwd) {
+            let Ok(entries) = fs::read_dir(&dir) else {
                 continue;
-            }
-            if let Some(scan) = scan_session_file(&path, cwd, query) {
-                out.push(scan);
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                if !seen.insert(path.to_string_lossy().into_owned()) {
+                    continue;
+                }
+                if let Some(scan) = scan_session_file(&path, cwd, query) {
+                    out.push(scan);
+                }
             }
         }
     }
@@ -450,7 +475,19 @@ mod tests {
         file_name: &str,
         lines: &[String],
     ) -> PathBuf {
-        let dir = agent_dir.join("sessions").join(dir_name);
+        write_session_at(&agent_dir.join("sessions"), dir_name, file_name, lines)
+    }
+
+    /// Writes one session file under an arbitrary store root: `root/<dir
+    /// name>/<file name>`. The agent-dir form wraps `root` in `sessions/`
+    /// via write_session.
+    fn write_session_at(
+        root: &Path,
+        dir_name: &str,
+        file_name: &str,
+        lines: &[String],
+    ) -> PathBuf {
+        let dir = root.join(dir_name);
         fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join(file_name);
         fs::write(&path, lines.join("\n") + "\n").expect("write session");
@@ -506,6 +543,62 @@ mod tests {
         assert_eq!(sessions[0].tokens, 15, "assistant usage summed");
         assert_eq!(sessions[1].first_prompt, "first prompt");
         assert_eq!(sessions[1].tokens, 413);
+    }
+
+    #[test]
+    fn list_reads_the_project_store_first_and_falls_back_to_the_agent_dir() {
+        let agent_dir = TempDir::new().expect("tempdir");
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_str().expect("utf8");
+        // A new session under the project store (K11a routing) and an old
+        // one under the agent dir's legacy store: both list, newest first.
+        write_session_at(
+            &project.path().join(".pi").join("sessions"),
+            &encoded_for(cwd),
+            "2026-06-10T10-00-00-000Z_new.jsonl",
+            &[
+                header_line(cwd, "2026-06-10T10:00:00.000Z"),
+                user_blocks_line("routed under the project"),
+            ],
+        );
+        write_session_at(
+            &agent_dir.path().join("sessions"),
+            &encoded_for(cwd),
+            "2026-06-08T15-07-02-400Z_old.jsonl",
+            &[
+                header_line(cwd, "2026-06-08T15:07:02.400Z"),
+                user_blocks_line("legacy agent-dir session"),
+            ],
+        );
+        let sessions = list_sessions(agent_dir.path().to_str().expect("utf8"), cwd);
+        assert_eq!(sessions.len(), 2, "project store first, legacy fallback");
+        assert!(
+            sessions[0].path.ends_with("_new.jsonl"),
+            "project-store session sorts newest: {}",
+            sessions[0].path
+        );
+        assert!(sessions[1].path.ends_with("_old.jsonl"));
+        assert_eq!(sessions[0].first_prompt, "routed under the project");
+        assert_eq!(sessions[1].first_prompt, "legacy agent-dir session");
+    }
+
+    #[test]
+    fn list_uses_the_agent_dir_alone_when_the_project_store_is_missing() {
+        let agent_dir = TempDir::new().expect("tempdir");
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_str().expect("utf8");
+        write_session(
+            agent_dir.path(),
+            &encoded_for(cwd),
+            "2026-06-08T15-07-02-400Z_a.jsonl",
+            &[
+                header_line(cwd, "2026-06-08T15:07:02.400Z"),
+                user_blocks_line("pre-switch session"),
+            ],
+        );
+        let sessions = list_sessions(agent_dir.path().to_str().expect("utf8"), cwd);
+        assert_eq!(sessions.len(), 1, "legacy store still lists");
+        assert_eq!(sessions[0].first_prompt, "pre-switch session");
     }
 
     #[test]

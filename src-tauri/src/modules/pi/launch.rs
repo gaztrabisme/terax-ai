@@ -122,13 +122,21 @@ pub(crate) fn resolve_agent_dir(
 /// direct spawn must request the same toolset or pi falls back to its default.
 const DIRECT_TOOLS: &str = "read,grep,find,ls,todo,subagent";
 
-/// Args for a direct pi spawn: `--mode rpc` plus the launcher's PI_BASE_ARGS
-/// role flags. `--provider`/`--model` are omitted when the provider is empty
-/// (then pi uses the agent dir's settings.json default) and `--smol` when the
-/// smol role is empty; `--thinking` and `--tools` always pass, matching the
-/// bash launcher.
-pub fn direct_rpc_args(roles: &PrepareRoles) -> Vec<String> {
-    let mut args = vec!["--mode".to_string(), "rpc".to_string()];
+/// Args for a direct pi spawn: `--session-dir` under the project (K11a
+/// routes sessions to `<project>/.pi/sessions`), then `--mode rpc` plus the
+/// launcher's PI_BASE_ARGS role flags. The session-dir flag leads so it can
+/// never be swallowed by a positional prompt; `--provider`/`--model` are
+/// omitted when the provider is empty (then pi uses the agent dir's
+/// settings.json default) and `--smol` when the smol role is empty;
+/// `--thinking` and `--tools` always pass, matching the bash launcher.
+pub fn direct_rpc_args(roles: &PrepareRoles, project_root: &Path) -> Vec<String> {
+    let session_dir = project_root.join(".pi").join("sessions");
+    let mut args = vec![
+        "--session-dir".to_string(),
+        session_dir.to_string_lossy().into_owned(),
+        "--mode".to_string(),
+        "rpc".to_string(),
+    ];
     let provider = roles.provider.trim();
     if !provider.is_empty() {
         args.push("--provider".to_string());
@@ -212,7 +220,7 @@ pub fn spawn_plan(
         (Some(program), source @ (PathSource::Pref | PathSource::Bundled | PathSource::Checkout)) => {
             Ok(SpawnPlan::Direct {
                 program: program.clone(),
-                args: direct_rpc_args(roles),
+                args: direct_rpc_args(roles, cwd),
                 source,
             })
         }
@@ -556,10 +564,17 @@ mod tests {
             .program
             .starts_with(launcher_home.path().to_str().expect("utf8")));
         assert!(spec.program.ends_with("bin/pi"));
-        // Direct spawns carry the launcher's PI_BASE_ARGS role flags.
+        // Direct spawns carry the project session dir (K11a), then the
+        // launcher's PI_BASE_ARGS role flags.
         assert_eq!(
             spec.args,
             vec![
+                "--session-dir".to_string(),
+                dir.path()
+                    .join(".pi")
+                    .join("sessions")
+                    .to_string_lossy()
+                    .into_owned(),
                 "--mode".to_string(),
                 "rpc".to_string(),
                 "--provider".to_string(),
@@ -814,7 +829,7 @@ mod tests {
             } => {
                 assert!(program.starts_with(launcher_home.path().to_str().expect("utf8")));
                 assert!(program.ends_with("bin/pi"));
-                assert_eq!(args, direct_rpc_args(&roles));
+                assert_eq!(args, direct_rpc_args(&roles, dir.path()));
                 assert_eq!(source, PathSource::Checkout);
             }
             other => panic!("expected a direct spawn, got {other:?}"),
@@ -848,23 +863,60 @@ mod tests {
             thinking: "xhigh".to_string(),
             smol: "omlx/Qwen3.6-35B-A3B-OptiQ-4bit".to_string(),
         };
-        assert_eq!(
-            direct_rpc_args(&roles),
-            vec![
-                "--mode".to_string(),
-                "rpc".to_string(),
-                "--provider".to_string(),
-                "bppc".to_string(),
-                "--model".to_string(),
-                "qwen3.8-27b".to_string(),
-                "--thinking".to_string(),
-                "xhigh".to_string(),
-                "--smol".to_string(),
-                "omlx/Qwen3.6-35B-A3B-OptiQ-4bit".to_string(),
-                "--tools".to_string(),
-                "read,grep,find,ls,todo,subagent".to_string(),
-            ]
-        );
+        let project = tempfile::tempdir().expect("tempdir");
+        let expected = vec![
+            "--session-dir".to_string(),
+            project
+                .path()
+                .join(".pi")
+                .join("sessions")
+                .to_string_lossy()
+                .into_owned(),
+            "--mode".to_string(),
+            "rpc".to_string(),
+            "--provider".to_string(),
+            "bppc".to_string(),
+            "--model".to_string(),
+            "qwen3.8-27b".to_string(),
+            "--thinking".to_string(),
+            "xhigh".to_string(),
+            "--smol".to_string(),
+            "omlx/Qwen3.6-35B-A3B-OptiQ-4bit".to_string(),
+            "--tools".to_string(),
+            "read,grep,find,ls,todo,subagent".to_string(),
+        ];
+        assert_eq!(direct_rpc_args(&roles, project.path()), expected);
+    }
+
+    #[test]
+    fn direct_rpc_args_pass_session_dir_once_before_mode_or_prompt() {
+        let roles = PrepareRoles {
+            provider: "bppc".to_string(),
+            model: "qwen3.8-27b".to_string(),
+            thinking: "xhigh".to_string(),
+            smol: String::new(),
+        };
+        let project = tempfile::tempdir().expect("tempdir");
+        let args = direct_rpc_args(&roles, project.path());
+        let wanted = project
+            .path()
+            .join(".pi")
+            .join("sessions")
+            .to_string_lossy()
+            .into_owned();
+        let flag_positions: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.as_str() == "--session-dir")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(flag_positions, vec![0], "flag appears exactly once, first");
+        assert_eq!(args[1], wanted, "flag value is <project>/.pi/sessions");
+        let mode = args
+            .iter()
+            .position(|a| a == "--mode" || a == "-p")
+            .expect("mode or prompt flag present");
+        assert!(flag_positions[0] < mode, "flag leads --mode/-p");
     }
 
     #[test]
@@ -877,17 +929,26 @@ mod tests {
             thinking: "xhigh".to_string(),
             smol: String::new(),
         };
-        assert_eq!(
-            direct_rpc_args(&roles),
-            vec![
-                "--mode".to_string(),
-                "rpc".to_string(),
-                "--thinking".to_string(),
-                "xhigh".to_string(),
-                "--tools".to_string(),
-                "read,grep,find,ls,todo,subagent".to_string(),
-            ]
-        );
+        let project = tempfile::tempdir().expect("tempdir");
+        let session_dir = vec![
+            "--session-dir".to_string(),
+            project
+                .path()
+                .join(".pi")
+                .join("sessions")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        let mut expected = session_dir.clone();
+        expected.extend([
+            "--mode".to_string(),
+            "rpc".to_string(),
+            "--thinking".to_string(),
+            "xhigh".to_string(),
+            "--tools".to_string(),
+            "read,grep,find,ls,todo,subagent".to_string(),
+        ]);
+        assert_eq!(direct_rpc_args(&roles, project.path()), expected);
         // Whitespace-only counts as unset, and --thinking still passes.
         let blank = PrepareRoles {
             provider: "  ".to_string(),
@@ -895,17 +956,16 @@ mod tests {
             thinking: " ".to_string(),
             smol: " ".to_string(),
         };
-        assert_eq!(
-            direct_rpc_args(&blank),
-            vec![
-                "--mode".to_string(),
-                "rpc".to_string(),
-                "--thinking".to_string(),
-                String::new(),
-                "--tools".to_string(),
-                "read,grep,find,ls,todo,subagent".to_string(),
-            ]
-        );
+        let mut expected_blank = session_dir;
+        expected_blank.extend([
+            "--mode".to_string(),
+            "rpc".to_string(),
+            "--thinking".to_string(),
+            String::new(),
+            "--tools".to_string(),
+            "read,grep,find,ls,todo,subagent".to_string(),
+        ]);
+        assert_eq!(direct_rpc_args(&blank, project.path()), expected_blank);
     }
 
     #[test]

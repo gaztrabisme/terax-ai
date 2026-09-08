@@ -263,7 +263,10 @@ pub fn format_launcher_log(report: &launcher::PrepareReport) -> String {
 /// outcome, and on any failed step refuses the spawn with the text the
 /// frontend shows as entry.error. The report's env overlays `base_env`,
 /// replacing the frontend's EFFICIENT_PI_* and PI_CODING_AGENT_DIR values
-/// with the prepared ones.
+/// with the prepared ones. PI_SESSIONS_DIR rides beside PI_CODING_AGENT_DIR
+/// (K11a): sessions route to `<project>/.pi/sessions`, matching the
+/// `--session-dir` the direct args pass, so the env alone still points new
+/// sessions at the project store.
 pub fn prepare_direct(
     input: launcher::PrepareInput,
     agent_bin: Option<&str>,
@@ -283,6 +286,13 @@ pub fn prepare_direct(
     let mut env = base_env;
     env.extend(report.env.iter().map(|(k, v)| (k.clone(), v.clone())));
     add_board_env(&mut env, &cwd, agent_bin);
+    env.insert(
+        "PI_SESSIONS_DIR".to_string(),
+        cwd.join(".pi")
+            .join("sessions")
+            .to_string_lossy()
+            .into_owned(),
+    );
     Ok(env)
 }
 
@@ -623,6 +633,19 @@ mod tests {
         assert_eq!(
             env.get("PI_CODING_AGENT_DIR").map(String::as_str),
             Some(agent_dir.to_str().expect("utf8"))
+        );
+        // K11a: the prepared env routes pi's sessions under the project,
+        // mirroring the --session-dir the direct args pass.
+        assert_eq!(
+            env.get("PI_SESSIONS_DIR").map(String::as_str),
+            Some(
+                project
+                    .path()
+                    .join(".pi")
+                    .join("sessions")
+                    .to_str()
+                    .expect("utf8")
+            )
         );
         assert_eq!(
             env.get("EFFICIENT_PI_PROVIDER").map(String::as_str),
