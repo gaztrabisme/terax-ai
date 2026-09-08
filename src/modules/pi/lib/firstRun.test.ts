@@ -348,7 +348,7 @@ describe("chosenLocalEndpoints and probeUrlFor", () => {
 
   it("probes <base>/health for bppc from the endpoints settings", () => {
     expect(probeUrlFor(endpoints, "bppc")).toBe(
-      "http://10.0.0.9:8080/v1/health",
+      "http://10.0.0.9:8080/health",
     );
   });
 
@@ -373,18 +373,18 @@ describe("chosenLocalEndpoints and probeUrlFor", () => {
       },
     ];
     expect(probeUrlFor(tmpl, "bppc", "100.100.100.100")).toBe(
-      "http://100.100.100.100:8080/v1/health",
+      "http://100.100.100.100:8080/health",
     );
     // Blank or unset pref keeps the render's 127.0.0.1 fallback.
     expect(probeUrlFor(tmpl, "bppc", "  ")).toBe(
-      "http://127.0.0.1:8080/v1/health",
+      "http://127.0.0.1:8080/health",
     );
     expect(probeUrlFor(tmpl, "bppc")).toBe(
-      "http://127.0.0.1:8080/v1/health",
+      "http://127.0.0.1:8080/health",
     );
     // The placeholder substitution never touches an explicit host.
     expect(probeUrlFor(endpoints, "bppc", "100.100.100.100")).toBe(
-      "http://10.0.0.9:8080/v1/health",
+      "http://10.0.0.9:8080/health",
     );
   });
 });
@@ -500,5 +500,16 @@ describe("buildRows", () => {
       "endpoint-bppc",
       "endpoint-omlx",
     ]);
+  });
+});
+
+describe("probeUrlFor strips the /v1 base", () => {
+  it("probes the server root for omlx and bppc", () => {
+    const endpoints = [
+      { id: "omlx", baseUrl: "http://127.0.0.1:8000/v1" },
+      { id: "bppc", baseUrl: "http://__BPPC_HOST__:8080/v1" },
+    ] as never;
+    expect(probeUrlFor(endpoints, "omlx")).toBe("http://127.0.0.1:8000/api/status");
+    expect(probeUrlFor(endpoints, "bppc", "10.0.0.5")).toBe("http://10.0.0.5:8080/health");
   });
 });

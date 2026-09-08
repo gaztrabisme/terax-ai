@@ -310,10 +310,14 @@ export function probeUrlFor(
   const fallback =
     id === "bppc" ? "http://127.0.0.1:8080" : "http://127.0.0.1:8000";
   const host = bppcHost?.trim() || "127.0.0.1";
+  // The template rows carry the OpenAI-style /v1 base; the status endpoints
+  // of llama-server and oMLX sit at the server root, so drop that suffix.
   const base = (
     endpoints?.find((ep) => ep.id === id)?.baseUrl.trim().replace(/\/+$/, "") ??
     ""
-  ).replace(/__BPPC_HOST__/g, host);
+  )
+    .replace(/__BPPC_HOST__/g, host)
+    .replace(/\/v\d+$/, "");
   return `${base.length > 0 ? base : fallback}${path}`;
 }
 
