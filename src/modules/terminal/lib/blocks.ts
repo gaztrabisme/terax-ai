@@ -81,14 +81,17 @@ export class BlockStore {
    * open (bash 3.2 and PowerShell never send C) a blind block is created from
    * the anchor marker instead: it carries an exit code but no command text and
    * no duration. Without an anchor there is nothing to show, so the event is
-   * dropped (the startup D every shell emits before the first prompt).
+   * dropped (the startup D every shell emits before the first prompt). A null
+   * exit code (unparseable D payload) closes the block as "unknown" rather
+   * than as success.
    */
-  onCommandDone(exitCode: number, anchor?: IMarker | null): void {
+  onCommandDone(exitCode: number | null, anchor?: IMarker | null): void {
     if (this.disposed) return;
     const open = this.openBlock();
     if (open) {
       open.exitCode = exitCode;
-      open.status = exitCode === 0 ? "ok" : "error";
+      open.status =
+        exitCode === null ? "unknown" : exitCode === 0 ? "ok" : "error";
       open.endedAt = this.opts.now?.() ?? null;
     } else {
       if (!liveMarker(anchor)) return;
@@ -98,7 +101,7 @@ export class BlockStore {
         startedAt: null,
         endedAt: this.opts.now?.() ?? null,
         exitCode,
-        status: exitCode === 0 ? "ok" : "error",
+        status: exitCode === null ? "unknown" : exitCode === 0 ? "ok" : "error",
         marker: anchor,
       });
     }

@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   ARTIFACT_CSP,
   artifactCspMeta,
+  attachmentExtensionFromMediaType,
+  attachmentFileName,
   artifactFileName,
   detectArtifacts,
   fencedBlocks,
   htmlDataUrl,
   imageExtensionFromDataUrl,
   injectCsp,
+  turnFileName,
   viewerDocument,
   type ArtifactDoc,
 } from "./artifacts";
@@ -237,6 +240,14 @@ describe("naming helpers", () => {
     expect(imageExtensionFromDataUrl("data:image/png;base64,A")).toBe("png");
     expect(imageExtensionFromDataUrl("data:image/webp;base64,A")).toBe("webp");
     expect(imageExtensionFromDataUrl("data:text/plain;base64,A")).toBe("img");
+  });
+
+  it("shares turn-indexed names with project attachments", () => {
+    expect(turnFileName(4, 2, "png")).toBe("4-2.png");
+    expect(attachmentFileName(4, 2, "image/jpeg")).toBe("4-2.jpg");
+    expect(attachmentFileName(4, 3, "image/webp")).toBe("4-3.webp");
+    expect(attachmentFileName(4, 4, "image/bmp")).toBeNull();
+    expect(attachmentExtensionFromMediaType(" IMAGE/GIF ")).toBe("gif");
   });
 
   it("encodes the consented render as a utf-8 data url", () => {

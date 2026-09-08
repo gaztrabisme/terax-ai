@@ -37,12 +37,13 @@ export function registerCwdHandler(
 /**
  * Block-oriented events distilled from OSC 133, consumed by the per-session
  * BlockStore (see blocks.ts). C carries the command text the shell embeds in
- * the payload (first 256 chars for zsh); D carries the exit code.
+ * the payload (first 256 chars for zsh); D carries the exit code, or null
+ * when the payload has no parseable one.
  */
 export type PromptEvent =
   | { type: "A" }
   | { type: "C"; command: string | null }
-  | { type: "D"; exitCode: number };
+  | { type: "D"; exitCode: number | null };
 
 export type PromptTracker = {
   getMarker: () => IMarker | null;
@@ -112,8 +113,12 @@ export function parseOsc133CommandText(data: string): string | null {
   return text.length > 0 ? text : null;
 }
 
-/** Exit code from an OSC 133 D payload: "D" or "D;<code>". Missing means 0. */
-export function parseOsc133ExitCode(data: string): number {
+/**
+ * Exit code from an OSC 133 D payload: "D" or "D;<code>". Missing or
+ * unparseable means null: the block closes as "unknown" instead of being
+ * reported as success without evidence.
+ */
+export function parseOsc133ExitCode(data: string): number | null {
   const m = data.match(/^D;(-?\d+)/);
-  return m ? Number.parseInt(m[1], 10) : 0;
+  return m ? Number.parseInt(m[1], 10) : null;
 }

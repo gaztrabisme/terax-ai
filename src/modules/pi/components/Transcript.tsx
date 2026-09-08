@@ -10,9 +10,11 @@ import {
   CopyIcon,
   FileCodeIcon,
   FileEditIcon,
+  Folder01Icon,
   Refresh01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Conversation,
   ConversationContent,
@@ -115,6 +117,89 @@ async function openAnswerInEditor(
 function basename(cwd?: string): string | null {
   const base = cwd?.split(/[\\/]/).filter(Boolean).pop();
   return base ?? null;
+}
+
+function projectPath(cwd: string, relative: string): string {
+  const base = cwd.replace(/[\\/]+$/, "");
+  return `${base}/${relative.replace(/^[\\/]+/, "")}`;
+}
+
+function AttachmentActions({
+  cwd,
+  attachments,
+}: {
+  cwd?: string;
+  attachments: Turn["savedAttachments"];
+}) {
+  const button =
+    "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground";
+  return (
+    <div className="mt-1.5 flex flex-wrap justify-end gap-1">
+      {attachments.map((attachment, i) => {
+        const absolute =
+          attachment.path && cwd
+            ? projectPath(cwd, attachment.path)
+            : null;
+        return (
+          <div
+            key={`${attachment.path ?? "failed"}-${i}`}
+            className={cn(
+              "flex max-w-full flex-wrap items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 text-xs",
+              attachment.error ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            <span
+              className="max-w-48 truncate font-mono"
+              title={attachment.path ?? undefined}
+            >
+              {attachment.path ?? `attachment ${i + 1}`}
+            </span>
+            {attachment.error ? (
+              <span>failed: {attachment.error}</span>
+            ) : null}
+            {absolute ? (
+              <>
+                <button
+                  type="button"
+                  title={`Open ${absolute} in the editor`}
+                  onClick={() =>
+                    window.dispatchEvent(
+                      new CustomEvent("pi:open-file", {
+                        detail: { path: absolute },
+                      }),
+                    )
+                  }
+                  className={button}
+                >
+                  <HugeiconsIcon
+                    icon={FileEditIcon}
+                    size={12}
+                    strokeWidth={1.75}
+                  />
+                  Open in editor
+                </button>
+                <button
+                  type="button"
+                  title={`Reveal ${absolute}`}
+                  onClick={() => {
+                    void revealItemInDir(absolute).catch(() => {});
+                  }}
+                  className={button}
+                >
+                  <HugeiconsIcon
+                    icon={Folder01Icon}
+                    size={12}
+                    strokeWidth={1.75}
+                  />
+                  Reveal
+                </button>
+              </>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function streamingLabel(turn: Turn): string {
@@ -528,9 +613,13 @@ function TurnView({
     () => (turn.status === "done" ? detectArtifacts(turn.answer) : []),
     [turn.status, turn.answer],
   );
+  const hasUserContent =
+    turn.user.length > 0 ||
+    (images?.length ?? 0) > 0 ||
+    turn.savedAttachments.length > 0;
   return (
     <div className="flex flex-col gap-2">
-      {turn.user ? (
+      {hasUserContent ? (
         <div className="flex justify-end">
           <div className="max-w-[65%] rounded-md bg-muted/70 px-3.5 py-2 text-[14px] leading-relaxed whitespace-pre-wrap text-foreground">
             {images && images.length > 0 ? (
@@ -546,6 +635,12 @@ function TurnView({
               </div>
             ) : null}
             {turn.user}
+            {turn.savedAttachments.length > 0 ? (
+              <AttachmentActions
+                cwd={cwd}
+                attachments={turn.savedAttachments}
+              />
+            ) : null}
           </div>
         </div>
       ) : null}

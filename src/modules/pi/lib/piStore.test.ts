@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sent: string[] = [];
-const { openPiSessionMock } = vi.hoisted(() => ({
+const { invokeMock, openPiSessionMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
   openPiSessionMock: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("./rpc-client", () => ({ openPiSession: openPiSessionMock }));
 
 openPiSessionMock.mockImplementation(
@@ -37,6 +39,11 @@ describe("piStore", () => {
   beforeEach(() => {
     usePiStore.setState({ tabs: {} });
     sent.length = 0;
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "fs_read_file") return { kind: "text", content: "" };
+      return ".pi/attachments/0-0.png";
+    });
   });
 
   it("stores the session handle and applies events into tabs", async () => {
@@ -80,6 +87,69 @@ describe("piStore", () => {
           source: { type: "base64", mediaType: "image/jpeg", data: "/9j/4AA" },
         },
       ],
+    });
+  });
+
+  it("writes images before sending and records paths on the arriving user block", async () => {
+    await usePiStore.getState().openSession(9, { cwd: "/tmp/p" });
+    await usePiStore.getState().sendPrompt(9, "look", [
+      { mediaType: "image/png", data: "AAAA" },
+    ]);
+    expect(invokeMock).toHaveBeenCalledWith("pi_save_attachment", {
+      cwd: "/tmp/p",
+      turn: 0,
+      n: 0,
+      mediaType: "image/png",
+      data: "AAAA",
+      workspace: { kind: "local" },
+    });
+
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent(
+      '{"type":"message_start","message":{"role":"user","content":"look"}}',
+    );
+    expect(usePiStore.getState().tabs[9]?.state.blocks[0]).toMatchObject({
+      role: "user",
+      savedAttachments: [
+        { path: ".pi/attachments/0-0.png", error: null },
+      ],
+    });
+
+    await usePiStore.getState().sendPrompt(9, "next", [
+      { mediaType: "image/png", data: "BBBB" },
+    ]);
+    expect(invokeMock).toHaveBeenCalledWith("pi_save_attachment", {
+      cwd: "/tmp/p",
+      turn: 1,
+      n: 0,
+      mediaType: "image/png",
+      data: "BBBB",
+      workspace: { kind: "local" },
+    });
+  });
+
+  it("sends the prompt and records the write error when the attachment fails", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "fs_read_file") return { kind: "text", content: "" };
+      throw new Error("disk full");
+    });
+    await usePiStore.getState().openSession(10, { cwd: "/tmp/p" });
+    await usePiStore.getState().sendPrompt(10, "still send", [
+      { mediaType: "image/png", data: "AAAA" },
+    ]);
+    expect(sent).toHaveLength(1);
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent(
+      '{"type":"message_start","message":{"role":"user","content":"still send"}}',
+    );
+    expect(usePiStore.getState().tabs[10]?.state.blocks[0]).toMatchObject({
+      savedAttachments: [{ path: null, error: "disk full" }],
+    });
+    expect(JSON.parse(sent[0])).toMatchObject({
+      type: "prompt",
+      message: "still send",
     });
   });
 

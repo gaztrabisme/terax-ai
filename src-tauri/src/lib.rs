@@ -306,6 +306,7 @@ pub fn run() {
             pi::pi_open,
             pi::pi_home_dir,
             pi::pi_paths,
+            pi::attachments::pi_save_attachment,
             pi::auth::pi_auth_status,
             pi::auth::pi_auth_set,
             pi::auth::pi_auth_clear,

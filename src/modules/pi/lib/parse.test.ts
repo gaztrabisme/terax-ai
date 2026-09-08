@@ -10,6 +10,7 @@ import {
   effectiveQuestionId,
   initialPiSessionState,
   promptLine,
+  recordSavedAttachments,
   resetAsk,
   retryPendingLabel,
   type PiBlock,
@@ -634,5 +635,38 @@ describe("rejected prompt response", () => {
         '{"command":"prompt","success":false,"type":"response"}',
       ),
     ).toBe(base);
+  });
+});
+
+describe("local user attachment metadata", () => {
+  it("records saved paths and write failures on the user message block", () => {
+    let state = applyEvent(
+      initialPiSessionState(),
+      '{"type":"message_start","message":{"role":"user","content":"look"}}',
+    );
+    state = recordSavedAttachments(state, "msg-0", [
+      { path: ".pi/attachments/0-0.png", error: null },
+      { path: null, error: "disk full" },
+    ]);
+    const user = state.blocks[0];
+    expect(user).toMatchObject({
+      kind: "message",
+      role: "user",
+      savedAttachments: [
+        { path: ".pi/attachments/0-0.png", error: null },
+        { path: null, error: "disk full" },
+      ],
+    });
+  });
+
+  it("does not attach local metadata to an assistant block", () => {
+    let state = applyEvent(
+      initialPiSessionState(),
+      '{"type":"message_start","message":{"role":"assistant","content":[]}}',
+    );
+    const unchanged = recordSavedAttachments(state, "msg-0", [
+      { path: ".pi/attachments/0-0.png", error: null },
+    ]);
+    expect(unchanged).toBe(state);
   });
 });

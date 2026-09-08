@@ -50,6 +50,15 @@ export type PiMessageBlock = {
   streaming: boolean;
   /** Creation epoch ms; applyEvent pins it from its optional `now` argument. */
   at: number;
+  /** Local project paths and failures recorded for a user prompt. */
+  savedAttachments?: PiSavedAttachment[];
+};
+
+export type PiSavedAttachment = {
+  /** Relative to the project cwd when the write succeeded. */
+  path: string | null;
+  /** The write error shown when the path is null. */
+  error: string | null;
 };
 
 export type PiToolBlock = {
@@ -475,6 +484,26 @@ function applyMessageStart(
     blocks: [...state.blocks, block],
     openMessageId: role === "assistant" ? block.id : state.openMessageId,
   };
+}
+
+/** Adds local attachment results to one user message without changing pi's
+ *  wire-derived content. */
+export function recordSavedAttachments(
+  state: PiSessionState,
+  messageId: string,
+  attachments: PiSavedAttachment[],
+): PiSessionState {
+  if (attachments.length === 0) return state;
+  const block = state.blocks.find(
+    (item) => item.kind === "message" && item.id === messageId,
+  );
+  if (!block || block.kind !== "message" || block.role !== "user") {
+    return state;
+  }
+  return withMessageBlock(state, messageId, (current) => ({
+    ...current,
+    savedAttachments: attachments,
+  }));
 }
 
 function applyRetryStart(

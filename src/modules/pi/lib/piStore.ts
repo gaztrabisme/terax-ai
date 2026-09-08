@@ -8,10 +8,14 @@ import {
   askResponseLine,
   dismissAsk as dismissAskIn,
   initialPiSessionState,
+  messageBlocks,
   promptLine,
+  recordSavedAttachments,
   resetAsk as resetAskIn,
   type PiAskAnswer,
+  type PiFeedItem,
   type PiImageAttachment,
+  type PiSavedAttachment,
   type PiSessionState,
 } from "./parse";
 import {
@@ -24,6 +28,7 @@ import {
 } from "./providers";
 import { openPiSession, type PiSessionHandle } from "./rpc-client";
 import { PI_MODULE_PREFS_DEFAULTS } from "./settingsSchema";
+import { groupTurns } from "./turns";
 
 export type PiOpenOptions = {
   cwd?: string;
@@ -46,6 +51,8 @@ type PiTabEntry = {
   exitCode: number | null;
   error: string | null;
   roles: PiRoles;
+  cwd?: string;
+  pendingAttachments?: PiSavedAttachment[][];
 };
 
 type PiStore = {
@@ -90,6 +97,48 @@ function patchEntry(
 }
 
 let openGen = 0;
+
+function attachmentError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function applyPiEvent(
+  entry: PiTabEntry,
+  line: string,
+): Pick<PiTabEntry, "state" | "pendingAttachments"> {
+  const previous = entry.state;
+  let state = applyEvent(previous, line);
+  let pending = entry.pendingAttachments ?? [];
+
+  if (state.switching || state.blocks.length < previous.blocks.length) {
+    return { state, pendingAttachments: [] };
+  }
+
+  if (pending.length === 0) {
+    return { state, pendingAttachments: pending };
+  }
+
+  const previousUserIds = new Set(
+    previous.blocks
+      .filter(
+        (block): block is Extract<PiFeedItem, { kind: "message" }> =>
+          block.kind === "message" && block.role === "user",
+      )
+      .map((block) => block.id),
+  );
+  const user = state.blocks.find(
+    (block): block is Extract<PiFeedItem, { kind: "message" }> =>
+      block.kind === "message" &&
+      block.role === "user" &&
+      !previousUserIds.has(block.id),
+  );
+  if (!user || user.kind !== "message") {
+    return { state, pendingAttachments: pending };
+  }
+
+  state = recordSavedAttachments(state, user.id, pending[0]);
+  return { state, pendingAttachments: pending.slice(1) };
+}
 
 /** Global pi prefs from the LazyStore (defaults when not yet hydrated). */
 function globalPiPrefs(): Partial<PiRuntimePrefs> {
@@ -186,6 +235,8 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         model: resolved.model,
         smol: resolved.smol,
       },
+      cwd: opts.cwd,
+      pendingAttachments: [],
     };
     set((s) => ({ tabs: { ...s.tabs, [tabId]: entry } }));
     try {
@@ -204,10 +255,10 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         },
         onEvent: (line) =>
           set((s) =>
-            patchEntry(s.tabs, tabId, (e) => ({
-              ...e,
-              state: applyEvent(e.state, line),
-            })),
+            patchEntry(s.tabs, tabId, (e) => {
+              const next = applyPiEvent(e, line);
+              return { ...e, ...next };
+            }),
           ),
         onExit: (code) =>
           set((s) =>
@@ -237,9 +288,61 @@ export const usePiStore = create<PiStore>()((set, get) => ({
   },
 
   sendPrompt: async (tabId, text, images) => {
-    const session = get().tabs[tabId]?.session;
+    const entry = get().tabs[tabId];
+    const session = entry?.session;
     if (!session) return;
-    await session.send(promptLine(text, images));
+    const attachments = images ?? [];
+    const saved: PiSavedAttachment[] = [];
+    if (attachments.length > 0) {
+      const turn = groupTurns(messageBlocks(entry.state.blocks)).length;
+      for (const [n, image] of attachments.entries()) {
+        try {
+          const path = await invoke<string>("pi_save_attachment", {
+            cwd: entry.cwd ?? "",
+            turn,
+            n,
+            mediaType: image.mediaType,
+            data: image.data,
+            workspace: currentWorkspaceEnv(),
+          });
+          if (typeof path !== "string" || path.length === 0) {
+            throw new Error("attachment writer returned no path");
+          }
+          saved.push({ path, error: null });
+        } catch (error) {
+          saved.push({ path: null, error: attachmentError(error) });
+        }
+      }
+      if (get().tabs[tabId]?.session !== session) return;
+      set((s) =>
+        patchEntry(s.tabs, tabId, (e) => ({
+          ...e,
+          pendingAttachments: [...(e.pendingAttachments ?? []), saved],
+        })),
+      );
+    }
+    try {
+      await session.send(promptLine(text, images));
+    } catch (error) {
+      if (saved.length > 0) {
+        set((s) =>
+          patchEntry(s.tabs, tabId, (e) => {
+            const pending = e.pendingAttachments ?? [];
+            const index = pending.indexOf(saved);
+            return index === -1
+              ? e
+              : {
+                  ...e,
+                  pendingAttachments: [
+                    ...pending.slice(0, index),
+                    ...pending.slice(index + 1),
+                  ],
+                };
+          }),
+        );
+      }
+      throw error;
+    }
   },
 
   answerAsk: async (tabId, requestId, answers) => {

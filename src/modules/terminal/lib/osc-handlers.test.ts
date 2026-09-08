@@ -134,7 +134,7 @@ describe("OSC 133 prompt tracker block events", () => {
     expect(state.inCommand).toBe(false);
   });
 
-  it("reports a bare C as no command text and a bare D as exit code 0", () => {
+  it("reports a bare C as no command text and a bare D as no exit code", () => {
     const { term, handlers } = makeFakeTerm();
     const events: PromptEvent[] = [];
     registerPromptTracker(term, undefined, (e) => events.push(e));
@@ -144,7 +144,7 @@ describe("OSC 133 prompt tracker block events", () => {
 
     expect(events).toEqual([
       { type: "C", command: null },
-      { type: "D", exitCode: 0 },
+      { type: "D", exitCode: null },
     ]);
   });
 
@@ -154,11 +154,12 @@ describe("OSC 133 prompt tracker block events", () => {
     expect(parseOsc133CommandText("C")).toBeNull();
   });
 
-  it("parses negative and multi-digit exit codes", () => {
+  it("parses numeric exit codes and returns null for missing or garbage ones", () => {
+    expect(parseOsc133ExitCode("D;0")).toBe(0);
     expect(parseOsc133ExitCode("D;127")).toBe(127);
     expect(parseOsc133ExitCode("D;-1")).toBe(-1);
-    expect(parseOsc133ExitCode("D")).toBe(0);
-    expect(parseOsc133ExitCode("D;x")).toBe(0);
+    expect(parseOsc133ExitCode("D")).toBeNull();
+    expect(parseOsc133ExitCode("D;garbage")).toBeNull();
   });
 
   it("works without a listener (legacy callers see no change)", () => {

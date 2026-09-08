@@ -247,6 +247,14 @@ const IMAGE_EXTENSIONS: Record<ArtifactDoc["kind"], string> = {
   image: "img",
 };
 
+const ATTACHMENT_EXTENSIONS: Record<string, "png" | "jpg" | "gif" | "webp"> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+};
+
 /** "image/png" -> png, "image/jpeg" -> jpg, unknown -> img. */
 export function imageExtensionFromDataUrl(dataUrl: string): string {
   const match = /^data:image\/([a-z0-9.+-]+)[;,]/i.exec(dataUrl.trim());
@@ -255,6 +263,22 @@ export function imageExtensionFromDataUrl(dataUrl: string): string {
   if (raw === "jpeg") return "jpg";
   if (raw === "svg+xml") return "svg";
   return raw;
+}
+
+/** The extension accepted by the project attachment writer for one media type. */
+export function attachmentExtensionFromMediaType(
+  mediaType: string,
+): "png" | "jpg" | "gif" | "webp" | null {
+  return ATTACHMENT_EXTENSIONS[mediaType.trim().toLowerCase()] ?? null;
+}
+
+/** Shared turn-indexed filename shape used by artifacts and attachments. */
+export function turnFileName(
+  turn: number,
+  n: number,
+  extension: string,
+): string {
+  return `${turn}-${n}.${extension}`;
 }
 
 /** <turn>-<n>.<ext>, the Save name under .pi/artifacts. */
@@ -268,5 +292,15 @@ export function artifactFileName(
     kind === "image" && source
       ? imageExtensionFromDataUrl(source)
       : IMAGE_EXTENSIONS[kind];
-  return `${turn}-${n}.${ext}`;
+  return turnFileName(turn, n, ext);
+}
+
+/** <turn>-<n>.<ext>, the initial name under .pi/attachments. */
+export function attachmentFileName(
+  turn: number,
+  n: number,
+  mediaType: string,
+): string | null {
+  const ext = attachmentExtensionFromMediaType(mediaType);
+  return ext ? turnFileName(turn, n, ext) : null;
 }

@@ -201,3 +201,36 @@ describe("artifact chip", () => {
     expect(event.detail).toEqual({ turn: 3, n: 1 });
   });
 });
+
+describe("attachment chip", () => {
+  it("shows the relative path and both project file actions", () => {
+    const blocks: PiFeedItem[] = [
+      {
+        kind: "message",
+        id: "u-attachment",
+        role: "user",
+        parts: [{ type: "text", text: "look at this" }],
+        model: null,
+        usage: null,
+        streaming: false,
+        at: 1000,
+        savedAttachments: [
+          { path: ".pi/attachments/0-0.png", error: null },
+          { path: null, error: "disk full" },
+        ],
+      },
+    ];
+    const html = renderToStaticMarkup(
+      <Transcript
+        blocks={blocks}
+        cwd="/project"
+        onAnswer={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    expect(html).toContain(".pi/attachments/0-0.png");
+    expect(html).toContain("Open in editor");
+    expect(html).toContain("Reveal");
+    expect(html).toContain("failed: disk full");
+  });
+});

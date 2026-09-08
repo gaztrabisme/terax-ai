@@ -2,6 +2,7 @@ import type {
   PiAskBlock,
   PiBlock,
   PiMessageBlock,
+  PiSavedAttachment,
   PiToolBlock,
 } from "./parse";
 
@@ -21,6 +22,8 @@ export type Turn = {
   user: string;
   /** Text of the last assistant message; while streaming, the latest one. */
   answer: string;
+  /** Project paths and write failures recorded for the user prompt. */
+  savedAttachments: PiSavedAttachment[];
   /** Thinking, narration (assistant text before the answer) and tools, in order. */
   activity: TurnActivityEntry[];
   asks: PiAskBlock[];
@@ -230,6 +233,7 @@ function deriveTurn(group: TurnGroup, index: number, isLast: boolean): Turn {
     index,
     user: userBlock ? messageText(userBlock) : "",
     answer: answerMessage ? messageText(answerMessage) : "",
+    savedAttachments: userBlock?.savedAttachments ?? [],
     activity,
     asks,
     status: streaming ? "streaming" : "done",

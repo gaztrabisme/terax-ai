@@ -1,5 +1,6 @@
 pub mod health;
 pub mod auth;
+pub mod attachments;
 mod launch;
 mod launcher;
 pub mod prompts;
