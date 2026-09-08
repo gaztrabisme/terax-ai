@@ -1,6 +1,6 @@
 // Pure helpers behind the Settings "Pi" tab: preference resolution (global
-// prefs + per-workspace .pi/terax.json), pi CLI table parsing, auth.json
-// editing, and models.json.tmpl round-tripping. No Tauri imports here so the
+// prefs + per-workspace .pi/terax.json), pi CLI table parsing, auth status
+// rendering, and models.json.tmpl round-tripping. No Tauri imports here so the
 // logic stays unit-testable in plain node.
 
 export const PI_THINKING_LEVELS = [
@@ -90,19 +90,23 @@ export type PiSignInPayload = {
 };
 
 /** Exact payload contract for the pi:open-terminal listener (layout worker). */
-export function piSignInPayload(launcherDir: string): PiSignInPayload {
+export function piSignInPayload(
+  launcherDir: string,
+  isWindows = false,
+): PiSignInPayload {
   return {
     cwd: launcherDir,
-    command: piSignInCommand(launcherDir),
+    command: piSignInCommand(launcherDir, isWindows),
     hint: "Type /login <provider> in the pi prompt",
   };
 }
 
 /** Interactive pi command for /login; paths are quoted, $HOME survives quoting. */
-export function piSignInCommand(launcherDir: string): string {
+export function piSignInCommand(launcherDir: string, isWindows = false): string {
   return piSignInCommandResolved(
     `${launcherDir}/bin/pi`,
     `${launcherDir}/pi-home/agent`,
+    isWindows,
   );
 }
 
@@ -110,7 +114,12 @@ export function piSignInCommand(launcherDir: string): string {
 export function piSignInCommandResolved(
   piBin: string,
   agentDir: string,
+  isWindows = false,
 ): string {
+  if (isWindows) {
+    const quotePowerShell = (value: string) => `'${value.replace(/'/g, "''")}'`;
+    return `$env:PI_CODING_AGENT_DIR = ${quotePowerShell(agentDir)}; & ${quotePowerShell(piBin)}`;
+  }
   return `PI_CODING_AGENT_DIR="${agentDir}" "${piBin}"`;
 }
 
@@ -402,44 +411,27 @@ export function modelAcceptsImages(
 }
 
 /// ---------------------------------------------------------------------------
-/// auth.json (verified shape: {"<provider>": {"type":"api_key","key":"..."}})
+/// auth.json status map: {"<provider>": "api_key" | "oauth" | "none"}
 /// ---------------------------------------------------------------------------
 
-export type PiAuthStatus = "key" | "oauth" | "none";
+export type PiAuthStatus = "api_key" | "oauth" | "none";
+export type PiAuthStatusMap = Record<string, PiAuthStatus>;
 
 export function piAuthStatusLabel(status: PiAuthStatus): string {
-  return status === "key" ? "key stored" : status === "oauth" ? "OAuth token" : "not set";
+  return status === "api_key"
+    ? "key stored"
+    : status === "oauth"
+      ? "OAuth token"
+      : "not set";
 }
 
-export function authStatus(entries: unknown, providerId: string): PiAuthStatus {
+export function authStatus(
+  entries: PiAuthStatusMap | null | undefined,
+  providerId: string,
+): PiAuthStatus {
   if (!isObject(entries)) return "none";
-  const entry = entries[providerId];
-  if (!isObject(entry)) return "none";
-  if (entry.type === "api_key" || typeof entry.key === "string") return "key";
-  if (entry.type === "oauth" || typeof entry.access === "string") return "oauth";
-  return "none";
-}
-
-/** Pure merge: sets `{type:"api_key", key}` for one provider, keeps the rest. */
-export function setProviderApiKey(
-  entries: unknown,
-  providerId: string,
-  key: string,
-): Record<string, unknown> {
-  const base = isObject(entries) ? { ...entries } : {};
-  base[providerId] = { type: "api_key", key };
-  return base;
-}
-
-/** Pure removal: drops one provider entry, keeps the rest. */
-export function removeProviderAuth(
-  entries: unknown,
-  providerId: string,
-): Record<string, unknown> {
-  if (!isObject(entries)) return {};
-  const base = { ...entries };
-  delete base[providerId];
-  return base;
+  const status = entries[providerId];
+  return status === "api_key" || status === "oauth" ? status : "none";
 }
 
 /// ---------------------------------------------------------------------------

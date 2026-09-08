@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 const PI_RELEASE_URL = "https://github.com/Dicklesworthstone/pi_agent_rust/releases/download";
 const AGENT_RELEASE_URL = "https://github.com/gaztrabisme/harness/releases/download";
 const DEFAULT_PI_VERSION = "0.3.0"; // pi release tag becomes v0.3.0
-const DEFAULT_AGENT_VERSION = "v0.2.0"; // harness release tag, used verbatim
+const DEFAULT_AGENT_VERSION = "v0.2.1"; // harness release tag, used verbatim
 const CHECKSUM_FILE = "SHA256SUMS";
 
 // pi release asset per target triple.

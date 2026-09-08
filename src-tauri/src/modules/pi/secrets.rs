@@ -7,7 +7,7 @@
 //! the frontend after set; pi_secret_status answers presence only.
 
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -38,36 +38,40 @@ pub fn secrets_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("pi-secrets.json")
 }
 
-/// Reads the stored keys. Unknown providers, non-string values and a missing
-/// or malformed file all resolve to an empty map: one bad entry never blocks
-/// a spawn, and a missing store means no key is injected.
-fn read_secrets(app_data_dir: &Path) -> HashMap<String, String> {
+/// Reads the stored keys. Unknown providers and non-string values are ignored,
+/// while a malformed existing file is an error naming the file.
+fn read_secrets(app_data_dir: &Path) -> Result<HashMap<String, String>, String> {
     if app_data_dir.as_os_str().is_empty() {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
-    let raw = match fs::read_to_string(secrets_path(app_data_dir)) {
+    let path = secrets_path(app_data_dir);
+    let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(_) => return HashMap::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
     };
-    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
-    };
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("invalid JSON in {}: {e}", path.display()))?;
     let Some(map) = parsed.as_object() else {
-        return HashMap::new();
+        return Err(format!(
+            "invalid JSON in {}: expected a JSON object",
+            path.display()
+        ));
     };
-    map.iter()
+    Ok(map
+        .iter()
         .filter_map(|(provider, value)| {
             let key = value.as_str()?.trim().to_string();
             let key = (!key.is_empty()).then_some(key)?;
             envs_for(provider)?;
             Some((provider.clone(), key))
         })
-        .collect()
+        .collect())
 }
 
-/// Writes the whole store back. The file is created 0600 on Unix and kept
-/// 0600 on rewrite (best effort elsewhere), and errors never quote the key.
+/// Writes the whole store through a same-directory temporary file. The temp is
+/// flushed and synced before the rename, and the live file is never truncated
+/// in place.
 fn write_secrets(app_data_dir: &Path, secrets: &HashMap<String, String>) -> Result<(), String> {
     if app_data_dir.as_os_str().is_empty() {
         return Err("no app data dir".to_string());
@@ -76,26 +80,21 @@ fn write_secrets(app_data_dir: &Path, secrets: &HashMap<String, String>) -> Resu
         .map_err(|e| format!("cannot create the app data dir: {e}"))?;
     let body = serde_json::to_string_pretty(secrets).map_err(|e| e.to_string())?;
     let path = secrets_path(app_data_dir);
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&path)
-        .map_err(|e| format!("cannot write the pi secrets file: {e}"))?;
-    file.write_all(body.as_bytes())
-        .and_then(|_| file.write_all(b"\n"))
-        .map_err(|e| format!("cannot write the pi secrets file: {e}"))?;
-    // A rewrite of an existing file keeps its old mode unless it is set again.
+    let mut temp = tempfile::NamedTempFile::new_in(app_data_dir)
+        .map_err(|e| format!("cannot create temporary file for {}: {e}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("cannot restrict the pi secrets file: {e}"))?;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("cannot restrict {}: {e}", path.display()))?;
     }
+    temp.write_all(body.as_bytes())
+        .and_then(|_| temp.write_all(b"\n"))
+        .and_then(|_| temp.flush())
+        .and_then(|_| temp.as_file().sync_all())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    temp.persist(&path)
+        .map_err(|e| format!("cannot replace {}: {}", path.display(), e.error))?;
     Ok(())
 }
 
@@ -110,7 +109,7 @@ pub fn set_secret(app_data_dir: &Path, provider: &str, key: &str) -> Result<(), 
     if key.is_empty() {
         return Err("empty key".to_string());
     }
-    let mut secrets = read_secrets(app_data_dir);
+    let mut secrets = read_secrets(app_data_dir)?;
     secrets.insert(provider.to_string(), key.to_string());
     write_secrets(app_data_dir, &secrets)?;
     log::info!("pi secret set for provider={provider}");
@@ -123,7 +122,7 @@ pub fn clear_secret(app_data_dir: &Path, provider: &str) -> Result<(), String> {
     if envs_for(provider).is_none() {
         return Err(format!("unknown pi cloud provider: {provider}"));
     }
-    let mut secrets = read_secrets(app_data_dir);
+    let mut secrets = read_secrets(app_data_dir)?;
     if secrets.remove(provider).is_none() {
         return Ok(());
     }
@@ -134,15 +133,15 @@ pub fn clear_secret(app_data_dir: &Path, provider: &str) -> Result<(), String> {
 
 /// Per-provider presence of the stored key, over every known cloud provider.
 /// The value is "set" or "unset"; the key itself never leaves this module.
-pub fn secret_status(app_data_dir: &Path) -> HashMap<String, String> {
-    let stored = read_secrets(app_data_dir);
-    PROVIDER_ENVS
+pub fn secret_status(app_data_dir: &Path) -> Result<HashMap<String, String>, String> {
+    let stored = read_secrets(app_data_dir)?;
+    Ok(PROVIDER_ENVS
         .iter()
         .map(|(id, _)| {
             let state = if stored.contains_key(*id) { "set" } else { "unset" };
             ((*id).to_string(), state.to_string())
         })
-        .collect()
+        .collect())
 }
 
 /// Whether each provider's env var is present (non-empty) in the app process.
@@ -163,8 +162,11 @@ pub fn secret_env_status() -> HashMap<String, bool> {
 /// Fills every cloud env var the caller left unset from the stored keys, so
 /// both spawn paths (checkout launcher, direct pi) hand the same keys to pi.
 /// The caller's own env wins: an existing non-empty value is never replaced.
-pub fn inject_secret_env(env: &mut HashMap<String, String>, app_data_dir: &Path) {
-    let secrets = read_secrets(app_data_dir);
+pub fn inject_secret_env(
+    env: &mut HashMap<String, String>,
+    app_data_dir: &Path,
+) -> Result<(), String> {
+    let secrets = read_secrets(app_data_dir)?;
     for (provider, key) in &secrets {
         let Some(envs) = envs_for(provider) else {
             continue;
@@ -179,14 +181,17 @@ pub fn inject_secret_env(env: &mut HashMap<String, String>, app_data_dir: &Path)
             }
         }
     }
+    Ok(())
 }
 
 /// One stored key by provider id, for backend callers that must render with
 /// it (pi_prepare fills a blank oMLX key from here). The key stays in the
 /// process: it is never logged and never returned to the frontend.
-pub fn stored_key(app_data_dir: &Path, provider: &str) -> Option<String> {
-    envs_for(provider.trim())?;
-    read_secrets(app_data_dir).remove(provider.trim())
+pub fn stored_key(app_data_dir: &Path, provider: &str) -> Result<Option<String>, String> {
+    if envs_for(provider.trim()).is_none() {
+        return Ok(None);
+    }
+    Ok(read_secrets(app_data_dir)?.remove(provider.trim()))
 }
 
 #[tauri::command]
@@ -215,7 +220,7 @@ pub fn pi_secret_status(
         .path()
         .app_data_dir()
         .map_err(|e| format!("no app data dir: {e}"))?;
-    Ok(secret_status(&dir))
+    secret_status(&dir)
 }
 
 /// Env-var presence per cloud provider, booleans only.
@@ -232,12 +237,18 @@ mod tests {
     fn set_then_status_reports_set_and_clear_reports_unset() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert_eq!(
-            secret_status(dir.path()).get("anthropic").map(String::as_str),
+            secret_status(dir.path())
+                .expect("status")
+                .get("anthropic")
+                .map(String::as_str),
             Some("unset")
         );
         set_secret(dir.path(), "anthropic", " sk-test ").expect("set");
         assert_eq!(
-            secret_status(dir.path()).get("anthropic").map(String::as_str),
+            secret_status(dir.path())
+                .expect("status")
+                .get("anthropic")
+                .map(String::as_str),
             Some("set")
         );
         // The key is trimmed into the store and never returned.
@@ -246,7 +257,10 @@ mod tests {
         assert_eq!(raw, "{\n  \"anthropic\": \"sk-test\"\n}\n");
         clear_secret(dir.path(), "anthropic").expect("clear");
         assert_eq!(
-            secret_status(dir.path()).get("anthropic").map(String::as_str),
+            secret_status(dir.path())
+                .expect("status")
+                .get("anthropic")
+                .map(String::as_str),
             Some("unset")
         );
     }
@@ -310,7 +324,7 @@ mod tests {
         set_secret(dir.path(), "google", "sk-g").expect("set google");
         let mut env = HashMap::new();
         env.insert("ANTHROPIC_API_KEY".to_string(), "caller-key".to_string());
-        inject_secret_env(&mut env, dir.path());
+        inject_secret_env(&mut env, dir.path()).expect("inject");
         // The caller's own value wins where it is already set.
         assert_eq!(
             env.get("ANTHROPIC_API_KEY").map(String::as_str),
@@ -329,7 +343,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         set_secret(dir.path(), "omlx", " sk-omlx ").expect("set omlx");
         let mut env = HashMap::new();
-        inject_secret_env(&mut env, dir.path());
+        inject_secret_env(&mut env, dir.path()).expect("inject");
         // One stored key lands on both vars the spawn and the render read.
         assert_eq!(env.get("OMLX_API_KEY").map(String::as_str), Some("sk-omlx"));
         assert_eq!(
@@ -342,7 +356,7 @@ mod tests {
             "EFFICIENT_PI_OMLX_KEY".to_string(),
             "caller-host-key".to_string(),
         );
-        inject_secret_env(&mut env, dir.path());
+        inject_secret_env(&mut env, dir.path()).expect("inject");
         assert_eq!(
             env.get("EFFICIENT_PI_OMLX_KEY").map(String::as_str),
             Some("caller-host-key")
@@ -354,24 +368,26 @@ mod tests {
         // stored_key answers pi_prepare's blank-key fill and trims like the
         // store write; unknown providers stay None.
         assert_eq!(
-            stored_key(dir.path(), "omlx").as_deref(),
+            stored_key(dir.path(), "omlx")
+                .expect("stored key")
+                .as_deref(),
             Some("sk-omlx")
         );
-        assert_eq!(stored_key(dir.path(), "bppc"), None);
-        assert_eq!(stored_key(dir.path(), "  "), None);
+        assert_eq!(stored_key(dir.path(), "bppc").expect("stored key"), None);
+        assert_eq!(stored_key(dir.path(), "  ").expect("stored key"), None);
     }
 
     #[test]
     fn inject_without_a_store_or_dir_is_a_no_op() {
         let mut env = HashMap::new();
-        inject_secret_env(&mut env, Path::new("/nonexistent/pi-secrets-test"));
+        inject_secret_env(&mut env, Path::new("/nonexistent/pi-secrets-test")).expect("inject");
         assert!(env.is_empty());
-        inject_secret_env(&mut env, Path::new(""));
+        inject_secret_env(&mut env, Path::new("")).expect("inject");
         assert!(env.is_empty());
     }
 
     #[test]
-    fn a_malformed_or_unknown_provider_store_is_ignored_at_inject() {
+    fn unknown_or_non_string_provider_entries_are_ignored_at_inject() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(
             secrets_path(dir.path()),
@@ -379,13 +395,27 @@ mod tests {
         )
         .expect("write junk store");
         let mut env = HashMap::new();
-        inject_secret_env(&mut env, dir.path());
+        inject_secret_env(&mut env, dir.path()).expect("inject");
         // Only the known, string-valued provider lands in the env map.
         assert_eq!(env.len(), 1);
         assert_eq!(
             env.get("OPENROUTER_API_KEY").map(String::as_str),
             Some("sk-r")
         );
+    }
+
+    #[test]
+    fn malformed_store_errors_with_the_file_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = secrets_path(dir.path());
+        fs::write(&path, "not json").expect("write malformed store");
+        let err = secret_status(dir.path()).expect_err("malformed store must fail");
+        assert!(err.contains("pi-secrets.json"), "got: {err}");
+        assert!(err.contains("invalid JSON"), "got: {err}");
+        let mut env = HashMap::new();
+        let err = inject_secret_env(&mut env, dir.path()).expect_err("malformed store");
+        assert!(err.contains(&path.display().to_string()), "got: {err}");
+        assert!(env.is_empty());
     }
 
     #[test]

@@ -13,14 +13,14 @@ import {
   parsePiModels,
   parsePiProviders,
   piSignInCommand,
+  piSignInCommandResolved,
   piSignInPayload,
   piSpawnEnv,
   PI_PREF_DEFAULTS,
-  removeProviderAuth,
   resolvePiPrefs,
   serializeModelsJsonTmpl,
-  setProviderApiKey,
   type PiEndpointView,
+  type PiAuthStatusMap,
 } from "./providers";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -338,37 +338,20 @@ describe("modelAcceptsImages", () => {
   });
 });
 
-describe("auth.json edits", () => {
-  const stored = {
-    openai: { type: "api_key", key: "sk-old" },
-    "github-copilot": { type: "oauth", access: "a", refresh: "r", expires: 1 },
-  };
+describe("auth status map", () => {
+  const statusMap = {
+    openai: "api_key",
+    "github-copilot": "oauth",
+  } as const;
 
-  it("classifies stored credentials", () => {
-    expect(authStatus(stored, "openai")).toBe("key");
-    expect(authStatus(stored, "github-copilot")).toBe("oauth");
-    expect(authStatus(stored, "anthropic")).toBe("none");
+  it("reads the backend status map without accepting credential objects", () => {
+    expect(authStatus(statusMap, "openai")).toBe("api_key");
+    expect(authStatus(statusMap, "github-copilot")).toBe("oauth");
+    expect(authStatus(statusMap, "anthropic")).toBe("none");
     expect(authStatus(null, "openai")).toBe("none");
-    expect(authStatus({ openai: "junk" }, "openai")).toBe("none");
-  });
-
-  it("merges an api key without touching other entries", () => {
-    const next = setProviderApiKey(stored, "openai", "sk-new");
-    expect(next.openai).toEqual({ type: "api_key", key: "sk-new" });
-    expect(next["github-copilot"]).toEqual(stored["github-copilot"]);
-    expect(stored.openai.key).toBe("sk-old");
-  });
-
-  it("starts a fresh file when auth.json is missing", () => {
-    expect(setProviderApiKey(null, "anthropic", "k")).toEqual({
-      anthropic: { type: "api_key", key: "k" },
-    });
-  });
-
-  it("removes only the target provider", () => {
-    const next = removeProviderAuth(stored, "openai");
-    expect(next).toEqual({ "github-copilot": stored["github-copilot"] });
-    expect(removeProviderAuth(null, "openai")).toEqual({});
+    expect(
+      authStatus({ openai: "junk" } as unknown as PiAuthStatusMap, "openai"),
+    ).toBe("none");
   });
 });
 
@@ -453,5 +436,13 @@ describe("sign in payload", () => {
       command: `PI_CODING_AGENT_DIR="${dir}/pi-home/agent" "${dir}/bin/pi"`,
       hint: "Type /login <provider> in the pi prompt",
     });
+  });
+
+  it("builds a PowerShell command on Windows", () => {
+    const bin = String.raw`C:\Program Files\Terax\bin\pi.exe`;
+    const agent = String.raw`C:\Users\me\pi agent`;
+    expect(piSignInCommandResolved(bin, agent, true)).toBe(
+      "$env:PI_CODING_AGENT_DIR = 'C:\\Users\\me\\pi agent'; & 'C:\\Program Files\\Terax\\bin\\pi.exe'",
+    );
   });
 });

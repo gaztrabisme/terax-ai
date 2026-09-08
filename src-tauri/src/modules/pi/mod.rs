@@ -1,4 +1,5 @@
 pub mod health;
+pub mod auth;
 mod launch;
 mod launcher;
 pub mod prompts;
@@ -99,7 +100,7 @@ pub async fn pi_open(
     // caller's own env wins, and the values never reach launcher.log: it
     // records step outcomes only.
     let app_data_dir = app.path().app_data_dir().unwrap_or_default();
-    secrets::inject_secret_env(&mut env, &app_data_dir);
+    secrets::inject_secret_env(&mut env, &app_data_dir)?;
     // Roles ride in the spawn env today (EFFICIENT_PI_* via piSpawnEnv); the
     // direct path renders them through prepare_session, whose report env
     // replaces these values at spawn. The EFFICIENT_PI_BPPC_HOST the frontend
@@ -107,6 +108,16 @@ pub async fn pi_open(
     // fallback. The oMLX key resolves caller env, then the secrets store
     // (injected above), then the bash launcher's own default
     // (~/.omlx/settings.json) so a checkout-less machine renders models.json.
+    let home = launch::home_dir();
+    let session_agent_dir = launch::resolve_agent_dir(
+        env.get("PI_CODING_AGENT_DIR").map(String::as_str),
+        home.as_deref(),
+        &app_data_dir,
+    );
+    env.insert(
+        "PI_CODING_AGENT_DIR".to_string(),
+        session_agent_dir.to_string_lossy().into_owned(),
+    );
     let env_var = |key: &str| env.get(key).cloned().unwrap_or_default();
     let mut omlx_key = env_var("EFFICIENT_PI_OMLX_KEY");
     if omlx_key.trim().is_empty() {
@@ -119,7 +130,7 @@ pub async fn pi_open(
         smol: env_var("EFFICIENT_PI_SMOL"),
     };
     let endpoints = launcher::PrepareEndpoints {
-        bppc_host: env_var("EFFICIENT_PI_BPPC_HOST"),
+        bppc_host: env_var("EFFICIENT_PI_BPPC_HOST").trim().to_string(),
         omlx_key,
     };
     // Dirs the direct branch needs: the resource dir holds the agent-dir
@@ -134,43 +145,24 @@ pub async fn pi_open(
         resource_dir: app.path().resource_dir().unwrap_or_default(),
     };
     let app_version = app.package_info().version.to_string();
-    let home = launch::home_dir();
     let prefs = launch::PiPrefs {
         launcher_dir: launcher_dir.clone(),
+        agent_dir: Some(session_agent_dir.to_string_lossy().into_owned()),
         ..launch::PiPrefs::default()
     };
     let board_agent_bin =
         launch::resolve_paths(&prefs, &bundled, home.as_deref(), &app_data_dir)
             .agent
             .path;
-    // Record the agent dir this cwd's session will spawn with before the
-    // spawn runs, so a transcript watch armed in parallel resolves pi 0.3.0's
-    // real hub root instead of watching the project. Per spawn shape: the
-    // launcher pins PI_CODING_AGENT_DIR to <launcher root>/pi-home/agent, the
-    // direct prepare pins it to the app's writable agent dir, and a program
-    // override passes the caller env through (pi's own ~/.pi/agent default
-    // when unset).
+    // Record the resolved agent dir before the spawn runs, so a transcript
+    // watch armed in parallel resolves pi's real hub root instead of watching
+    // the project.
     if let Some(dir) = canonical.as_deref() {
-        let agent_dir = match program.as_deref().map(str::trim) {
-            Some(p) if !p.is_empty() => env
-                .get("PI_CODING_AGENT_DIR")
-                .filter(|s| !s.trim().is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| launch::default_global_dir(home.as_deref())),
-            _ => {
-                let root = launch::launcher_root(&prefs, home.as_deref(), dir);
-                if root.join("bin").join("efficient-pi").is_file() {
-                    root.join("pi-home").join("agent")
-                } else {
-                    launcher::user_agent_dir(&app_data_dir)
-                }
-            }
-        };
-        grant_agent_artifacts(&app, &agent_dir);
+        grant_agent_artifacts(&app, &session_agent_dir);
         hub.agent_dirs
             .write()
             .expect("pi hub agent dirs poisoned")
-            .insert(dir.to_string_lossy().into_owned(), agent_dir);
+            .insert(dir.to_string_lossy().into_owned(), session_agent_dir.clone());
     }
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let session = tauri::async_runtime::spawn_blocking(move || {
@@ -189,7 +181,14 @@ pub async fn pi_open(
                 let dir = canonical.as_deref().ok_or_else(|| {
                     "pi needs a workspace cwd as its project root".to_string()
                 })?;
-                match launch::spawn_plan(&prefs, &bundled, home.as_deref(), dir, &roles)? {
+                match launch::spawn_plan(
+                    &prefs,
+                    &bundled,
+                    home.as_deref(),
+                    dir,
+                    &roles,
+                    &endpoints.bppc_host,
+                )? {
                     launch::SpawnPlan::CheckoutLauncher { program, mut args } => {
                         log::info!("pi_open plan: checkout launcher {}", program);
                         args.extend_from_slice(&extra_args);
@@ -217,6 +216,7 @@ pub async fn pi_open(
                             app_version,
                             template_dir: bundled.resource_dir.join("pi-home").join("agent"),
                             app_data_dir,
+                            agent_dir: session_agent_dir,
                             cwd: dir.to_path_buf(),
                             roles,
                             endpoints,
@@ -272,7 +272,8 @@ pub fn pi_home_dir() -> Option<String> {
 /// Where pi, the harness agent, and the agent dir actually live, each tagged
 /// with its source (pref > bundled > checkout > missing), plus the runtime
 /// agent dir a session would run from, so the Pi settings tab can show the
-/// values a launch would use. Read-only diagnostics.
+/// values a launch would use. The default runtime dir is the app-data copy.
+/// Read-only diagnostics.
 #[tauri::command]
 pub fn pi_paths(app: tauri::AppHandle, prefs: launch::PiPrefs) -> launch::ResolvedPaths {
     let exe_dir = std::env::current_exe()
@@ -285,12 +286,27 @@ pub fn pi_paths(app: tauri::AppHandle, prefs: launch::PiPrefs) -> launch::Resolv
         resource_dir,
     };
     let app_data_dir = app.path().app_data_dir().unwrap_or_default();
-    let resolved = launch::resolve_paths(
+    let mut resolved = launch::resolve_paths(
         &prefs,
         &bundled,
         launch::home_dir().as_deref(),
         &app_data_dir,
     );
+    if prefs
+        .agent_dir
+        .as_deref()
+        .map(str::trim)
+        .map(|dir| dir.is_empty())
+        .unwrap_or(true)
+        && !app_data_dir.as_os_str().is_empty()
+    {
+        let path = launcher::user_agent_dir(&app_data_dir);
+        resolved.runtime_agent_dir = launch::RuntimeAgentDir {
+            path: Some(path.to_string_lossy().into_owned()),
+            source: launch::PathSource::Bundled,
+            seeded: path.join(launch::SEED_STAMP_FILE).is_file(),
+        };
+    }
     log::info!(
         "pi_paths: pi={:?} ({:?}) agent={:?} ({:?}) agent_dir={:?} ({:?}) runtime_agent_dir={:?} ({:?}, seeded={})",
         resolved.pi.path,
@@ -328,6 +344,12 @@ pub fn pi_prepare(
         .map(|dir| dir.join("pi-home").join("agent"))
         .unwrap_or_default();
     let app_data_dir = app.path().app_data_dir().unwrap_or_default();
+    let home = launch::home_dir();
+    let agent_dir = launch::resolve_agent_dir(
+        input.agent_dir.as_deref(),
+        home.as_deref(),
+        &app_data_dir,
+    );
     // The render resolves the oMLX key the way a spawn does: a caller-supplied
     // key wins, a blank one fills from the secrets store (the frontend never
     // sees stored keys, so it cannot pass one), then the bash launcher's own
@@ -335,8 +357,7 @@ pub fn pi_prepare(
     // when no source has one.
     let mut endpoints = input.endpoints;
     if endpoints.omlx_key.trim().is_empty() {
-        endpoints.omlx_key =
-            secrets::stored_key(&app_data_dir, "omlx").unwrap_or_default();
+        endpoints.omlx_key = secrets::stored_key(&app_data_dir, "omlx")?.unwrap_or_default();
         if endpoints.omlx_key.trim().is_empty() {
             endpoints.omlx_key = launcher::omlx_key_default(launch::home_dir().as_deref())
                 .unwrap_or_default();
@@ -346,6 +367,7 @@ pub fn pi_prepare(
         app_version: app.package_info().version.to_string(),
         template_dir,
         app_data_dir: app_data_dir.clone(),
+        agent_dir,
         cwd,
         roles: input.roles,
         endpoints,
@@ -503,7 +525,7 @@ fn list_models_env(
     ambient: impl Iterator<Item = (String, String)>,
     app_data_dir: &Path,
     agent_dir: Option<&str>,
-) -> HashMap<String, String> {
+) -> Result<HashMap<String, String>, String> {
     let scrubbed = |key: &str| {
         LIST_MODEL_SCRUB_PREFIXES.iter().any(|p| key.starts_with(p))
             || LIST_MODEL_SCRUB_EXACT.contains(&key)
@@ -514,8 +536,29 @@ fn list_models_env(
     if let Some(dir) = agent_dir.map(str::trim).filter(|s| !s.is_empty()) {
         env.insert("PI_CODING_AGENT_DIR".to_string(), dir.to_string());
     }
-    secrets::inject_secret_env(&mut env, app_data_dir);
-    env
+    secrets::inject_secret_env(&mut env, app_data_dir)?;
+    Ok(env)
+}
+
+fn probe_output(label: &str, mut cmd: std::process::Command) -> Result<String, String> {
+    let out = cmd
+        .output()
+        .map_err(|e| format!("{label} failed to run: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            Err(format!("{label} exited {}", out.status))
+        } else {
+            Err(stderr.to_string())
+        }
+    }
+}
+
+fn provider_probe_args() -> Vec<String> {
+    vec!["--list-providers".to_string()]
 }
 
 /// `pi --list-models <pattern>` for the Settings model picker and the pi
@@ -552,7 +595,11 @@ pub fn pi_list_models(
     let agent_dir = agent_dir
         .map(|dir| launch::expand_home(dir.trim(), home.as_deref()))
         .filter(|dir| !dir.is_empty())
-        .or(resolved.runtime_agent_dir.path);
+        .unwrap_or_else(|| {
+            launch::resolve_agent_dir(prefs.agent_dir.as_deref(), home.as_deref(), &app_data_dir)
+                .to_string_lossy()
+                .into_owned()
+        });
     let mut cmd = std::process::Command::new(&program);
     cmd.arg("--list-models");
     let pattern = pattern
@@ -562,21 +609,40 @@ pub fn pi_list_models(
         cmd.arg(pattern);
     }
     cmd.env_clear()
-        .envs(list_models_env(std::env::vars(), &app_data_dir, agent_dir.as_deref()));
-    let out = cmd
-        .output()
-        .map_err(|e| format!("pi --list-models failed to run: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stderr = stderr.trim();
-        if stderr.is_empty() {
-            Err(format!("pi --list-models exited {}", out.status))
-        } else {
-            Err(stderr.to_string())
-        }
+        .envs(list_models_env(
+            std::env::vars(),
+            &app_data_dir,
+            Some(agent_dir.as_str()),
+        )?);
+    probe_output("pi --list-models", cmd)
+}
+
+/// pi --list-providers for the Settings provider picker. The frontend gives
+/// this command the same resolved binary and runtime agent dir shown in
+/// Settings, and the probe receives the same scrubbed environment as the
+/// model listing probe.
+#[tauri::command]
+pub fn pi_list_providers(
+    app: tauri::AppHandle,
+    agent_dir: String,
+    pi_bin: String,
+) -> Result<String, String> {
+    let home = launch::home_dir();
+    let program = launch::expand_home(pi_bin.trim(), home.as_deref());
+    if program.trim().is_empty() {
+        return Err("pi binary is empty".to_string());
     }
+    let agent_dir = launch::expand_home(agent_dir.trim(), home.as_deref());
+    let app_data_dir = app.path().app_data_dir().unwrap_or_default();
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(provider_probe_args());
+    cmd.env_clear()
+        .envs(list_models_env(
+            std::env::vars(),
+            &app_data_dir,
+            Some(agent_dir.as_str()),
+        )?);
+    probe_output("pi --list-providers", cmd)
 }
 
 #[cfg(test)]
@@ -608,7 +674,8 @@ mod list_models_tests {
             ]),
             Path::new(""),
             None,
-        );
+        )
+        .expect("probe env");
         for key in [
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
@@ -635,7 +702,8 @@ mod list_models_tests {
             ambient(&[("ANTHROPIC_API_KEY", "ambient-a")]),
             dir.path(),
             None,
-        );
+        )
+        .expect("probe env");
         // The stored value replaces the scrubbed ambient one.
         assert_eq!(
             env.get("ANTHROPIC_API_KEY").map(String::as_str),
@@ -655,7 +723,8 @@ mod list_models_tests {
             ambient(&[("PI_CODING_AGENT_DIR", "/stale/agent")]),
             Path::new(""),
             Some("/session/agent"),
-        );
+        )
+        .expect("probe env");
         assert_eq!(
             env.get("PI_CODING_AGENT_DIR").map(String::as_str),
             Some("/session/agent")
@@ -665,7 +734,8 @@ mod list_models_tests {
             ambient(&[("PI_CODING_AGENT_DIR", "/stale/agent")]),
             Path::new(""),
             Some("   "),
-        );
+        )
+        .expect("probe env");
         assert!(!env.contains_key("PI_CODING_AGENT_DIR"));
     }
 
@@ -675,8 +745,14 @@ mod list_models_tests {
             ambient(&[("OPENAI_API_KEY", "ambient")]),
             Path::new("/nonexistent/pi-list-models-test"),
             None,
-        );
+        )
+        .expect("probe env");
         assert!(!env.contains_key("OPENAI_API_KEY"));
         assert_eq!(env.len(), 0);
+    }
+
+    #[test]
+    fn provider_probe_uses_the_direct_list_providers_argument() {
+        assert_eq!(provider_probe_args(), vec!["--list-providers"]);
     }
 }

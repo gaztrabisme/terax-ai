@@ -146,6 +146,9 @@ export type PiSessionState = {
   retry: PiRetryPending | null;
   /** Text of the error already on the feed; agent_end retries repeat it. */
   lastErrorText: string | null;
+  /** Between a switch_session ack and the new session's first start event:
+   *  the transcript was reset but the new session id is not known yet. */
+  switching: boolean;
 };
 
 export function initialPiSessionState(): PiSessionState {
@@ -165,7 +168,49 @@ export function initialPiSessionState(): PiSessionState {
     turnUsage: null,
     retry: null,
     lastErrorText: null,
+    switching: false,
   };
+}
+
+/** State a session switch discards: the whole transcript plus the usage,
+ *  retry and error accounting of the session that was switched away. Only
+ *  per-session transcript state lives here; static state (cwd, model,
+ *  pending composer text) is kept outside PiSessionState and survives. */
+function switchedState(state: PiSessionState): PiSessionState {
+  return {
+    ...state,
+    status: "idle",
+    sessionId: null,
+    blocks: [],
+    openMessageId: null,
+    toolPos: {},
+    askPos: {},
+    tokens: null,
+    seq: 0,
+    startedMs: null,
+    lastMs: null,
+    turnTokens: 0,
+    sessionCost: 0,
+    turnUsage: null,
+    retry: null,
+    lastErrorText: null,
+    switching: true,
+  };
+}
+
+/** True when the event names a session the reducer is not on. The switch ack
+ *  clears sessionId until the new session's first start event, so every
+ *  id-bearing frame seen while switching is stale too. */
+function staleSession(
+  state: PiSessionState,
+  event: Record<string, unknown>,
+): boolean {
+  const sessionId = asString(event.sessionId);
+  if (sessionId === null) return false;
+  return (
+    state.switching ||
+    (state.sessionId !== null && sessionId !== state.sessionId)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -291,17 +336,40 @@ export function applyEvent(
   }
   if (!isRecord(event) || typeof event.type !== "string") return state;
 
+  // Between a switch ack and the new session's first start event nothing
+  // legitimate flows: any other frame in that window belongs to the
+  // generation that was switched away. Responses stay exempt so a second
+  // switch command can still land.
+  if (
+    state.switching &&
+    event.type !== "response" &&
+    event.type !== "agent_start" &&
+    event.type !== "turn_start"
+  ) {
+    return state;
+  }
+
   switch (event.type) {
     case "agent_start":
     case "turn_start": {
       const sessionId = asString(event.sessionId);
       const ts = typeof event.timestamp === "number" ? event.timestamp : null;
+      // The new session's first id-bearing start closes a pending switch;
+      // a start naming a different session is the same reset when the ack
+      // was missed. pi 0.3.0 carries no session id on the ack itself.
+      const switched =
+        state.switching ||
+        (sessionId !== null &&
+          state.sessionId !== null &&
+          sessionId !== state.sessionId);
+      const base = switched ? switchedState(state) : state;
       return {
-        ...state,
-        status: state.status === "awaiting-ask" ? state.status : "thinking",
+        ...base,
+        switching: false,
+        status: base.status === "awaiting-ask" ? base.status : "thinking",
         ...(sessionId !== null && { sessionId }),
         ...(ts !== null && {
-          startedMs: state.startedMs ?? ts,
+          startedMs: base.startedMs ?? ts,
           lastMs: ts,
         }),
       };
@@ -313,6 +381,10 @@ export function applyEvent(
     case "message_end":
       return applyMessageEnd(state, event);
     case "turn_end": {
+      // Only agent_start, turn_start and turn_end carry a session id on
+      // pi 0.3.0; a turn_end naming the session that was switched away is
+      // stale generation and must not add to the new session's totals.
+      if (staleSession(state, event)) return state;
       const usage = asUsage(
         isRecord(event.message) ? event.message.usage : null,
       );
@@ -364,7 +436,7 @@ export function applyEvent(
     case "ask_request":
       return applyAskRequest(state, event, now);
     case "response":
-      return applyResponse(state, event);
+      return applyResponse(state, event, now);
     default:
       return state;
   }
@@ -649,7 +721,12 @@ function applyAskRequest(
 function applyResponse(
   state: PiSessionState,
   event: Record<string, unknown>,
+  now: number,
 ): PiSessionState {
+  if (event.command === "switch_session")
+    return applySwitchResponse(state, event);
+  if (event.command === "prompt" && event.success === false)
+    return applyPromptRejection(state, event, now);
   if (event.command !== "ask_response") return state;
   const requestId = asString(event.id);
   if (!requestId) return state;
@@ -663,6 +740,40 @@ function applyResponse(
   // A failed resolution puts the card back in front of the user.
   if (unresolved) return withAskState(state, index, "pending");
   return withAskState(state, index, "answered");
+}
+
+/** The switch_session ack: pi 0.3.0 defers the switch until the running
+ *  turn finishes, then answers {command:"switch_session",data:{cancelled}}
+ *  without the new session id; the id arrives on the next agent_start. So
+ *  the transcript resets here and the new id is adopted later. A failed or
+ *  cancelled switch leaves the current session untouched. */
+function applySwitchResponse(
+  state: PiSessionState,
+  event: Record<string, unknown>,
+): PiSessionState {
+  if (event.success === false) return state;
+  const data = isRecord(event.data) ? event.data : null;
+  if (data !== null && data.cancelled === true) return state;
+  return switchedState(state);
+}
+
+/** A prompt the rpc command handler refused: pi answers
+ *  {command:"prompt",success:false,error} and nothing else happens, so the
+ *  dropped prompt surfaces as a transcript error card instead of vanishing. */
+function applyPromptRejection(
+  state: PiSessionState,
+  event: Record<string, unknown>,
+  now: number,
+): PiSessionState {
+  const error = asString(event.error);
+  if (error === null) return state;
+  const text = `prompt rejected: ${error}`;
+  return {
+    ...state,
+    lastErrorText: text,
+    blocks: [...state.blocks, { kind: "error", text, at: now }],
+    seq: state.seq + 1,
+  };
 }
 
 function withAskState(

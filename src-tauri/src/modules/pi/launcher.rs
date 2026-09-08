@@ -50,6 +50,8 @@ pub struct PrepareOptions {
     pub roles: PrepareRoles,
     pub endpoints: PrepareEndpoints,
     pub allow_any_dir: bool,
+    #[serde(default)]
+    pub agent_dir: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +59,7 @@ pub struct PrepareInput {
     pub app_version: String,
     pub template_dir: PathBuf,
     pub app_data_dir: PathBuf,
+    pub agent_dir: PathBuf,
     pub cwd: PathBuf,
     pub roles: PrepareRoles,
     pub endpoints: PrepareEndpoints,
@@ -108,7 +111,11 @@ struct AgentReport {
 /// failure or an unreadable report yields one FAIL step named "prepare",
 /// never a panic; every other step outcome comes from the agent verbatim.
 pub fn prepare_session(input: PrepareInput, agent_bin: Option<&Path>) -> PrepareReport {
-    let agent_dir = user_agent_dir(&input.app_data_dir);
+    let agent_dir = if input.agent_dir.as_os_str().is_empty() {
+        user_agent_dir(&input.app_data_dir)
+    } else {
+        input.agent_dir.clone()
+    };
     let fail = |detail: String| PrepareReport {
         steps: vec![PrepareStep {
             name: "prepare".to_string(),
@@ -343,6 +350,7 @@ mod agent_cli_tests {
             app_version: "0.7.3".to_string(),
             template_dir: template.to_path_buf(),
             app_data_dir: app_data.to_path_buf(),
+            agent_dir: user_agent_dir(app_data),
             cwd: cwd.to_path_buf(),
             roles: PrepareRoles {
                 provider: "bppc".to_string(),
@@ -441,6 +449,35 @@ mod agent_cli_tests {
             got.env.get("EFFICIENT_PI_SMOL").map(String::as_str),
             Some("omlx/Qwen3.6-35B-A3B-OptiQ-4bit")
         );
+    }
+
+    #[test]
+    fn prepare_session_uses_the_resolved_agent_dir() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let app_data = tempfile::tempdir().expect("app data");
+        let template = tempfile::tempdir().expect("template");
+        let project = tempfile::tempdir().expect("project");
+        let custom = tempfile::tempdir().expect("custom agent");
+        let custom_dir = custom.path().join("agent");
+        let report = serde_json::json!({
+            "steps": [{"name": "seed", "status": "OK", "detail": "seeded"}],
+            "agentDir": custom_dir.to_string_lossy(),
+            "env": {"PI_CODING_AGENT_DIR": custom_dir.to_string_lossy()}
+        })
+        .to_string();
+        let agent = write_fake_agent(scratch.path(), &report);
+        let mut input = input(template.path(), app_data.path(), project.path(), false);
+        input.agent_dir = custom_dir.clone();
+        let got = prepare_session(input, Some(&agent));
+        assert_eq!(got.agent_dir, custom_dir);
+        assert_eq!(
+            read_argv(scratch.path())
+                .windows(2)
+                .find(|pair| pair[0] == "--agent-dir")
+                .map(|pair| pair[1].as_str()),
+            custom_dir.to_str()
+        );
+        assert_ne!(got.agent_dir, user_agent_dir(app_data.path()));
     }
 
     #[test]

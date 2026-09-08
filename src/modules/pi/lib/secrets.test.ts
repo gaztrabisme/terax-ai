@@ -86,18 +86,18 @@ describe("cloudKeyStatus", () => {
   });
 
   it("reports an env var before an auth.json entry", () => {
-    expect(cloudKeyStatus("openai", false, true, "key")).toBe("env");
+    expect(cloudKeyStatus("openai", false, true, "api_key")).toBe("env");
     expect(cloudKeyStatus("openai", false, true, "none")).toBe("env");
   });
 
   it("falls back to the runtime agent dir entry, then not set", () => {
-    expect(cloudKeyStatus("openrouter", false, false, "key")).toBe("auth");
+    expect(cloudKeyStatus("openrouter", false, false, "api_key")).toBe("auth");
     expect(cloudKeyStatus("openrouter", false, false, "oauth")).toBe("auth");
     expect(cloudKeyStatus("openrouter", false, false, "none")).toBe("none");
   });
 
   it("never reports a status for a non-cloud provider", () => {
-    expect(cloudKeyStatus("bppc", true, true, "key")).toBe("none");
+    expect(cloudKeyStatus("bppc", true, true, "api_key")).toBe("none");
   });
 
   it("treats omlx like the other stored providers", () => {

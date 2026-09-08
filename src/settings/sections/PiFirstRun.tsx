@@ -29,6 +29,7 @@ import {
   PI_OPEN_CWDS_EVENT,
   PI_OPEN_CWDS_QUERY_EVENT,
   type PiEndpointView,
+  type PiAuthStatusMap,
   type PiProviderRow,
   type PiResolvedPaths,
   type PiRuntimePrefs,
@@ -80,16 +81,13 @@ async function invokeHealth(probe: Probe): Promise<PiHealthResult> {
   }
 }
 
-async function loadAuthEntries(
+async function loadAuthStatus(
   agentDir: string | null,
   ready: boolean,
-): Promise<Record<string, unknown> | null> {
+): Promise<PiAuthStatusMap | null> {
   if (!ready || !agentDir) return null;
   try {
-    const res = await native.readFile(`${agentDir}/auth.json`);
-    return res.kind === "text"
-      ? (JSON.parse(res.content) as Record<string, unknown>)
-      : null;
+    return await invoke<PiAuthStatusMap>("pi_auth_status", { agentDir });
   } catch {
     return null;
   }
@@ -117,12 +115,11 @@ async function loadProviderList(
 ): Promise<PiProviderRow[]> {
   if (!ready || !piBin || !agentDir) return [];
   try {
-    const out = await native.runCommand(
-      `PI_CODING_AGENT_DIR="${agentDir}" "${piBin}" --list-providers`,
+    const out = await invoke<string>("pi_list_providers", {
       agentDir,
-      20,
-    );
-    return out.exit_code === 0 ? parsePiProviders(out.stdout) : [];
+      piBin,
+    });
+    return parsePiProviders(out);
   } catch {
     return [];
   }
@@ -144,7 +141,7 @@ async function loadWorkspaceOverrides(cwd: string | null): Promise<unknown> {
  * Which cloud providers hold a key stored under the app data dir
  * (pi_secret_status answers "set"/"unset"; the key itself never leaves the
  * backend). A failed load degrades to empty, so the role rows just fall back
- * to the auth.json check.
+ * to the auth status check.
  */
 async function loadStoredCloudKeys(): Promise<Record<string, boolean>> {
   try {
@@ -306,14 +303,14 @@ export function PiFirstRun({
       const runtimeDir = paths.runtimeAgentDir.path;
       const ready = !!runtimeDir && !runtimeDir.startsWith("$HOME");
       const [
-        authEntries,
+        authStatusMap,
         endpoints,
         providerList,
         storedKeys,
         envPresence,
         homeDir,
       ] = await Promise.all([
-        loadAuthEntries(runtimeDir, ready),
+        loadAuthStatus(runtimeDir, ready),
         loadEndpoints(runtimeDir, ready),
         loadProviderList(paths.pi.path, runtimeDir, ready),
         loadStoredCloudKeys(),
@@ -338,7 +335,7 @@ export function PiFirstRun({
         buildRows({
           paths,
           roles,
-          authEntries,
+          authStatusMap,
           providerList,
           endpoints,
           health,

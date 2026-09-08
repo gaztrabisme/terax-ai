@@ -20,6 +20,7 @@ struct CanonicalEntry {
 pub struct WorkspaceRegistry {
     roots: Mutex<HashSet<PathBuf>>,
     canonical_cache: Mutex<HashMap<PathBuf, CanonicalEntry>>,
+    active_asset_root: Mutex<Option<PathBuf>>,
 }
 
 impl WorkspaceRegistry {
@@ -67,6 +68,19 @@ impl WorkspaceRegistry {
             },
         );
         Ok(canonical)
+    }
+
+    fn replace_active_asset_root(&self, next: Option<&Path>) -> (Option<PathBuf>, bool) {
+        let mut active = self
+            .active_asset_root
+            .lock()
+            .expect("active asset root poisoned");
+        if active.as_deref() == next {
+            return (None, false);
+        }
+        let previous = active.clone();
+        *active = next.map(Path::to_path_buf);
+        (previous, true)
     }
 }
 
@@ -157,6 +171,43 @@ pub fn grant_asset_scope(app: &tauri::AppHandle, path: &Path) -> bool {
     }
 }
 
+fn grant_active_asset_scope(
+    app: &tauri::AppHandle,
+    registry: &WorkspaceRegistry,
+    path: &Path,
+) -> bool {
+    let next = (!never_grant_wholesale(path)).then_some(path);
+    let (previous, changed) = registry.replace_active_asset_root(next);
+    if !changed {
+        return next.is_some();
+    }
+    if let Some(previous) = previous {
+        if let Err(e) = app.asset_protocol_scope().forbid_directory(&previous, true) {
+            log::debug!(
+                "asset scope revoke failed for {}: {e}",
+                previous.display()
+            );
+        } else {
+            log::debug!("asset scope revoked: {}", previous.display());
+        }
+    }
+    let Some(path) = next else {
+        log::debug!("asset scope refused (root or home): {}", path.display());
+        return false;
+    };
+    match app.asset_protocol_scope().allow_directory(path, true) {
+        Ok(()) => {
+            log::debug!("active asset scope granted: {}", path.display());
+            true
+        }
+        Err(e) => {
+            let _ = registry.replace_active_asset_root(None);
+            log::debug!("asset scope grant failed for {}: {e}", path.display());
+            false
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn workspace_authorize(
     app: tauri::AppHandle,
@@ -167,7 +218,7 @@ pub async fn workspace_authorize(
     let workspace = WorkspaceEnv::from_option(workspace);
     let resolved = resolve_path(&path, &workspace);
     let canonical = registry.authorize(&resolved).map_err(|e| e.to_string())?;
-    grant_asset_scope(&app, &canonical);
+    grant_active_asset_scope(&app, &registry, &canonical);
     Ok(crate::modules::fs::to_canon(&canonical))
 }
 
@@ -178,7 +229,7 @@ pub async fn workspace_current_dir(
 ) -> Result<String, String> {
     let launch = resolve_launch_dir();
     let canonical = registry.authorize(&launch).map_err(|e| e.to_string())?;
-    grant_asset_scope(&app, &canonical);
+    grant_active_asset_scope(&app, &registry, &canonical);
     Ok(crate::modules::fs::to_canon(&canonical))
 }
 
@@ -824,5 +875,25 @@ mod auth_tests {
         // Any named directory under a real root is grantable.
         let dir = tempdir("grant");
         assert!(!never_grant_wholesale(&dir));
+    }
+
+    #[test]
+    fn active_asset_root_replaces_the_previous_workspace() {
+        let registry = WorkspaceRegistry::default();
+        let first = Path::new("/tmp/terax-first-workspace");
+        let second = Path::new("/tmp/terax-second-workspace");
+        assert_eq!(registry.replace_active_asset_root(Some(first)), (None, true));
+        assert_eq!(
+            registry.replace_active_asset_root(Some(first)),
+            (None, false)
+        );
+        assert_eq!(
+            registry.replace_active_asset_root(Some(second)),
+            (Some(first.to_path_buf()), true)
+        );
+        assert_eq!(
+            registry.replace_active_asset_root(None),
+            (Some(second.to_path_buf()), true)
+        );
     }
 }

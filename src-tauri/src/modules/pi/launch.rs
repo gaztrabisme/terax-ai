@@ -108,16 +108,14 @@ pub(crate) fn launcher_root(prefs: &PiPrefs, home: Option<&str>, cwd: &Path) -> 
     }
 }
 
-/// pi's agent dir when PI_CODING_AGENT_DIR is unset (vendor pi_agent_rust
-/// src/config.rs global_dir_from_env): `$HOME/.pi/agent`, with pi's own "."
-/// fallback when the home dir is unknown.
-pub(crate) fn default_global_dir(home: Option<&str>) -> PathBuf {
-    PathBuf::from(match home.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(h) => h.to_string(),
-        None => ".".to_string(),
-    })
-    .join(".pi")
-    .join("agent")
+/// Resolves the agent directory once for a session. A non-empty preference is
+/// expanded as a path; otherwise the writable app-data copy is the fallback.
+pub(crate) fn resolve_agent_dir(
+    preferred: Option<&str>,
+    home: Option<&str>,
+    app_data_dir: &Path,
+) -> PathBuf {
+    pref_path(preferred, home).unwrap_or_else(|| super::launcher::user_agent_dir(app_data_dir))
 }
 
 /// Tool list the bash launcher passes in PI_BASE_ARGS (bin/efficient-pi); the
@@ -153,9 +151,23 @@ pub fn direct_rpc_args(roles: &PrepareRoles) -> Vec<String> {
     args
 }
 
+fn checkout_rpc_args(bppc_host: &str) -> Vec<String> {
+    let mut args = vec![
+        "--no-prime".to_string(),
+        "--mode".to_string(),
+        "rpc".to_string(),
+    ];
+    let host = bppc_host.trim();
+    if !host.is_empty() {
+        args.push("--host".to_string());
+        args.push(host.to_string());
+    }
+    args
+}
+
 /// Spawn decision, shared by pi_open and the resolve_spec wrapper: the
-/// checkout launcher wins when its file exists (today's behavior on machines
-/// with the checkout), else a pi binary resolved through the shared
+/// checkout launcher wins when its file exists and no explicit agent dir is
+/// set (today's behavior for the shell-oriented wrapper), else a pi binary resolved through the shared
 /// precedence chain spawns directly, else the error names every candidate so
 /// a missing-install tab still explains itself. The launcher root falls back
 /// to the workspace cwd when launcherDir is unset or blank. `roles` carries
@@ -166,17 +178,19 @@ pub fn spawn_plan(
     home: Option<&str>,
     cwd: &Path,
     roles: &PrepareRoles,
+    bppc_host: &str,
 ) -> Result<SpawnPlan, String> {
     let root = launcher_root(prefs, home, cwd);
     let launcher = root.join("bin").join("efficient-pi");
-    if launcher.is_file() {
+    let has_agent_dir = prefs
+        .agent_dir
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|dir| !dir.is_empty());
+    if !cfg!(windows) && !has_agent_dir && launcher.is_file() {
         return Ok(SpawnPlan::CheckoutLauncher {
             program: launcher.to_string_lossy().into_owned(),
-            args: vec![
-                "--no-prime".to_string(),
-                "--mode".to_string(),
-                "rpc".to_string(),
-            ],
+            args: checkout_rpc_args(bppc_host),
         });
     }
     // No launcher: resolve the pi binary through the shared precedence chain,
@@ -184,7 +198,7 @@ pub fn spawn_plan(
     // The runtime agent dir needs the app data dir, which a spawn decision
     // never reads; an empty dir degrades it instead of guessing.
     let effective = PiPrefs {
-        launcher_dir: Some(root.to_string_lossy().into_owned()),
+        launcher_dir: (!cfg!(windows)).then(|| root.to_string_lossy().into_owned()),
         ..prefs.clone()
     };
     let resolved = resolve_paths_with(
@@ -243,7 +257,11 @@ fn resolve_spec_with(
         ..PiPrefs::default()
     };
     let roles = roles_from_env(&env);
-    let mut spec = match spawn_plan(&prefs, bundled, home, dir, &roles)? {
+    let bppc_host = env
+        .get("EFFICIENT_PI_BPPC_HOST")
+        .map(String::as_str)
+        .unwrap_or("");
+    let mut spec = match spawn_plan(&prefs, bundled, home, dir, &roles, bppc_host)? {
         SpawnPlan::CheckoutLauncher { program, args } | SpawnPlan::Direct { program, args, .. } => {
             SpawnSpec {
                 program,
@@ -286,7 +304,7 @@ const AGENT_SIDECAR: &str = "agent";
 /// Seed stamp written by launcher::seed_agent_dir (SEED_STAMP_FILE there is
 /// private; the name must stay in sync). Its presence marks the runtime
 /// agent dir as seeded.
-const SEED_STAMP_FILE: &str = ".terax-seed";
+pub(crate) const SEED_STAMP_FILE: &str = ".terax-seed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -634,6 +652,19 @@ mod tests {
     }
 
     #[test]
+    fn resolve_agent_dir_prefers_the_explicit_path_then_app_data() {
+        let home = tempfile::tempdir().expect("home");
+        let app_data = tempfile::tempdir().expect("app data");
+        let home_str = home.path().to_str().expect("utf8");
+        let explicit = resolve_agent_dir(Some("$HOME/custom-agent"), Some(home_str), app_data.path());
+        assert_eq!(explicit, home.path().join("custom-agent"));
+        assert_eq!(
+            resolve_agent_dir(Some("  "), Some(home_str), app_data.path()),
+            app_data.path().join("pi-home").join("agent")
+        );
+    }
+
+    #[test]
     fn errors_when_no_binary_exists() {
         let dir = tempfile::tempdir().expect("tempdir");
         let launcher_home = tempfile::tempdir().expect("tempdir");
@@ -664,7 +695,7 @@ mod tests {
             thinking: "xhigh".to_string(),
             smol: String::new(),
         };
-        let plan = spawn_plan(&prefs, &BundledPaths::default(), None, dir.path(), &roles)
+        let plan = spawn_plan(&prefs, &BundledPaths::default(), None, dir.path(), &roles, "")
             .expect("plan");
         match plan {
             SpawnPlan::CheckoutLauncher { program, args } => {
@@ -684,6 +715,81 @@ mod tests {
     }
 
     #[test]
+    fn checkout_launcher_receives_the_configured_bppc_host() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let launcher_home = tempfile::tempdir().expect("tempdir");
+        touch(&launcher_home.path().join("bin").join("efficient-pi"));
+        let prefs = PiPrefs {
+            launcher_dir: Some(launcher_home.path().to_string_lossy().into_owned()),
+            ..PiPrefs::default()
+        };
+        let roles = PrepareRoles {
+            provider: String::new(),
+            model: String::new(),
+            thinking: String::new(),
+            smol: String::new(),
+        };
+        let plan = spawn_plan(
+            &prefs,
+            &BundledPaths::default(),
+            None,
+            dir.path(),
+            &roles,
+            "  192.0.2.44  ",
+        )
+        .expect("plan");
+        let SpawnPlan::CheckoutLauncher { args, .. } = plan else {
+            panic!("expected the checkout launcher");
+        };
+        assert_eq!(
+            args,
+            vec![
+                "--no-prime",
+                "--mode",
+                "rpc",
+                "--host",
+                "192.0.2.44"
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_agent_dir_uses_direct_pi_instead_of_checkout_launcher() {
+        let dir = tempfile::tempdir().expect("workspace");
+        let checkout = tempfile::tempdir().expect("checkout");
+        let agent = tempfile::tempdir().expect("agent");
+        touch(&checkout.path().join("bin").join("efficient-pi"));
+        touch(&checkout.path().join("bin").join("pi"));
+        let prefs = PiPrefs {
+            launcher_dir: Some(checkout.path().to_string_lossy().into_owned()),
+            agent_dir: Some(agent.path().to_string_lossy().into_owned()),
+            ..PiPrefs::default()
+        };
+        let roles = PrepareRoles {
+            provider: String::new(),
+            model: String::new(),
+            thinking: String::new(),
+            smol: String::new(),
+        };
+        let plan = spawn_plan(
+            &prefs,
+            &BundledPaths::default(),
+            None,
+            dir.path(),
+            &roles,
+            "",
+        )
+        .expect("direct plan");
+        match plan {
+            SpawnPlan::Direct { program, source, .. } => {
+                assert!(program.ends_with("bin/pi"));
+                assert_eq!(source, PathSource::Checkout);
+            }
+            other => panic!("expected direct pi, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn spawn_plan_direct_resolves_pi_from_checkout_then_bundled() {
         let dir = tempfile::tempdir().expect("tempdir");
         let launcher_home = tempfile::tempdir().expect("tempdir");
@@ -698,7 +804,7 @@ mod tests {
             thinking: "xhigh".to_string(),
             smol: "omlx/Qwen3.6-35B-A3B-OptiQ-4bit".to_string(),
         };
-        let plan = spawn_plan(&prefs, &BundledPaths::default(), None, dir.path(), &roles)
+        let plan = spawn_plan(&prefs, &BundledPaths::default(), None, dir.path(), &roles, "")
             .expect("plan");
         match plan {
             SpawnPlan::Direct {
@@ -720,7 +826,7 @@ mod tests {
             exe_dir: exe.path().to_path_buf(),
             resource_dir: PathBuf::new(),
         };
-        let plan = spawn_plan(&PiPrefs::default(), &bundled, None, dir.path(), &roles)
+        let plan = spawn_plan(&PiPrefs::default(), &bundled, None, dir.path(), &roles, "")
             .expect("plan");
         match plan {
             SpawnPlan::Direct { program, source, .. } => {
@@ -816,7 +922,7 @@ mod tests {
             thinking: String::new(),
             smol: String::new(),
         };
-        let err = spawn_plan(&prefs, &BundledPaths::default(), None, dir.path(), &roles)
+        let err = spawn_plan(&prefs, &BundledPaths::default(), None, dir.path(), &roles, "")
             .expect_err("must error");
         assert!(err.contains("no pi binary found"));
         assert!(err.contains(
@@ -842,6 +948,57 @@ mod tests {
         let err =
             resolve_spec(None, Some("/somewhere"), &[], HashMap::new()).expect_err("must error");
         assert!(err.contains("workspace cwd"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_spawn_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn checkout_launcher_is_skipped_for_the_bundled_direct_pi() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let checkout = tempfile::tempdir().expect("checkout");
+        let bundled_dir = tempfile::tempdir().expect("bundled");
+        fs::create_dir_all(checkout.path().join("bin")).expect("checkout bin");
+        fs::write(checkout.path().join("bin").join("efficient-pi"), "stub")
+            .expect("checkout launcher");
+        fs::write(checkout.path().join("bin").join("pi.exe"), "stub")
+            .expect("checkout pi");
+        fs::write(bundled_dir.path().join("pi.exe"), "stub").expect("bundled pi");
+        let prefs = PiPrefs {
+            launcher_dir: Some(checkout.path().to_string_lossy().into_owned()),
+            ..PiPrefs::default()
+        };
+        let roles = PrepareRoles {
+            provider: "bppc".to_string(),
+            model: "model".to_string(),
+            thinking: "high".to_string(),
+            smol: String::new(),
+        };
+        let plan = spawn_plan(
+            &prefs,
+            &BundledPaths {
+                exe_dir: bundled_dir.path().to_path_buf(),
+                resource_dir: PathBuf::new(),
+            },
+            None,
+            workspace.path(),
+            &roles,
+            "",
+        )
+        .expect("bundled direct plan");
+        match plan {
+            SpawnPlan::Direct { program, source, .. } => {
+                assert_eq!(source, PathSource::Bundled);
+                assert_eq!(
+                    program,
+                    bundled_dir.path().join("pi.exe").to_string_lossy().into_owned()
+                );
+            }
+            other => panic!("expected bundled direct pi, got {other:?}"),
+        }
     }
 }
 

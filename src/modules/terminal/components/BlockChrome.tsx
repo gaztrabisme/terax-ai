@@ -42,6 +42,7 @@ const BLOCK_CSS = `
 .terax-block-dot.is-running { background: var(--amber-400, #d29922); }
 .terax-block-dot.is-ok { background: var(--green-400, #3fb950); }
 .terax-block-dot.is-error { background: var(--red-400, #f85149); }
+.terax-block-dot.is-unknown { background: var(--muted-foreground, #8b949e); }
 .terax-block-duration {
   pointer-events: none;
   position: absolute;
@@ -194,6 +195,9 @@ function renderDot(
     el.appendChild(dot);
   }
   dot.className = `terax-block-dot is-${block.status}`;
+  // Only "unknown" carries a title: ok and error are self-evident.
+  if (block.status === "unknown") dot.title = "exit status unknown";
+  else dot.removeAttribute("title");
 
   let row = el.querySelector<HTMLDivElement>(":scope > .terax-block-row");
   if (!row) {

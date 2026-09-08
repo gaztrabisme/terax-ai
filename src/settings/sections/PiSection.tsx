@@ -8,6 +8,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { native, type ReadResult } from "@/lib/native";
+import { IS_WINDOWS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -39,10 +40,9 @@ import {
   PI_OPEN_TERMINAL_EVENT,
   PI_OAUTH_PROVIDERS,
   PI_THINKING_LEVELS,
-  removeProviderAuth,
   serializeModelsJsonTmpl,
-  setProviderApiKey,
   type PiAuthStatus,
+  type PiAuthStatusMap,
   type PiCloudProvider,
   type PiEndpointView,
   type PiModelRow,
@@ -248,7 +248,8 @@ export function PiSection() {
   const [providers, setProviders] = useState<PiProviderRow[] | null>(null);
   const [providersError, setProvidersError] = useState<string | null>(null);
   const [models, setModels] = useState<PiModelRow[] | null>(null);
-  const [authEntries, setAuthEntries] = useState<Record<string, unknown> | null>(
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [authStatusMap, setAuthStatusMap] = useState<PiAuthStatusMap | null>(
     null,
   );
   const [search, setSearch] = useState("");
@@ -299,8 +300,9 @@ export function PiSection() {
         setSecretStatus(
           await invoke<Record<string, string>>("pi_secret_status"),
         );
-      } catch {
+      } catch (e) {
         setSecretStatus(null);
+        setCloudKeysNote(e instanceof Error ? e.message : String(e));
       }
     },
     [],
@@ -370,19 +372,13 @@ export function PiSection() {
     () => async (piBin: string, agentDir: string) => {
       setProvidersError(null);
       try {
-        const out = await native.runCommand(
-          `PI_CODING_AGENT_DIR="${agentDir}" "${piBin}" --list-providers`,
+        const out = await invoke<string>("pi_list_providers", {
           agentDir,
-          20,
-        );
-        if (out.exit_code !== 0) {
-          setProvidersError(
-            out.stderr.trim() || `pi --list-providers exited ${out.exit_code}`,
-          );
-          return;
-        }
-        setProviders(parsePiProviders(out.stdout));
+          piBin,
+        });
+        setProviders(parsePiProviders(out));
       } catch (e) {
+        setProviders([]);
         setProvidersError(e instanceof Error ? e.message : String(e));
       }
     },
@@ -396,6 +392,7 @@ export function PiSection() {
   // hint below keys off.
   const loadModels = useMemo(
     () => async (agentDir: string) => {
+      setModelsError(null);
       try {
         const out = await invoke<string>("pi_list_models", {
           prefs: {
@@ -408,25 +405,24 @@ export function PiSection() {
           agentDir,
         });
         setModels(parsePiModels(out));
-      } catch {
-        // The model comboboxes degrade to free text when pi is unavailable.
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : String(e);
+        setModelsError(reason);
         setModels(null);
       }
     },
     [piAgentBin, piAgentDir, piLauncherDir],
   );
 
-  const loadAuth = useMemo(
+  const loadAuthStatus = useMemo(
     () => async (agentDir: string) => {
       try {
-        const res = await native.readFile(`${agentDir}/auth.json`);
-        if (res.kind === "text") {
-          setAuthEntries(JSON.parse(res.content) as Record<string, unknown>);
-        } else {
-          setAuthEntries(null);
-        }
-      } catch {
-        setAuthEntries(null);
+        setAuthStatusMap(
+          await invoke<PiAuthStatusMap>("pi_auth_status", { agentDir }),
+        );
+      } catch (e) {
+        setAuthStatusMap(null);
+        setProvidersError(e instanceof Error ? e.message : String(e));
       }
     },
     [],
@@ -456,9 +452,16 @@ export function PiSection() {
   useEffect(() => {
     if (!fsReady || !piBinPath || !runtimeDirPath) return;
     void loadProviders(piBinPath, runtimeDirPath);
-    void loadAuth(runtimeDirPath);
+    void loadAuthStatus(runtimeDirPath);
     void loadEndpoints(runtimeDirPath);
-  }, [fsReady, piBinPath, runtimeDirPath, loadProviders, loadAuth, loadEndpoints]);
+  }, [
+    fsReady,
+    piBinPath,
+    runtimeDirPath,
+    loadProviders,
+    loadAuthStatus,
+    loadEndpoints,
+  ]);
 
   // The model table refetches when the stored keys change: saving a key in
   // the cloud keys group must make the hidden provider rows appear.
@@ -480,9 +483,16 @@ export function PiSection() {
       cloudProvider(piProvider) !== null &&
       providerModelRows.length === 0 &&
       secretStatus?.[piProvider] !== "set" &&
-      authStatus(authEntries, piProvider) === "none",
-    [piProvider, providerModelRows, secretStatus, authEntries],
+      authStatus(authStatusMap, piProvider) === "none",
+    [piProvider, providerModelRows, secretStatus, authStatusMap],
   );
+  const modelEmptyText = modelsError
+    ? `catalog unavailable: ${modelsError}`
+    : providerNeedsKey
+      ? "enter a key to see models"
+      : piProvider
+        ? `no models listed for ${piProvider}`
+        : "choose a provider to see models";
 
   const checkPath = async (
     id: string,
@@ -521,47 +531,46 @@ export function PiSection() {
   };
 
   const statusFor = (id: string): PiAuthStatus =>
-    authStatus(authEntries, id);
+    authStatus(authStatusMap, id);
 
   const saveKey = async (providerId: string) => {
     const key = keyDraft.trim();
     if (!key || !runtimeDirPath) return;
-    const next = setProviderApiKey(authEntries, providerId, key);
     try {
-      await native.writeFile(
-        `${runtimeDirPath}/auth.json`,
-        `${JSON.stringify(next, null, 2)}\n`,
-      );
+      await invoke("pi_auth_set", {
+        agentDir: runtimeDirPath,
+        provider: providerId,
+        key,
+      });
       setKeyInputFor(null);
       setKeyDraft("");
-      await loadAuth(runtimeDirPath);
-    } catch {
-      setProvidersError("could not write auth.json");
+      await loadAuthStatus(runtimeDirPath);
+    } catch (e) {
+      setProvidersError(e instanceof Error ? e.message : String(e));
     }
   };
 
   const removeAuth = async (providerId: string) => {
     if (!runtimeDirPath) return;
-    const next = removeProviderAuth(authEntries, providerId);
     try {
-      await native.writeFile(
-        `${runtimeDirPath}/auth.json`,
-        `${JSON.stringify(next, null, 2)}\n`,
-      );
-      await loadAuth(runtimeDirPath);
-    } catch {
-      setProvidersError("could not write auth.json");
+      await invoke("pi_auth_clear", {
+        agentDir: runtimeDirPath,
+        provider: providerId,
+      });
+      await loadAuthStatus(runtimeDirPath);
+    } catch (e) {
+      setProvidersError(e instanceof Error ? e.message : String(e));
     }
   };
 
   // Cloud key badge: the app's stored key wins, then an env var the spawn
-  // would carry anyway, then the runtime agent dir's auth.json entry.
+  // would carry anyway, then the runtime agent dir's auth status.
   const cloudBadge = (providerId: string): PiCloudKeyStatus =>
     cloudKeyStatus(
       providerId,
       secretStatus?.[providerId] === "set",
       envStatus?.[providerId] === true,
-      authStatus(authEntries, providerId),
+      authStatus(authStatusMap, providerId),
     );
 
   // The endpoints-group oMLX badge: the app's stored key wins, then the
@@ -604,10 +613,14 @@ export function PiSection() {
       piBinPath && runtimeDirPath
         ? {
             cwd: launcherDirPath || runtimeDirPath,
-            command: piSignInCommandResolved(piBinPath, runtimeDirPath),
+            command: piSignInCommandResolved(
+              piBinPath,
+              runtimeDirPath,
+              IS_WINDOWS,
+            ),
             hint: "Type /login <provider> in the pi prompt",
           }
-        : piSignInPayload(launcherDirPath);
+        : piSignInPayload(launcherDirPath, IS_WINDOWS);
     await emit(PI_OPEN_TERMINAL_EVENT, payload);
     setReveal((r) => ({
       ...r,
@@ -803,19 +816,20 @@ export function PiSection() {
           title="Model"
           description="Free text allowed; suggestions come from pi --list-models."
         >
-          <ModelCombo
-            value={piModel}
-            rows={providerModelRows}
-            optionValue={(row) => row.model}
-            emptyText={
-              providerNeedsKey
-                ? "enter a key to see models"
-                : piProvider
-                  ? `no models listed for ${piProvider}`
-                  : "choose a provider to see models"
-            }
-            onCommit={setPiModel}
-          />
+          <div className="flex flex-col items-start gap-1">
+            <ModelCombo
+              value={piModel}
+              rows={providerModelRows}
+              optionValue={(row) => row.model}
+              emptyText={modelEmptyText}
+              onCommit={setPiModel}
+            />
+            {modelsError ? (
+              <span className="max-w-80 text-[11px] text-amber-600 dark:text-amber-300">
+                catalog unavailable: {modelsError}; free-text model is unverified
+              </span>
+            ) : null}
+          </div>
         </SettingRow>
         <SettingRow
           title="Thinking"
@@ -841,19 +855,20 @@ export function PiSection() {
           title="Subagent model"
           description="provider/model passed to pi as --smol."
         >
-          <ModelCombo
-            value={piSmol}
-            rows={providerModelRows}
-            optionValue={(row) => `${piProvider}/${row.model}`}
-            emptyText={
-              providerNeedsKey
-                ? "enter a key to see models"
-                : piProvider
-                  ? `no models listed for ${piProvider}`
-                  : "choose a provider to see models"
-            }
-            onCommit={setPiSmol}
-          />
+          <div className="flex flex-col items-start gap-1">
+            <ModelCombo
+              value={piSmol}
+              rows={providerModelRows}
+              optionValue={(row) => `${piProvider}/${row.model}`}
+              emptyText={modelEmptyText}
+              onCommit={setPiSmol}
+            />
+            {modelsError ? (
+              <span className="max-w-80 text-[11px] text-amber-600 dark:text-amber-300">
+                catalog unavailable: {modelsError}; free-text model is unverified
+              </span>
+            ) : null}
+          </div>
         </SettingRow>
         {providerNeedsKey ? (
           <p className="-mt-1 px-3 text-[12px] text-muted-foreground">
@@ -1182,7 +1197,7 @@ function ProviderRow({
                 className="h-5 px-1.5 text-[12px]"
                 onClick={onToggleKeyInput}
               >
-                {status === "key" ? "Edit key" : "Set key"}
+                {status === "api_key" ? "Edit key" : "Set key"}
               </Button>
             ) : null}
             {status !== "none" ? (

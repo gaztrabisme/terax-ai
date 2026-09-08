@@ -165,9 +165,9 @@ describe("providerRows", () => {
 
   it("is ok when the provider holds a key or an OAuth token", () => {
     const entries = {
-      anthropic: { type: "oauth", access: "token" },
-      openrouter: { type: "api_key", key: "sk-or" },
-    };
+      anthropic: "oauth",
+      openrouter: "api_key",
+    } as const;
     const rows = providerRows(
       { provider: "anthropic", smol: "openrouter/m" },
       entries,
@@ -203,7 +203,7 @@ describe("providerRows", () => {
     // A stored key outranks an auth.json entry and the env var.
     const both = providerRows(
       { provider: "anthropic", smol: "anthropic/m" },
-      { anthropic: { type: "oauth", access: "t" } },
+      { anthropic: "oauth" } as const,
       providerList,
       "global",
       { stored: { anthropic: true }, env: { anthropic: true } },
@@ -473,7 +473,7 @@ describe("summarize", () => {
     const all = buildRows({
       paths: bundledPaths,
       roles,
-      authEntries: null,
+      authStatusMap: null,
       providerList: [],
       endpoints: null,
       health: {
@@ -528,7 +528,7 @@ describe("buildRows", () => {
     const rows = buildRows({
       paths: bundledPaths,
       roles,
-      authEntries: null,
+      authStatusMap: null,
       providerList: [],
       endpoints: null,
       health: { omlx: { ok: false, status: null, ms: 0, error: "down" } },

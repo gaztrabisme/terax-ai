@@ -6,7 +6,11 @@ import type { IMarker } from "@xterm/xterm";
  * ownership; the visual chrome lives in components/BlockChrome.tsx.
  */
 
-export type BlockStatus = "running" | "ok" | "error";
+/**
+ * "unknown" means the block closed without a parseable exit code (D lost,
+ * crashed shell, partial shell integration): it never claims success.
+ */
+export type BlockStatus = "running" | "ok" | "error" | "unknown";
 
 export type Block = {
   /** Monotonic per-store id, stable across status changes. */
@@ -57,7 +61,8 @@ export class BlockStore {
   /** OSC 133 C: open a block with the command text and a marker at the cursor line. */
   onCommandStart(command: string | null): void {
     if (this.disposed) return;
-    // A still-open block means D was lost; close it before opening the next.
+    // A still-open block means D was lost; close it as unknown before
+    // opening the next.
     this.closeOpenBlock(null);
     this.push({
       id: this.nextId++,
@@ -100,7 +105,7 @@ export class BlockStore {
     this.notify();
   }
 
-  /** OSC 133 A: close any block still open (D lost). Exit code stays unknown. */
+  /** OSC 133 A: close any block still open (D lost) with status "unknown". */
   onPromptStart(): void {
     if (this.disposed) return;
     if (this.closeOpenBlock(null)) this.notify();
@@ -147,12 +152,16 @@ export class BlockStore {
     return this.blocks.find((b) => b.status === "running") ?? null;
   }
 
-  /** Closes the open block; returns true when something changed. */
+  /**
+   * Closes the open block; returns true when something changed. A null exit
+   * code (closed by A or C instead of D) yields status "unknown": a block
+   * with no evidence of success is never reported as ok.
+   */
   private closeOpenBlock(exitCode: number | null): boolean {
     const open = this.openBlock();
     if (!open) return false;
     open.exitCode = exitCode;
-    open.status = "ok";
+    open.status = exitCode === null ? "unknown" : exitCode === 0 ? "ok" : "error";
     open.endedAt = this.opts.now?.() ?? null;
     return true;
   }

@@ -145,8 +145,8 @@ where
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use notify::{Event, EventKind, event::ModifyKind};
     use std::io::Write;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn extract_new_lines_only_yields_complete_lines_in_order() {
@@ -164,22 +164,12 @@ mod tests {
     }
 
     #[test]
-    fn watcher_streams_appended_lines_in_order() {
-        use std::sync::mpsc;
+    fn event_handler_streams_appended_lines_in_order() {
         let dir = tempfile::tempdir().expect("tempdir");
         let agent_dir = dir.path().to_path_buf();
-        let (tx, rx) = mpsc::channel();
-        let handle = watch_with(&agent_dir, move |line: TranscriptLine| {
-            tx.send(line).expect("send");
-        })
-        .expect("watch");
         let file = agent_dir.join("agent-hub").join("9").join("scout-1.transcript.jsonl");
         std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
-
-        // Notify needs the file to exist before append events carry data.
         std::fs::File::create(&file).expect("create");
-        std::thread::sleep(Duration::from_millis(200));
-
         let mut f = std::fs::OpenOptions::new()
             .append(true)
             .open(&file)
@@ -190,13 +180,11 @@ mod tests {
         f.flush().expect("flush 2");
         drop(f);
 
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut got: Vec<String> = Vec::new();
-        while got.len() < 2 && Instant::now() < deadline {
-            if let Ok(line) = rx.recv_timeout(Duration::from_secs(2)) {
-                got.push(line.line);
-            }
-        }
+        let root = std::fs::canonicalize(agent_dir.join("agent-hub")).expect("root");
+        let offsets = Arc::new(Mutex::new(HashMap::new()));
+        let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(file);
+        let mut got = Vec::new();
+        handle_event(&event, &root, &offsets, &mut |line| got.push(line.line));
         assert_eq!(
             got,
             vec![
@@ -204,6 +192,5 @@ mod tests {
                 "{\"type\":\"turn_start\",\"turnIndex\":0}".to_string(),
             ]
         );
-        drop(handle);
     }
 }

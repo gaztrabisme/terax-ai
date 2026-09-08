@@ -84,16 +84,31 @@ describe("BlockStore", () => {
     expect(h.store.getBlocks()[1].status).toBe("ok");
   });
 
-  it("A closes a block whose D was lost", () => {
+  it("A closes a block whose D was lost as unknown, not ok", () => {
     const h = makeStore();
     h.store.onCommandStart("sleep 100");
     h.store.onPromptStart();
 
     const b = h.store.getBlocks()[0];
-    expect(b.status).toBe("ok");
+    expect(b.status).toBe("unknown");
     expect(b.exitCode).toBeNull();
     // no further notifications on an already-quiet store
     expect(h.store.getBlocks()).toHaveLength(1);
+  });
+
+  it("C while a block is still open closes the old block as unknown", () => {
+    const h = makeStore();
+    h.store.onCommandStart("sleep 100");
+    h.tick(10);
+    // D never arrived for the first command; the next C closes it.
+    h.store.onCommandStart("echo next");
+
+    const blocks = h.store.getBlocks();
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].status).toBe("unknown");
+    expect(blocks[0].exitCode).toBeNull();
+    expect(blocks[0].endedAt).toBe(1010);
+    expect(blocks[1].status).toBe("running");
   });
 
   it("D without an open block creates a blind block anchored at the prompt marker", () => {

@@ -429,3 +429,210 @@ describe("promptLine images", () => {
     }
   });
 });
+
+// Wire shapes measured on pi 0.3.0: the switch ack carries no session id
+// ({command:"switch_session",data:{cancelled}}), and only agent_start,
+// turn_start and turn_end carry one. The new id lands on the next
+// agent_start, after which turn_start and turn_end repeat it.
+const SWITCH_ACK =
+  '{"command":"switch_session","data":{"cancelled":false},"id":"9","success":true,"type":"response"}';
+const SESSION_A = "aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaaa";
+const SESSION_B = "bbbbbbbb-2222-4bbb-8bbb-bbbbbbbbbbbb";
+
+const A_USAGE =
+  '{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15,"cost":{"total":0.01}}';
+const B_USAGE =
+  '{"input":3,"output":4,"cacheRead":0,"cacheWrite":0,"totalTokens":7,"cost":{"total":0.02}}';
+
+/** A full turn in session A: messages, a tool row, an ask card, usage, a
+ *  retry in flight and a terminal error, so the reset has everything to
+ *  clear. */
+function sessionAState(): PiSessionState {
+  let state = initialPiSessionState();
+  const feed = [
+    `{"type":"agent_start","sessionId":"${SESSION_A}"}`,
+    `{"type":"turn_start","sessionId":"${SESSION_A}","turnIndex":0,"timestamp":1000}`,
+    '{"type":"message_start","message":{"role":"user","content":"hello"}}',
+    '{"type":"tool_execution_start","toolCallId":"tool-1","toolName":"bash","args":{"cmd":"ls"}}',
+    '{"type":"tool_execution_end","toolCallId":"tool-1","result":{"content":[{"type":"text","text":"out"}]},"isError":false}',
+    `{"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"from A"}],"model":"m-1"}}`,
+    `{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"from A"}],"model":"m-1","usage":${A_USAGE}}}`,
+    `{"type":"turn_end","sessionId":"${SESSION_A}","turnIndex":0,"message":{"role":"assistant","usage":${A_USAGE}}}`,
+    '{"type":"ask_request","id":"ask-1","questions":[{"question":"Proceed?","options":[{"label":"Yes"}],"recommended":0,"multi":false}],"timeoutMs":1000}',
+    '{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":4000}',
+    '{"type":"agent_end","error":"boom"}',
+  ];
+  for (const raw of feed) state = applyEvent(state, raw);
+  return state;
+}
+
+function runTurnB(from: PiSessionState): PiSessionState {
+  let state = from;
+  const feed = [
+    `{"type":"agent_start","sessionId":"${SESSION_B}"}`,
+    `{"type":"turn_start","sessionId":"${SESSION_B}","turnIndex":0,"timestamp":2000}`,
+    '{"type":"message_start","message":{"role":"user","content":"next"}}',
+    `{"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"from B"}],"model":"m-2"}}`,
+    `{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"from B"}],"model":"m-2","usage":${B_USAGE}}}`,
+    `{"type":"turn_end","sessionId":"${SESSION_B}","turnIndex":0,"message":{"role":"assistant","usage":${B_USAGE}}}`,
+  ];
+  for (const raw of feed) state = applyEvent(state, raw);
+  return state;
+}
+
+describe("switch_session: the transcript resets to the new session", () => {
+  it("populates session A with blocks, positions, usage, retry and error state", () => {
+    const state = sessionAState();
+    expect(state.sessionId).toBe(SESSION_A);
+    expect(state.blocks).toHaveLength(6);
+    expect(Object.keys(state.toolPos)).toEqual(["tool-1"]);
+    expect(Object.keys(state.askPos)).toEqual(["ask-1"]);
+    expect(state.tokens?.totalTokens).toBe(15);
+    expect(state.turnTokens).toBe(15);
+    expect(state.sessionCost).toBeCloseTo(0.01, 6);
+    expect(state.retry).toEqual({ attempt: 1, max: 3, delayMs: 4000 });
+    expect(state.lastErrorText).toBe("boom");
+    expect(state.switching).toBe(false);
+  });
+
+  it("the ack clears the transcript state and waits for the new session id", () => {
+    const switched = applyEvent(sessionAState(), SWITCH_ACK);
+    expect(switched.blocks).toEqual([]);
+    expect(switched.openMessageId).toBeNull();
+    expect(switched.toolPos).toEqual({});
+    expect(switched.askPos).toEqual({});
+    expect(switched.tokens).toBeNull();
+    expect(switched.turnTokens).toBe(0);
+    expect(switched.sessionCost).toBe(0);
+    expect(switched.turnUsage).toBeNull();
+    expect(switched.retry).toBeNull();
+    expect(switched.lastErrorText).toBeNull();
+    expect(switched.startedMs).toBeNull();
+    expect(switched.sessionId).toBeNull();
+    expect(switched.status).toBe("idle");
+    expect(switched.switching).toBe(true);
+  });
+
+  it("events from session B after the switch yield only B's transcript and totals", () => {
+    const final = runTurnB(applyEvent(sessionAState(), SWITCH_ACK));
+    const messages = blocksOfKind(final, "message");
+    expect(messages).toHaveLength(2);
+    expect(messages[0].parts[0]).toEqual({ type: "text", text: "next" });
+    expect(messages[1].parts[0]).toEqual({ type: "text", text: "from B" });
+    expect(final.sessionId).toBe(SESSION_B);
+    expect(final.switching).toBe(false);
+    expect(final.tokens?.totalTokens).toBe(7);
+    expect(final.turnTokens).toBe(7);
+    expect(final.sessionCost).toBeCloseTo(0.02, 6);
+  });
+
+  it("a stale turn_end from session A after the switch is ignored", () => {
+    const final = runTurnB(applyEvent(sessionAState(), SWITCH_ACK));
+    const stale = applyEvent(
+      final,
+      `{"type":"turn_end","sessionId":"${SESSION_A}","turnIndex":9,"message":{"role":"assistant","usage":{"input":99,"output":99,"cacheRead":0,"cacheWrite":0,"totalTokens":999,"cost":{"total":9.99}}}}`,
+    );
+    expect(stale).toBe(final);
+    expect(stale.turnTokens).toBe(7);
+    expect(stale.sessionCost).toBeCloseTo(0.02, 6);
+  });
+
+  it("frames inside the switch window are ignored until the new agent_start", () => {
+    const switched = applyEvent(sessionAState(), SWITCH_ACK);
+    const staleUser = applyEvent(
+      switched,
+      '{"type":"message_start","message":{"role":"user","content":"stale"}}',
+    );
+    expect(staleUser).toBe(switched);
+    const staleTurn = applyEvent(
+      switched,
+      `{"type":"turn_end","sessionId":"${SESSION_A}","turnIndex":0,"message":{"role":"assistant","usage":${A_USAGE}}}`,
+    );
+    expect(staleTurn).toBe(switched);
+    const adopted = applyEvent(
+      staleTurn,
+      `{"type":"agent_start","sessionId":"${SESSION_B}"}`,
+    );
+    expect(adopted.sessionId).toBe(SESSION_B);
+    expect(adopted.switching).toBe(false);
+    expect(adopted.status).toBe("thinking");
+  });
+
+  it("an agent_start naming another session resets even when the ack was missed", () => {
+    const reset = applyEvent(
+      sessionAState(),
+      `{"type":"agent_start","sessionId":"${SESSION_B}"}`,
+    );
+    expect(reset.blocks).toEqual([]);
+    expect(reset.sessionId).toBe(SESSION_B);
+    expect(reset.tokens).toBeNull();
+    expect(reset.turnTokens).toBe(0);
+    const final = runTurnB(reset);
+    expect(final.turnTokens).toBe(7);
+    expect(final.sessionCost).toBeCloseTo(0.02, 6);
+  });
+
+  it("a cancelled or failed switch ack keeps the current session", () => {
+    const state = sessionAState();
+    const cancelled = applyEvent(
+      state,
+      '{"command":"switch_session","data":{"cancelled":true},"id":"9","success":true,"type":"response"}',
+    );
+    expect(cancelled).toBe(state);
+    const failed = applyEvent(
+      state,
+      '{"command":"switch_session","id":"9","success":false,"type":"response"}',
+    );
+    expect(failed).toBe(state);
+  });
+
+  it("a new run in the same session does not reset the transcript", () => {
+    const state = sessionAState();
+    const rerun = applyEvent(
+      state,
+      `{"type":"agent_start","sessionId":"${SESSION_A}"}`,
+    );
+    expect(rerun.blocks).toHaveLength(6);
+    expect(rerun.tokens?.totalTokens).toBe(15);
+    expect(rerun.switching).toBe(false);
+  });
+});
+
+// Measured on pi 0.3.0: a prompt sent right after agent_end is refused with
+// {command:"prompt",success:false,error} and no run starts, so without a
+// card the app gives no sign the prompt was dropped.
+describe("rejected prompt response", () => {
+  const rejection =
+    '{"type":"response","command":"prompt","success":false,"error":"Agent is currently streaming; specify streamingBehavior"}';
+
+  it("lands an error card with the rejection text and latches lastErrorText", () => {
+    const rejected = applyEvent(initialPiSessionState(), rejection);
+    const errors = rejected.blocks.filter(
+      (b): b is PiErrorBlock => b.kind === "error",
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0].text).toBe(
+      "prompt rejected: Agent is currently streaming; specify streamingBehavior",
+    );
+    expect(rejected.lastErrorText).toBe(
+      "prompt rejected: Agent is currently streaming; specify streamingBehavior",
+    );
+    expect(rejected.status).toBe("idle");
+
+    // A successful prompt response changes nothing, and a rejection without
+    // an error string is ignored.
+    const base = initialPiSessionState();
+    expect(
+      applyEvent(
+        base,
+        '{"command":"prompt","id":"2","success":true,"type":"response"}',
+      ),
+    ).toBe(base);
+    expect(
+      applyEvent(
+        base,
+        '{"command":"prompt","success":false,"type":"response"}',
+      ),
+    ).toBe(base);
+  });
+});

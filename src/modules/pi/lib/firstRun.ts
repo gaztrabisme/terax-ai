@@ -1,5 +1,5 @@
 // Pure first-run check builders behind the Pi settings panel: turn the
-// pi_paths result, auth.json entries, the pi --list-providers table and the
+// pi_paths result, the auth status map, the pi --list-providers table and the
 // local endpoint health probes into green, amber or red rows. No Tauri
 // imports here so the logic stays unit-testable in plain node.
 
@@ -10,6 +10,7 @@ import {
   PI_OAUTH_PROVIDERS,
   resolvePiPrefs,
   type PiEndpointView,
+  type PiAuthStatusMap,
   type PiProviderRow,
   type PiResolvedPath,
   type PiResolvedPaths,
@@ -51,7 +52,7 @@ export type PiCloudKeyInputs = {
   env?: Record<string, boolean>;
   /**
    * Key source per local endpoint id (omlx, bppc) as a session would see it.
-   * Absent entries fall back to the cloud and auth.json checks.
+   * Absent entries fall back to the cloud and auth status checks.
    */
   local?: Record<string, PiLocalKeyStatus>;
 };
@@ -203,14 +204,14 @@ export function rolesScopeLabel(cwd: string | null): string {
  * or a real key in models.json.tmpl is green, an explicit "none" offers Add
  * key, and without an entry the checks below decide as before. Cloud
  * providers go through cloudKeyStatus: the app's stored key or an env var the
- * spawn would carry counts as green, an auth.json entry still counts, and
+ * spawn would carry counts as green, an auth status still counts, and
  * "not set" offers Add key, which focuses the Cloud keys group. Remaining
  * non-cloud providers are green when they hold a key or OAuth token, or need
- * no auth.json entry at all.
+ * no auth status at all.
  */
 export function providerRows(
   roles: PiRoles,
-  authEntries: unknown,
+  authStatusMap: PiAuthStatusMap | null,
   providerList: PiProviderRow[],
   scope = "global",
   cloudKeys: PiCloudKeyInputs = {},
@@ -237,7 +238,7 @@ export function providerRows(
         action: { label: "Open roles", kind: "focus-roles" },
       };
     }
-    const auth = authStatus(authEntries, provider);
+    const auth = authStatus(authStatusMap, provider);
     // Local endpoints report what a session would actually use: omlx reaches
     // this row both through the cloud table and the launcher's own key
     // fallback, so the local map is checked before the cloud branch, which
@@ -409,7 +410,7 @@ export function endpointRows(
 export function buildRows(input: {
   paths: PiResolvedPaths;
   roles: PiRoles;
-  authEntries: unknown;
+  authStatusMap: PiAuthStatusMap | null;
   providerList: PiProviderRow[];
   endpoints: PiEndpointView[] | null;
   health: PiHealthMap;
@@ -420,7 +421,7 @@ export function buildRows(input: {
     ...pathRows(input.paths),
     ...providerRows(
       input.roles,
-      input.authEntries,
+      input.authStatusMap,
       input.providerList,
       input.rolesScope,
       input.cloudKeys,

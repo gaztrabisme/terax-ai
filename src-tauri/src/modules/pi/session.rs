@@ -592,6 +592,7 @@ mod tests {
                 app_version: "0.7.3".to_string(),
                 template_dir: tmpl,
                 app_data_dir: app_data.path().to_path_buf(),
+                agent_dir: agent_dir.clone(),
                 cwd: project.path().to_path_buf(),
                 roles: launcher::PrepareRoles {
                     provider: "bppc".to_string(),
@@ -720,6 +721,7 @@ mod tests {
                 app_version: "0.7.3".to_string(),
                 template_dir: tmpl,
                 app_data_dir: app_data.path().to_path_buf(),
+                agent_dir: agent_dir.clone(),
                 cwd: project.path().to_path_buf(),
                 roles: launcher::PrepareRoles {
                     provider: "bppc".to_string(),
@@ -756,6 +758,7 @@ mod tests {
                 app_version: "0.7.3".to_string(),
                 template_dir: tmpl,
                 app_data_dir: app_data.path().to_path_buf(),
+                agent_dir: launcher::user_agent_dir(app_data.path()),
                 cwd: project.path().to_path_buf(),
                 roles: launcher::PrepareRoles {
                     provider: "bppc".to_string(),

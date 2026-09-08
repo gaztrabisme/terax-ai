@@ -111,6 +111,15 @@ it("renders the first-run check and the provider placeholder on a fresh install"
   expect(screen.getByText("Choose a provider")).toBeTruthy();
 });
 
+it("keeps free-text models available and labels an unavailable catalog", async () => {
+  mockCloudCommands({});
+  render(<PiSection />);
+
+  expect(
+    await screen.findAllByText(/catalog unavailable:.*free-text model is unverified/),
+  ).toHaveLength(2);
+});
+
 it("names the runtime agent dir and disables endpoints before the first seed", async () => {
   // The resolved agent dir is the bundled template and the seeded copy does
   // not exist yet: the section shows when the seed lands and blocks edits.
@@ -195,6 +204,9 @@ function mockCloudCommands(overrides: {
     if (cmd === "pi_secret_set" || cmd === "pi_secret_clear") {
       return Promise.resolve(undefined);
     }
+    if (cmd === "pi_auth_status") {
+      return Promise.resolve({});
+    }
     if (cmd === "pi_secret_status") {
       return Promise.resolve(
         overrides.secrets ?? {
@@ -230,14 +242,8 @@ function mockCloudCommands(overrides: {
         });
       }
     }
-    if (overrides.providers && cmd === "shell_run_command") {
-      return Promise.resolve({
-        stdout: PROVIDERS_TABLE,
-        stderr: "",
-        exit_code: 0,
-        timed_out: false,
-        truncated: false,
-      });
+    if (overrides.providers && cmd === "pi_list_providers") {
+      return Promise.resolve(PROVIDERS_TABLE);
     }
     return Promise.reject(new Error(`${cmd} unavailable in test`));
   });
