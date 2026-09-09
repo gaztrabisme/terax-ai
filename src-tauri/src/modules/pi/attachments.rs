@@ -310,6 +310,23 @@ pub(crate) fn write_durable(target: &Path, bytes: &[u8]) -> Result<(), String> {
 pub struct SavedAttachmentFile {
     pub path: String,
     pub sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original: Option<SavedOriginalAttachment>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginalAttachment {
+    pub media_type: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SavedOriginalAttachment {
+    pub path: String,
+    pub sha256: String,
+    pub mime: String,
+    pub bytes: usize,
 }
 
 /// One queued draft image: written at once to
@@ -317,6 +334,7 @@ pub struct SavedAttachmentFile {
 /// path-backed before anything is sent (design.md section 3.4 row "Chat
 /// draft and queued images"). Idempotent per id: the same id rewrites the
 /// same file through the temp-and-rename writer.
+#[allow(clippy::too_many_arguments)]
 fn save_draft_attachment(
     registry: &WorkspaceRegistry,
     cwd: &str,
@@ -324,6 +342,7 @@ fn save_draft_attachment(
     attachment_id: &str,
     media_type: &str,
     data: &str,
+    original: Option<&OriginalAttachment>,
     workspace: &WorkspaceEnv,
 ) -> Result<SavedAttachmentFile, String> {
     if !is_filename_safe(tab_id) {
@@ -335,24 +354,48 @@ fn save_draft_attachment(
     let extension = extension_for_media_type(media_type)
         .ok_or_else(|| format!("unsupported attachment media type: {media_type}"))?;
     let bytes = decode_attachment_payload(data)?;
+    let source = original.map(|original| {
+        let extension = extension_for_media_type(&original.media_type)
+            .ok_or_else(|| format!("unsupported original media type: {}", original.media_type))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&original.data)
+            .map_err(|error| format!("invalid original base64: {error}"))?;
+        if bytes.len() <= MAX_ATTACHMENT_BYTES || media_type != "image/jpeg" {
+            return Err("only images exceeding 4194304 bytes may be converted to JPEG".to_string());
+        }
+        Ok((extension, bytes, original.media_type.clone()))
+    }).transpose()?;
     let project = authorized_project_dir(registry, cwd, workspace)?;
     let drafts = ensure_authorized_subdir(registry, &project, DRAFTS_DIR, "draft attachment")?;
+    let original = source.map(|(extension, bytes, mime)| {
+        let file_name = format!("{tab_id}-{attachment_id}.orig.{extension}");
+        write_durable(&drafts.join(&file_name), &bytes)?;
+        Ok::<_, String>(SavedOriginalAttachment {
+            path: format!("{DRAFTS_DIR}/{file_name}"),
+            sha256: sha256_hex(&bytes),
+            mime,
+            bytes: bytes.len(),
+        })
+    }).transpose()?;
     let file_name = format!("{tab_id}-{attachment_id}.{extension}");
     let target = drafts.join(&file_name);
     write_durable(&target, &bytes)?;
     Ok(SavedAttachmentFile {
         path: format!("{DRAFTS_DIR}/{file_name}"),
         sha256: sha256_hex(&bytes),
+        original,
     })
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn pi_save_draft_attachment(
     cwd: String,
     tab_id: String,
     attachment_id: String,
     media_type: String,
     data: String,
+    original: Option<OriginalAttachment>,
     workspace: Option<WorkspaceEnv>,
     registry: State<'_, WorkspaceRegistry>,
 ) -> Result<SavedAttachmentFile, String> {
@@ -364,6 +407,7 @@ pub fn pi_save_draft_attachment(
         &attachment_id,
         &media_type,
         &data,
+        original.as_ref(),
         &workspace,
     )
 }
@@ -735,6 +779,7 @@ mod tests {
             "att-1",
             "image/png",
             "b2xk",
+            None,
             &WorkspaceEnv::Local,
         )
         .expect("draft attachment");
@@ -745,6 +790,88 @@ mod tests {
             fs::read(project.path().join(".pi/drafts/k7x2m9-att-1.png")).expect("draft file");
         assert_eq!(on_disk, b"old");
         assert_eq!(saved.sha256, sha256_hex(&on_disk));
+    }
+
+    #[test]
+    fn draft_png_preserves_the_k13_source_bytes_through_staging_and_binding() {
+        let project = tempfile::tempdir().expect("tempdir");
+        let registry = WorkspaceRegistry::default();
+        registry.authorize(project.path()).expect("authorize");
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAOElEQVR4nO3PsQkAAAzDsPz/dHpFliLwbFCaTBvvu94DAAAAAAAAAAAAAAAAAAAAAAAAAAAAPAQcOkv4asq/aw0AAAAASUVORK5CYII=";
+        let source = base64::engine::general_purpose::STANDARD.decode(data).expect("PNG");
+        let hash = "fc75966897d50143d883d0f9cc09b6b508989a4a6dcb03650983dba508377741";
+        assert_eq!(source.len(), 113);
+        let saved = save_draft_attachment(
+            &registry, &path_string(project.path()), "tab", "image", "image/png", data,
+            None, &WorkspaceEnv::Local,
+        ).expect("draft PNG");
+        assert_eq!(saved.path, ".pi/drafts/tab-image.png");
+        assert_eq!(saved.sha256, hash);
+        assert!(saved.original.is_none());
+        assert_eq!(fs::read(project.path().join(&saved.path)).expect("draft"), source);
+        let staged = stage_submission(
+            &registry, &path_string(project.path()), "submission",
+            vec![StageRequest { attachment_id: "image".into(), path: saved.path }],
+            &WorkspaceEnv::Local,
+        ).expect("stage");
+        assert_eq!(staged[0].path, ".pi/attachments/submission-image.png");
+        assert_eq!(staged[0].sha256, hash);
+        assert_eq!(fs::read(project.path().join(&staged[0].path)).expect("sent PNG"), source);
+        record_attachment_binding(
+            &registry, &path_string(project.path()), "submission", "session", "turn",
+            vec![BindingRequest { attachment_id: "image".into(), path: staged[0].path.clone(), sha256: staged[0].sha256.clone() }],
+            &WorkspaceEnv::Local,
+        ).expect("bind");
+        let index = read_attachment_index(&project.path().join(".pi/attachments/index.json")).expect("index");
+        assert_eq!(index.entries[0].sha256, hash);
+        assert_eq!(index.entries[0].session_id, "session");
+        assert_eq!(index.entries[0].turn_id, "turn");
+    }
+
+    #[test]
+    fn converted_draft_retains_original_bytes_and_both_hashes() {
+        let project = tempfile::tempdir().expect("tempdir");
+        let registry = WorkspaceRegistry::default();
+        registry.authorize(project.path()).expect("authorize");
+        let source = vec![0x91; MAX_ATTACHMENT_BYTES + 1];
+        let original = OriginalAttachment {
+            media_type: "image/png".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(&source),
+        };
+        let saved = save_draft_attachment(
+            &registry, &path_string(project.path()), "tab", "image", "image/jpeg", "anBlZw==",
+            Some(&original), &WorkspaceEnv::Local,
+        ).expect("converted image");
+        assert_eq!(fs::read(project.path().join(&saved.path)).expect("JPEG"), b"jpeg");
+        assert_eq!(saved.sha256, sha256_hex(b"jpeg"));
+        let original = saved.original.expect("retained original");
+        assert_eq!(original.path, ".pi/drafts/tab-image.orig.png");
+        assert_eq!(original.bytes, source.len());
+        assert_eq!(original.mime, "image/png");
+        assert_eq!(original.sha256, sha256_hex(&source));
+        assert_eq!(fs::read(project.path().join(original.path)).expect("original"), source);
+    }
+
+    #[test]
+    fn draft_cap_is_inclusive_and_conversion_requires_an_oversized_original() {
+        let project = tempfile::tempdir().expect("tempdir");
+        let registry = WorkspaceRegistry::default();
+        registry.authorize(project.path()).expect("authorize");
+        let data = base64::engine::general_purpose::STANDARD.encode(vec![1; MAX_ATTACHMENT_BYTES]);
+        let saved = save_draft_attachment(
+            &registry, &path_string(project.path()), "tab", "at-cap", "image/webp", &data,
+            None, &WorkspaceEnv::Local,
+        ).expect("exact cap preserves bytes");
+        assert_eq!(saved.path, ".pi/drafts/tab-at-cap.webp");
+        assert_eq!(fs::read(project.path().join(saved.path)).expect("file").len(), MAX_ATTACHMENT_BYTES);
+        let original = OriginalAttachment { media_type: "image/png".into(), data };
+        let error = save_draft_attachment(
+            &registry, &path_string(project.path()), "tab", "converted", "image/jpeg", "anBlZw==",
+            Some(&original), &WorkspaceEnv::Local,
+        ).expect_err("small originals must not be converted");
+        assert!(error.contains("only images exceeding 4194304"), "{error}");
+        assert!(!project.path().join(".pi/drafts/tab-converted.jpg").exists());
+        assert!(!project.path().join(".pi/drafts/tab-converted.orig.png").exists());
     }
 
     #[test]
@@ -760,6 +887,7 @@ mod tests {
             "att-1",
             "image/png",
             "b2xk",
+            None,
             &WorkspaceEnv::Local,
         )
         .expect("first write");
@@ -770,6 +898,7 @@ mod tests {
             "att-1",
             "image/png",
             "bmV3",
+            None,
             &WorkspaceEnv::Local,
         )
         .expect("second write");
@@ -794,6 +923,7 @@ mod tests {
             "att-1",
             "image/png",
             "eA==",
+            None,
             &WorkspaceEnv::Local,
         )
         .expect_err("traversal tab id must be rejected");
@@ -807,6 +937,7 @@ mod tests {
             "att-1",
             "image/png",
             "eA==",
+            None,
             &WorkspaceEnv::Local,
         )
         .expect_err("outside project must be rejected");

@@ -91,6 +91,51 @@ describe("piStore", () => {
     expect(usePiStore.getState().tabs[4]?.session).toBeNull();
   });
 
+  it("omits missing image payloads without blocking a text prompt", async () => {
+    await openIdle(4, { cwd: "/tmp/p" });
+    await usePiStore.getState().sendPrompt(4, "text survives", [{
+      mediaType: "image/png", data: "", attachmentId: "missing", draftPath: ".pi/drafts/missing.png", sha256: "saved-hash",
+    }]);
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toMatchObject({ type: "prompt", message: "text survives" });
+    expect(JSON.parse(sent[0]).images).toBeUndefined();
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "pi_stage_submission")).toBe(false);
+    expect(usePiStore.getState().tabs[4]?.failedSubmission).toBeNull();
+  });
+
+  it("queues text without missing payloads while a turn is busy", async () => {
+    await usePiStore.getState().openSession(4, { cwd: "/tmp/p" });
+    await usePiStore.getState().sendPrompt(4, "text survives", [{ mediaType: "image/png", data: "", attachmentId: "missing" }]);
+    expect(sent).toEqual([]);
+    expect(usePiStore.getState().tabs[4]?.queued).toMatchObject([{ text: "text survives", images: [], attachmentIds: [] }]);
+    expect(JSON.parse(files.get("/tmp/p/.pi/drafts/4.json")!).queue).toMatchObject([{ text: "text survives", attachmentIds: [] }]);
+  });
+
+  it("preserves original bytes and metadata across queueing, clearing and Edit", async () => {
+    await usePiStore.getState().openSession(4, { cwd: "/tmp/p" });
+    const original = { path: ".pi/drafts/image.orig.png", sha256: "original-hash", mime: "image/png", bytes: 10 };
+    files.set(`/tmp/p/${original.path}`, "original bytes");
+    files.set("/tmp/p/.pi/drafts/4.json", JSON.stringify({ v: 1, submissionId: null, sources: [], attachments: [
+      { id: "image", path: ".pi/drafts/image.png", sha256: "hash", mime: "image/png", state: "draft", original },
+    ] }));
+    await usePiStore.getState().sendPrompt(4, "image queued", [{ mediaType: "image/png", data: "aW1hZ2U=", attachmentId: "image", draftPath: ".pi/drafts/image.png", sha256: "hash" }]);
+    const { clearDraft } = await import("./drafts");
+    await clearDraft("/tmp/p", "4");
+    const record = () => JSON.parse(files.get("/tmp/p/.pi/drafts/4.json")!);
+    expect(record().attachments[0]).toMatchObject({ state: "queued", original });
+    expect(record().queue).toHaveLength(1);
+    await usePiStore.getState().editQueued(4, record().queue[0].id);
+    expect(record().attachments[0]).toMatchObject({ state: "draft", original });
+    expect(record().queue).toEqual([]);
+    expect(files.get(`/tmp/p/${original.path}`)).toBe("original bytes");
+  });
+
+  it("does not send an empty prompt with only missing images", async () => {
+    await usePiStore.getState().openSession(4, { cwd: "/tmp/p" });
+    await usePiStore.getState().sendPrompt(4, "", [{ mediaType: "image/png", data: "", attachmentId: "missing" }]);
+    expect(sent).toEqual([]);
+  });
+
   it("sendPrompt carries images in pi's prompt shape", async () => {
     await openIdle(5, { cwd: "/tmp/p" });
     // The mocked session fires agent_start on open (status "thinking");

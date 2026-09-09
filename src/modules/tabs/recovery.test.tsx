@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { webcrypto } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import { useEffect, useState } from "react";
 import { act, cleanup, fireEvent, render, renderHook, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -36,7 +36,7 @@ function seedChat(sid: string, text: string, images = false) {
   files.set(`${cwd}/.pi/drafts/${sid}.md`, text);
   const meta = {
     ...emptyChatMeta(),
-    attachments: images ? [{ id: "image-saved", path: imagePath, sha256: "a".repeat(64), mime: "image/png", state: "draft" }] : [],
+    attachments: images ? [{ id: "image-saved", path: imagePath, sha256: createHash("sha256").update(Buffer.from(imageData, "base64")).digest("hex"), mime: "image/png", state: "draft" }] : [],
     sources: [{ blockId: 3, terminalId: 2, sha256: "terminal-hash", insertedAt: "2026-09-09T00:00:00Z" }],
   };
   files.set(`${cwd}/.pi/drafts/${sid}.json`, JSON.stringify(meta));

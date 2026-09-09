@@ -722,6 +722,7 @@ async function persistQueuedPrompt(tabId: number, entry: PiTabEntry, text: strin
     await updateDraftMeta(entry.cwd, key, (meta) => ({ ...meta,
       queue: [...(meta.queue ?? []), { id, text, attachmentIds: queued.attachmentIds, submittedAt: queued.submittedAt }],
       attachments: [...meta.attachments.filter((a) => !queued.attachmentIds.includes(a.id)), ...backed.map((a) => ({
+        ...meta.attachments.find((saved) => saved.id === a.attachmentId),
         id: a.attachmentId!, path: a.draftPath!, sha256: a.sha256!, mime: a.mediaType, state: "queued",
       }))],
     }));
@@ -1068,6 +1069,8 @@ export const usePiStore = create<PiStore>()((set, get) => ({
   sendPrompt: async (tabId, text, images = []) => {
     const entry = get().tabs[tabId];
     if (!entry?.session || entry.exited) throw new Error("Session exited");
+    images = images.filter((image) => image.data.length > 0);
+    if (!text.trim() && images.length === 0) return;
     if (entry.state.status === "cancelling" || entry.state.cancelRequested) {
       const error = "cancellation in progress; send again once the strip is idle";
       set((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, rejectedDraft: { text, images, error } })));

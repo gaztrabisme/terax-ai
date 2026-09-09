@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { createHash, webcrypto } from "node:crypto";
 import { Editor } from "@tiptap/react";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +7,7 @@ import {
   appendPendingImage,
   autolinkable,
   base64Bytes,
+  bytesToBlob,
   composerExtensions,
   imageEncoder,
   imagePathsOf,
@@ -387,7 +389,7 @@ describe("composer send with images", () => {
       [expect.objectContaining({
         mediaType: "image/png",
         data: btoa("encoded-shot.png"),
-        attachmentId: expect.stringMatching(/^att-\d+$/),
+        attachmentId: expect.stringMatching(/^att-[a-f0-9-]+$/),
       })],
     );
     await waitFor(() => {
@@ -716,10 +718,32 @@ function writeCalls(): { path: string; content: string }[] {
 function useMemoryFs(): Map<string, string> {
   const files = new Map<string, string>();
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
-    const { path = "", content } = (args ?? {}) as {
+    const { path = "", content, tabId, attachmentId, mediaType, data, original } = (args ?? {}) as {
       path?: string;
       content?: string;
+      tabId?: string;
+      attachmentId?: string;
+      mediaType?: string;
+      data?: string;
+      original?: { mediaType: string; data: string };
     };
+    if (cmd === "pi_save_draft_attachment") {
+      const extension = (mime: string) => mime === "image/jpeg" ? "jpg" : mime.split("/")[1];
+      const savedPath = `.pi/drafts/${tabId}-${attachmentId}.${extension(mediaType!)}`;
+      files.set(`/tmp/proj/${savedPath}`, data!);
+      const savedOriginal = original ? {
+        path: `.pi/drafts/${tabId}-${attachmentId}.orig.${extension(original.mediaType)}`,
+        mime: original.mediaType,
+        bytes: base64Bytes(original.data),
+        sha256: createHash("sha256").update(Buffer.from(original.data, "base64")).digest("hex"),
+      } : undefined;
+      if (savedOriginal) files.set(`/tmp/proj/${savedOriginal.path}`, original!.data);
+      return { path: savedPath, sha256: createHash("sha256").update(Buffer.from(data!, "base64")).digest("hex"), original: savedOriginal };
+    }
+    if (cmd === "fs_read_file_bytes") {
+      if (!files.has(path)) throw new Error(`no such file: ${path}`);
+      return { base64: files.get(path), mimeType: path.endsWith(".jpg") ? "image/jpeg" : `image/${path.split(".").pop()}`, size: base64Bytes(files.get(path)!) };
+    }
     if (cmd === "fs_create_dir") return undefined;
     if (cmd === "fs_write_file") {
       files.set(path, content ?? "");
@@ -860,6 +884,266 @@ describe("composer pi:insert-draft", () => {
   });
 });
 
+describe("trusted draft attachments (G3)", () => {
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAOElEQVR4nO3PsQkAAAzDsPz/dHpFliLwbFCaTBvvu94DAAAAAAAAAAAAAAAAAAAAAAAAAAAAPAQcOkv4asq/aw0AAAAASUVORK5CYII=";
+  const pngHash = "fc75966897d50143d883d0f9cc09b6b508989a4a6dcb03650983dba508377741";
+  const metaPath = "/tmp/proj/.pi/drafts/7.json";
+  const imagePath = ".pi/drafts/7-att-saved.png";
+  const saved = { id: "att-saved", name: "sample-a.png", path: imagePath, mime: "image/png", sha256: pngHash, state: "draft" };
+
+  beforeEach(() => {
+    imageEncoder.encode = realEncode;
+    vi.stubGlobal("crypto", webcrypto);
+    usePiStore.setState({ tabs: {} });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  async function recovered() {
+    const view = renderComposer(vi.fn(), { cwd: "/tmp/proj" });
+    await waitFor(() => expect((view.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false));
+    return view;
+  }
+
+  function seedMissing(files: Map<string, string>) {
+    files.set("/tmp/proj/.pi/drafts/7.md", "Send this text");
+    files.set(metaPath, JSON.stringify({ v: 1, submissionId: null, attachments: [saved], sources: [] }));
+  }
+
+  it("keeps the exact reviewed PNG bytes, media type and hash through paste, recovery and send", async () => {
+    const files = useMemoryFs();
+    const view = await recovered();
+    pasteFiles(view.pm, [new File([bytesToBlob(png, "image/png")], "sample-a.png", { type: "image/png" })]);
+    await waitFor(() => expect(JSON.parse(files.get(metaPath) ?? "{}").attachments).toHaveLength(1));
+    const entry = JSON.parse(files.get(metaPath)!).attachments[0];
+    expect(entry).toMatchObject({ mime: "image/png", sha256: pngHash, name: "sample-a.png" });
+    expect(entry.path).toMatch(/\.png$/);
+    expect(files.get(`/tmp/proj/${entry.path}`)).toBe(png);
+    expect(base64Bytes(png)).toBe(113);
+    expect(entry.original).toBeUndefined();
+    view.unmount();
+    const restored = await recovered();
+    expect(restored.getByRole("img").getAttribute("src")).toBe(`data:image/png;base64,${png}`);
+    fireEvent.click(restored.getByRole("button", { name: "Send" }));
+    expect(restored.onSubmit).toHaveBeenCalledWith("", [expect.objectContaining({ mediaType: "image/png", data: png, sha256: pngHash, draftPath: entry.path })]);
+  });
+
+  it.each(["png", "jpg", "gif", "webp"])("preserves picked %s file bytes without decoding or conversion", async (ext) => {
+    const files = useMemoryFs();
+    const data = ext === "png" ? png : btoa(`original ${ext} bytes with metadata`);
+    files.set(`/tmp/source.${ext}`, data);
+    dialogOpenMock.mockResolvedValue(`/tmp/source.${ext}`);
+    const view = await recovered();
+    fireEvent.click(view.getByRole("button", { name: "Attach images" }));
+    await waitFor(() => expect(JSON.parse(files.get(metaPath) ?? "{}").attachments).toHaveLength(1));
+    const entry = JSON.parse(files.get(metaPath)!).attachments[0];
+    expect(entry.path).toMatch(new RegExp(`\\.${ext}$`));
+    expect(entry.mime).toBe(ext === "jpg" ? "image/jpeg" : `image/${ext}`);
+    expect(entry.sha256).toBe(createHash("sha256").update(Buffer.from(data, "base64")).digest("hex"));
+    expect(files.get(`/tmp/proj/${entry.path}`)).toBe(data);
+    expect(entry.original).toBeUndefined();
+  });
+
+  it("finishes an in-flight image write before removing its file and record entry durably", async () => {
+    const files = useMemoryFs();
+    const fsInvoke = invokeMock.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    invokeMock.mockImplementation(async (cmd: string, args: unknown) => {
+      if (cmd === "pi_save_draft_attachment") await held;
+      return fsInvoke(cmd, args);
+    });
+    const view = await recovered();
+    pasteFiles(view.pm, [new File([bytesToBlob(png, "image/png")], "sample-a.png", { type: "image/png" })]);
+    await view.findByRole("img");
+    fireEvent.click(view.getByRole("button", { name: "Remove sample-a.png" }));
+    expect(view.getByRole("img")).toBeTruthy();
+    release();
+    await waitFor(() => expect(view.queryByRole("img")).toBeNull());
+    expect(JSON.parse(files.get(metaPath)!).attachments).toEqual([]);
+    expect([...files.keys()].filter((path) => path.endsWith(".png"))).toEqual([]);
+    const calls = invokeMock.mock.calls;
+    const deletion = calls.findIndex(([cmd, args]) => cmd === "fs_delete" && args.path.endsWith(".png"));
+    const emptyRecord = calls.findIndex(([cmd, args]) => cmd === "fs_write_file" && args.path === metaPath && JSON.parse(args.content).attachments.length === 0);
+    expect(emptyRecord).toBeGreaterThan(deletion);
+    view.unmount();
+    const restored = await recovered();
+    expect(restored.container.querySelector('[data-uat="attachment-chip"]')).toBeNull();
+    expect(restored.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps a failed removal visible and retries without losing the record", async () => {
+    const files = useMemoryFs();
+    seedMissing(files);
+    files.set(`/tmp/proj/${imagePath}`, png);
+    const fsInvoke = invokeMock.getMockImplementation()!;
+    let denied = true;
+    invokeMock.mockImplementation(async (cmd: string, args: { path?: string }) => {
+      if (denied && cmd === "fs_delete" && args.path?.endsWith(".png")) throw new Error("permission denied");
+      return fsInvoke(cmd, args);
+    });
+    const view = await recovered();
+    fireEvent.click(view.getByRole("button", { name: "Remove sample-a.png" }));
+    await view.findByText(/Could not remove sample-a.png/);
+    expect(files.has(`/tmp/proj/${imagePath}`)).toBe(true);
+    expect(JSON.parse(files.get(metaPath)!).attachments).toHaveLength(1);
+    denied = false;
+    fireEvent.click(view.getByRole("button", { name: "Remove sample-a.png" }));
+    await waitFor(() => expect(view.queryByRole("img")).toBeNull());
+    expect(JSON.parse(files.get(metaPath)!).attachments).toEqual([]);
+  });
+
+  it("offers Remove and Relink for every missing image and clears the recovery error when resolved", async () => {
+    const files = useMemoryFs();
+    seedMissing(files);
+    const second = { ...saved, id: "att-second", name: "second.png", path: ".pi/drafts/7-att-second.png" };
+    files.set(metaPath, JSON.stringify({ v: 1, attachments: [saved, second], sources: [] }));
+    const view = await recovered();
+    expect(view.container.querySelectorAll('[data-state="missing"]')).toHaveLength(2);
+    expect(view.getByRole("button", { name: "Relink sample-a.png" })).toBeTruthy();
+    expect(view.getByRole("alert").textContent).toContain(imagePath);
+    fireEvent.click(view.getByRole("button", { name: "Remove sample-a.png" }));
+    await waitFor(() => expect(view.queryByRole("button", { name: "Remove sample-a.png" })).toBeNull());
+    expect(view.getByRole("alert").textContent).toContain(second.path);
+    fireEvent.click(view.getByRole("button", { name: "Remove second.png" }));
+    await waitFor(() => expect(view.queryByRole("alert")).toBeNull());
+    expect(JSON.parse(files.get(metaPath)!).attachments).toEqual([]);
+  });
+
+  it("sends text without a missing image, shows the omission and clears stale recovery state", async () => {
+    const files = useMemoryFs();
+    seedMissing(files);
+    const view = await recovered();
+    fireEvent.click(view.getByRole("button", { name: "Send" }));
+    expect(view.onSubmit).toHaveBeenCalledWith("Send this text", []);
+    expect(view.getByRole("status").textContent).toContain("Missing attachment omitted from submission: sample-a.png");
+    expect(view.queryByRole("alert")).toBeNull();
+    await waitFor(() => expect(files.has(metaPath)).toBe(false));
+    view.unmount();
+    expect((await recovered()).container.querySelector('[data-uat="attachment-chip"]')).toBeNull();
+  });
+
+  it("relinks a missing image through the file picker with the same attachment identity", async () => {
+    const files = useMemoryFs();
+    seedMissing(files);
+    files.set("/tmp/replacement.png", png);
+    dialogOpenMock.mockResolvedValue("/tmp/replacement.png");
+    const view = await recovered();
+    fireEvent.click(view.getByRole("button", { name: "Relink sample-a.png" }));
+    await waitFor(() => expect(JSON.parse(files.get(metaPath)!).attachments[0].name).toBe("replacement.png"));
+    expect(dialogOpenMock).toHaveBeenCalledWith(expect.objectContaining({ multiple: false }));
+    expect(JSON.parse(files.get(metaPath)!).attachments).toEqual([expect.objectContaining({ id: saved.id, sha256: pngHash, path: imagePath, mime: "image/png" })]);
+    await waitFor(() => expect(view.queryByRole("alert")).toBeNull());
+    expect(files.get(`/tmp/proj/${imagePath}`)).toBe(png);
+    expect(view.pm.textContent).toBe("Send this text");
+    view.unmount();
+    expect((await recovered()).getByRole("img").getAttribute("src")).toBe(`data:image/png;base64,${png}`);
+  });
+
+  it("preserves the missing chip when Relink is cancelled", async () => {
+    const files = useMemoryFs();
+    seedMissing(files);
+    dialogOpenMock.mockResolvedValue(null);
+    const view = await recovered();
+    fireEvent.click(view.getByRole("button", { name: "Relink sample-a.png" }));
+    await waitFor(() => expect(dialogOpenMock).toHaveBeenCalled());
+    expect(view.container.querySelector('[data-state="missing"]')).toBeTruthy();
+    expect(JSON.parse(files.get(metaPath)!).attachments).toEqual([saved]);
+  });
+
+  it("keeps Remove, Relink and text sending available when the relink write fails", async () => {
+    const files = useMemoryFs();
+    seedMissing(files);
+    files.set("/tmp/replacement.png", png);
+    dialogOpenMock.mockResolvedValue("/tmp/replacement.png");
+    const fsInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args: unknown) => {
+      if (cmd === "pi_save_draft_attachment") throw new Error("disk full");
+      return fsInvoke(cmd, args);
+    });
+    const view = await recovered();
+    fireEvent.click(view.getByRole("button", { name: "Relink sample-a.png" }));
+    await view.findByText(/Could not relink sample-a.png: disk full/);
+    expect(view.getByRole("button", { name: "Remove sample-a.png" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "Relink sample-a.png" })).toBeTruthy();
+    expect(view.getByRole("alert")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Send" }));
+    expect(view.onSubmit).toHaveBeenCalledWith("Send this text", []);
+    await waitFor(() => expect(files.has(metaPath)).toBe(false));
+  });
+
+  it("rejects an attachment total over the cap before writing any extra file", async () => {
+    const files = useMemoryFs();
+    seedMissing(files);
+    files.set(`/tmp/proj/${imagePath}`, png);
+    const view = await recovered();
+    pasteFiles(view.pm, [new File([new Uint8Array(MAX_TOTAL_IMAGE_BYTES)], "at-cap.png", { type: "image/png" })]);
+    await view.findByText("Attachments would exceed the 4194304-byte (4 MiB) image budget");
+    expect(JSON.parse(files.get(metaPath)!).attachments).toEqual([saved]);
+    expect(view.getAllByRole("img")).toHaveLength(1);
+    expect(files.get(`/tmp/proj/${imagePath}`)).toBe(png);
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "pi_save_draft_attachment")).toBe(false);
+  });
+
+  it("treats changed file bytes as unavailable until removed or relinked", async () => {
+    const files = useMemoryFs();
+    seedMissing(files);
+    files.set(`/tmp/proj/${imagePath}`, btoa("different bytes"));
+    const view = await recovered();
+    expect(view.getByRole("alert").textContent).toContain("no longer matches its saved SHA-256");
+    expect(view.container.querySelector('[data-state="missing"]')).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Send" }));
+    expect(view.onSubmit).toHaveBeenCalledWith("Send this text", []);
+    await waitFor(() => expect(files.has(metaPath)).toBe(false));
+  });
+
+  it("keeps a file at the exact 4194304-byte cap unchanged", async () => {
+    const encoded = await realEncode(new Blob([new Uint8Array(MAX_TOTAL_IMAGE_BYTES)], { type: "image/gif" }));
+    expect(encoded.mediaType).toBe("image/gif");
+    expect(base64Bytes(encoded.data)).toBe(MAX_TOTAL_IMAGE_BYTES);
+    expect(encoded.original).toBeUndefined();
+  });
+
+  it("shows the conversion note and preserves the oversized original across recovery", async () => {
+    const files = useMemoryFs();
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL() { return "blob:test"; }
+      static revokeObjectURL() {}
+    });
+    vi.stubGlobal("Image", class {
+      naturalWidth = 3000;
+      naturalHeight = 2000;
+      onload?: () => void;
+      set src(_value: string) { queueMicrotask(() => this.onload?.()); }
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ fillRect: vi.fn(), drawImage: vi.fn() } as unknown as CanvasRenderingContext2D);
+    const canvas = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue(`data:image/jpeg;base64,${btoa("converted jpeg")}`);
+    const view = await recovered();
+    pasteFiles(view.pm, [new File([new Uint8Array(6_200_000)], "large.png", { type: "image/png" })]);
+    await waitFor(() => expect(JSON.parse(files.get(metaPath) ?? "{}").attachments?.[0].original?.bytes).toBe(6_200_000));
+    const entry = JSON.parse(files.get(metaPath)!).attachments[0];
+    expect(canvas).toHaveBeenCalledWith("image/jpeg", 0.85);
+    expect(entry.path).toMatch(/\.jpg$/);
+    expect(entry.mime).toBe("image/jpeg");
+    expect(entry.original.path).toMatch(/\.orig\.png$/);
+    expect(entry.original.mime).toBe("image/png");
+    expect(entry.original.sha256).toBe(createHash("sha256").update(new Uint8Array(6_200_000)).digest("hex"));
+    expect(base64Bytes(files.get(`/tmp/proj/${entry.original.path}`)!)).toBe(6_200_000);
+    expect(view.getByText("converted to JPEG, original 6.2 MB")).toBeTruthy();
+    view.unmount();
+    const restored = await recovered();
+    expect(restored.getByText("converted to JPEG, original 6.2 MB")).toBeTruthy();
+    fireEvent.click(restored.getByRole("button", { name: "Remove large.png" }));
+    await waitFor(() => expect(restored.queryByRole("img")).toBeNull());
+    expect(files.has(`/tmp/proj/${entry.path}`)).toBe(false);
+    expect(files.has(`/tmp/proj/${entry.original.path}`)).toBe(false);
+    expect(JSON.parse(files.get(metaPath)!).attachments).toEqual([]);
+  });
+});
+
 describe("composer Escape stop binding", () => {
   afterEach(() => {
     cleanup();
@@ -924,7 +1208,7 @@ describe("G1 composer queue handoff", () => {
     const files = useMemoryFs();
     files.set("/tmp/proj/.pi/drafts/7.md", "with image");
     files.set("/tmp/proj/.pi/drafts/7.json", JSON.stringify({ v: 1, submissionId: null, sources: [], attachments: [
-      { id: "att-99", path: ".pi/drafts/7-att-99.png", sha256: "abc", mime: "image/png", state: "draft" },
+      { id: "att-99", path: ".pi/drafts/7-att-99.png", sha256: createHash("sha256").update("image").digest("hex"), mime: "image/png", state: "draft" },
     ] }));
     const fs = invokeMock.getMockImplementation()!;
     invokeMock.mockImplementation(async (cmd: string, args?: { path?: string }) => {

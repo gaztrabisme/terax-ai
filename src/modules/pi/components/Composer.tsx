@@ -14,11 +14,12 @@ import {
   emptyChatMeta,
   draftPath,
   loadDraftRecord,
-  loadDraftMeta,
+  removeDraftAttachment,
   saveDraft,
-  saveDraftMeta,
+  updateDraftMeta,
   type ChatDraftMeta,
   type DraftAttachmentMeta,
+  type DraftOriginalMeta,
 } from "@/modules/pi/lib/drafts";
 import { stableIdOf } from "@/modules/tabs/lib/sid";
 import type { PiImageAttachment } from "@/modules/pi/lib/parse";
@@ -75,11 +76,13 @@ export const MAX_TOTAL_IMAGE_BYTES = 4 * 1024 * 1024;
 /** Longest edge after the canvas downscale. */
 export const MAX_IMAGE_EDGE_PX = 1568;
 const JPEG_QUALITY = 0.85;
-/** Source types whose bytes may keep transparency; everything else becomes jpeg. */
-const ALPHA_SOURCE_TYPES = new Set(["image/png", "image/webp", "image/gif"]);
+const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 /** An encoded attachment: media type, base64 payload, decoded byte size. */
-export type EncodedImage = PiImageAttachment & { bytes: number };
+export type EncodedImage = PiImageAttachment & {
+  bytes: number;
+  original?: PiImageAttachment & { bytes: number };
+};
 
 /** A chip in the composer: an encoded image plus display metadata. K13: the
  *  chip is path-backed - the draft file under .pi/drafts carries the bytes
@@ -91,8 +94,9 @@ export type PendingImage = EncodedImage & {
   /** Project-relative draft file path; null until the write resolves. */
   draftPath: string | null;
   sha256: string | null;
-  state: "draft" | "failed";
+  state: "draft" | "failed" | "missing" | "removing";
   error: string | null;
+  originalFile?: DraftOriginalMeta;
 };
 
 /** Exact size of a base64 payload once decoded (padding-aware). */
@@ -117,20 +121,21 @@ function loadImage(blob: Blob): Promise<HTMLImageElement> {
   });
 }
 
-/** True when any pixel in the drawn canvas carries partial transparency. */
-function hasTransparency(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-): boolean {
-  const pixels = ctx.getImageData(0, 0, w, h).data;
-  for (let i = 3; i < pixels.length; i += 4) {
-    if (pixels[i] < 255) return true;
-  }
-  return false;
+function blobBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? "");
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read image bytes"));
+    reader.readAsDataURL(blob);
+  });
 }
 
 async function encodeImageBlob(blob: Blob): Promise<EncodedImage> {
+  if (!IMAGE_MEDIA_TYPES.has(blob.type)) {
+    throw new Error("Choose a PNG, JPEG, GIF or WebP image");
+  }
+  const source = { mediaType: blob.type, data: await blobBase64(blob), bytes: blob.size };
+  if (blob.size <= MAX_TOTAL_IMAGE_BYTES) return source;
   const img = await loadImage(blob);
   const srcW = img.naturalWidth || 1;
   const srcH = img.naturalHeight || 1;
@@ -143,15 +148,14 @@ async function encodeImageBlob(blob: Blob): Promise<EncodedImage> {
   canvas.height = h;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("canvas 2d context unavailable");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
   ctx.drawImage(img, 0, 0, w, h);
-  const keepPng =
-    ALPHA_SOURCE_TYPES.has(blob.type) && hasTransparency(ctx, w, h);
-  const url = keepPng
-    ? canvas.toDataURL("image/png")
-    : canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+  const url = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
   const match = /^data:([^;,]+);base64,(.+)$/.exec(url);
   if (!match) throw new Error("image encode failed");
-  return { mediaType: match[1], data: match[2], bytes: base64Bytes(match[2]) };
+  if (match[1] !== "image/jpeg") throw new Error("JPEG conversion is unavailable");
+  return { mediaType: match[1], data: match[2], bytes: base64Bytes(match[2]), original: source };
 }
 
 // Injection seam for tests: jsdom has no canvas, so component tests swap this
@@ -198,7 +202,7 @@ export function appendPendingImage(
       {
         ...image,
         id: pendingImageSeq,
-        attachmentId: `att-${pendingImageSeq}`,
+        attachmentId: `att-${crypto.randomUUID()}`,
         draftPath: null,
         sha256: null,
         state: "draft",
@@ -222,10 +226,6 @@ export const IMAGE_EXTENSIONS = [
   "jpeg",
   "gif",
   "webp",
-  "bmp",
-  "svg",
-  "avif",
-  "ico",
 ] as const;
 
 /** Dropped or picked paths that name an image type, in order. */
@@ -358,6 +358,10 @@ export function Composer({
   const [notice, setNotice] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const relinkInputRef = useRef<HTMLInputElement>(null);
+  const relinkIdRef = useRef<number | null>(null);
+  const chipWrites = useRef(new Map<number, Promise<PendingImage>>());
+  const removingIds = useRef(new Set<number>());
   const rootRef = useRef<HTMLDivElement>(null);
 
   /// Slash menu (prompt library). pi expands "/name args" lines itself on the
@@ -404,58 +408,36 @@ export function Composer({
     setImages(next);
   };
 
-  // K13 draft record: the .json beside the draft text carries the queued
-  // attachments {id,path,sha256,mime,state}. Chips and record change
-  // together; a failed record write surfaces as a notice (the chip still
-  // shows its own state).
   const metaRef = useRef<ChatDraftMeta | null>(null);
-  const persistMeta = (next: ChatDraftMeta) => {
-    metaRef.current = next;
-    if (!cwd) return;
-    saveDraftMeta(cwd, draftKey, next).catch((e: unknown) => {
-      setNotice(
-        `Could not save the draft record: ${
-          e instanceof Error ? e.message : String(e)
-        }`,
-      );
-    });
-  };
+  const attachmentMeta = (chip: PendingImage): DraftAttachmentMeta => ({
+    id: chip.attachmentId,
+    path: chip.draftPath ?? "",
+    sha256: chip.sha256 ?? "",
+    mime: chip.mediaType,
+    state: "draft",
+    name: chip.name,
+    ...(chip.originalFile ? { original: chip.originalFile } : {}),
+  });
 
-  const recordAddAttachment = (chip: PendingImage) => {
-    if (!chip.draftPath || chip.state !== "draft") return;
-    const meta = metaRef.current ?? emptyChatMeta();
-    const entry: DraftAttachmentMeta = {
-      id: chip.attachmentId,
-      path: chip.draftPath,
-      sha256: chip.sha256 ?? "",
-      mime: chip.mediaType,
-      state: "draft",
-    };
-    const rest = meta.attachments.filter((a) => a.id !== entry.id);
-    persistMeta({ ...meta, attachments: [...rest, entry] });
-  };
-
-  const removeImage = (id: number) => {
+  const removeImage = async (id: number) => {
     const chip = imagesRef.current.find((img) => img.id === id);
-    setChips(imagesRef.current.filter((img) => img.id !== id));
+    if (!chip || removingIds.current.has(id)) return;
     setNotice(null);
-    if (!chip) return;
-    // Removing a chip deletes the draft file behind it.
-    if (chip.draftPath && cwd) {
-      void invoke("fs_delete", {
-        path: `${cwd.replace(/[\\/]+$/, "")}/${chip.draftPath}`,
-        workspace: currentWorkspaceEnv(),
-      }).catch(() => {
-        // The file may already be gone; the chip is removed either way.
-      });
+    if (!cwd) {
+      setChips(imagesRef.current.filter((img) => img.id !== id));
+      return;
     }
-    if (metaRef.current) {
-      persistMeta({
-        ...metaRef.current,
-        attachments: metaRef.current.attachments.filter(
-          (a) => a.id !== chip.attachmentId,
-        ),
-      });
+    removingIds.current.add(id);
+    setChips(imagesRef.current.map((img) => img.id === id ? { ...img, state: "removing" } : img));
+    try {
+      const saved = (await chipWrites.current.get(id)) ?? chip;
+      metaRef.current = await removeDraftAttachment(cwd, draftKey, attachmentMeta(saved));
+      setChips(imagesRef.current.filter((img) => img.id !== id));
+    } catch (error) {
+      setChips(imagesRef.current.map((img) => img.id === id ? { ...img, state: chip.state } : img));
+      setNotice(`Could not remove ${chip.name}: ${String(error)}. Try Remove again.`);
+    } finally {
+      removingIds.current.delete(id);
     }
   };
 
@@ -464,7 +446,7 @@ export function Composer({
   const writeChipDraft = async (chip: PendingImage): Promise<PendingImage> => {
     if (!cwd) return chip;
     try {
-      const res = await invoke<{ path: string; sha256: string }>(
+      const res = await invoke<{ path: string; sha256: string; original?: DraftOriginalMeta }>(
         "pi_save_draft_attachment",
         {
           cwd,
@@ -472,6 +454,7 @@ export function Composer({
           attachmentId: chip.attachmentId,
           mediaType: chip.mediaType,
           data: chip.data,
+          ...(chip.original ? { original: chip.original } : {}),
           workspace: currentWorkspaceEnv(),
         },
       );
@@ -481,6 +464,8 @@ export function Composer({
         sha256: res.sha256,
         state: "draft",
         error: null,
+        original: undefined,
+        originalFile: res.original ?? chip.originalFile,
       };
     } catch (e) {
       return {
@@ -491,13 +476,31 @@ export function Composer({
     }
   };
 
-  const applyChipUpdate = (updated: PendingImage) => {
-    setChips(
-      imagesRef.current.map((img) =>
-        img.attachmentId === updated.attachmentId ? updated : img,
-      ),
-    );
-    recordAddAttachment(updated);
+  const persistChip = (chip: PendingImage) => {
+    const job = (async () => {
+      const updated = await writeChipDraft(chip);
+      if (cwd && updated.draftPath && updated.state === "draft") {
+        try {
+          const entry = attachmentMeta(updated);
+          metaRef.current = await updateDraftMeta(cwd, draftKey, (meta) => ({
+            ...meta,
+            attachments: [...meta.attachments.filter((att) => att.id !== entry.id), entry],
+          }));
+        } catch (error) {
+          updated.state = "failed";
+          updated.error = `Could not save the draft record: ${String(error)}`;
+        }
+      }
+      if (!removingIds.current.has(chip.id)) {
+        setChips(imagesRef.current.map((img) => img.id === chip.id ? updated : img));
+      }
+      return updated;
+    })();
+    chipWrites.current.set(chip.id, job);
+    void job.finally(() => {
+      if (chipWrites.current.get(chip.id) === job) chipWrites.current.delete(chip.id);
+    });
+    return job;
   };
 
   // Shared by paste, drop and the attach button: encode each image, then let
@@ -511,8 +514,8 @@ export function Composer({
       let encoded: EncodedImage;
       try {
         encoded = await imageEncoder.encode(file);
-      } catch {
-        setNotice(`Could not read ${file.name || "that image"}`);
+      } catch (error) {
+        setNotice(`Could not read ${file.name || "that image"}: ${String(error)}`);
         continue;
       }
       const result = appendPendingImage(
@@ -526,7 +529,7 @@ export function Composer({
         continue;
       }
       const added = result.images[result.images.length - 1];
-      if (added) void writeChipDraft(added).then(applyChipUpdate);
+      if (added) void persistChip(added);
     }
   };
 
@@ -549,14 +552,58 @@ export function Composer({
           continue;
         }
         const added = result.images[result.images.length - 1];
-        if (added) void writeChipDraft(added).then(applyChipUpdate);
-      } catch {
-        setNotice(`Could not read ${name}`);
+        if (added) void persistChip(added);
+      } catch (error) {
+        setNotice(`Could not read ${name}: ${String(error)}`);
       }
     }
   };
   const addImagePathsRef = useRef(addImagePaths);
   addImagePathsRef.current = addImagePaths;
+
+  const relinkImage = async (id: number, blob: Blob, name: string) => {
+    const chip = imagesRef.current.find((img) => img.id === id);
+    if (!chip || chip.state !== "missing") return;
+    try {
+      const encoded = await imageEncoder.encode(blob);
+      if (!imagesRef.current.some((img) => img.id === id && img.state === "missing")) return;
+      const result = appendPendingImage(imagesRef.current.filter((img) => img.id !== id), encoded, name);
+      if (result.notice) {
+        setNotice(result.notice);
+        return;
+      }
+      const replacement: PendingImage = {
+        ...chip, ...encoded, name, originalFile: undefined, error: null,
+        draftPath: null, sha256: null, state: "draft",
+      };
+      setChips(imagesRef.current.map((img) => img.id === id ? replacement : img));
+      const saved = await persistChip(replacement);
+      if (saved.state === "draft") {
+        setNotice(null);
+      } else if (!removingIds.current.has(id)) {
+        setChips(imagesRef.current.map((img) => img.id === id ? chip : img));
+        setNotice(`Could not relink ${chip.name}: ${saved.error}. Choose the file again.`);
+      }
+    } catch (error) {
+      setNotice(`Could not relink ${chip.name}: ${String(error)}. Choose the file again.`);
+    }
+  };
+
+  const pickRelink = async (id: number) => {
+    try {
+      const picked = await open({ multiple: false, filters: [{ name: "Images", extensions: [...IMAGE_EXTENSIONS] }] });
+      const path = Array.isArray(picked) ? picked[0] : picked;
+      if (!path) return;
+      const bytes = await native.readFileBytes(path);
+      await relinkImage(id, bytesToBlob(bytes.base64, bytes.mimeType), path.split(/[\\/]/).pop() || path);
+    } catch (error) {
+      relinkIdRef.current = id;
+      relinkInputRef.current?.click();
+      setNotice(`Relink file picker: ${String(error)}. Choose an image file.`);
+    } finally {
+      editor?.commands.focus();
+    }
+  };
 
   // Attach button: the Tauri file dialog (image filter, multiple) plus the
   // bytes bridge. The hidden input stays as the fallback when the dialog is
@@ -684,28 +731,36 @@ export function Composer({
   const performSubmit = (): boolean => {
     if (!editor || disabledRef.current || submittingRef.current) return false;
     const md = editor.getMarkdown().trim();
-    const missing = imagesRef.current.filter((img) => !img.data);
-    if (missing.length > 0) {
-      const first = missing[0]!;
-      setNotice(
-        `Attachment file is missing: ${first.draftPath ?? first.name}`,
-      );
+    if (chipWrites.current.size > 0 || imagesRef.current.some((img) => img.state === "removing" && img.data)) {
+      setNotice("Saving attachment changes. Send again when the draft is ready.");
       return true;
     }
-    const attachments: ComposerImage[] = imagesRef.current.map((img) => ({
+    const missing = imagesRef.current.filter((img) => !img.data);
+    const attachments: ComposerImage[] = imagesRef.current.filter((img) => img.data).map((img) => ({
       mediaType: img.mediaType,
       data: img.data,
       attachmentId: img.attachmentId,
       draftPath: img.draftPath,
       sha256: img.sha256,
     }));
-    if (!md && attachments.length === 0) return true;
+    if (!md && attachments.length === 0) {
+      if (missing.length > 0) setNotice("Add text to send, or Remove or Relink the missing attachment.");
+      return true;
+    }
+    const omission = missing.length
+      ? `Missing attachment${missing.length === 1 ? "" : "s"} omitted from submission: ${missing.map((img) => img.name).join(", ")}.`
+      : null;
     const clearSubmitted = () => {
       if (editor.getMarkdown().trim() === md) editor.commands.clearContent();
-      const submitted = new Set(attachments.map((a) => a.attachmentId));
+      for (const chip of missing) {
+        if (cwd) void removeDraftAttachment(cwd, draftKey, attachmentMeta(chip)).catch((error) => {
+          setNotice(`Missing attachment omitted from submission. Could not update the draft: ${String(error)}`);
+        });
+      }
+      const submitted = new Set([...attachments.map((a) => a.attachmentId), ...missing.map((a) => a.attachmentId)]);
       setChips(imagesRef.current.filter((a) => !submitted.has(a.attachmentId)));
       if (metaRef.current) metaRef.current = { ...metaRef.current, attachments: metaRef.current.attachments.filter((a) => !submitted.has(a.id)) };
-      setNotice(null);
+      setNotice(omission);
       if (cwd && attachments.length === 0 && editor.isEmpty) void clearDraft(cwd, draftKey).catch((error) => setNotice(String(error)));
     };
     try {
@@ -818,6 +873,10 @@ export function Composer({
             "fs_read_file_bytes",
             { path: `${base}/${att.path}`, workspace: currentWorkspaceEnv() },
           );
+          if (!bytes.base64) throw new Error("Image file is empty");
+          const hash = await crypto.subtle.digest("SHA-256", Uint8Array.from(atob(bytes.base64), (c) => c.charCodeAt(0)));
+          const sha256 = Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, "0")).join("");
+          if (sha256 !== att.sha256) throw new Error("Image file no longer matches its saved SHA-256");
           data = bytes.base64;
         } catch (reason) {
           error = `Could not recover attachment ${att.path}: ${String(reason)}`;
@@ -831,9 +890,10 @@ export function Composer({
           attachmentId: att.id,
           draftPath: att.path,
           sha256: att.sha256,
-          state: error ? "failed" : "draft",
+          state: error ? "missing" : "draft",
           error,
-          name: att.path.split(/[\\/]/).pop() || att.id,
+          name: att.name || att.path.split(/[\\/]/).pop() || att.id,
+          originalFile: att.original,
         });
       }
       if (!alive) return;
@@ -844,8 +904,6 @@ export function Composer({
       };
       if (record?.markdown) editor.commands.setContent(record.markdown, { contentType: "markdown" });
       setChips(restored);
-      const failures = restored.flatMap((chip) => chip.error ? [chip.error] : []);
-      setRecoveryError(failures.length ? failures.join("; ") : null);
       setRecoveredKey(recoveryKey);
     }).catch((reason) => {
       if (alive) setRecoveryError(`${draftPath(cwd, draftKey)}: ${String(reason)}`);
@@ -908,17 +966,15 @@ export function Composer({
       }
       if (!alive) return;
       void saveDraft(cwd, draftKey, editor.getMarkdown());
-      void loadDraftMeta(cwd, draftKey)
-        .then((meta): ChatDraftMeta => meta ?? emptyChatMeta())
-        .then((meta) => {
-          meta.sources.push({
+      void updateDraftMeta(cwd, draftKey, (meta) => ({
+        ...meta,
+        sources: [...meta.sources, {
             blockId: detail.source.blockId,
             terminalId: detail.source.terminalId,
             sha256: detail.source.sha256,
             insertedAt: new Date().toISOString(),
-          });
-          return saveDraftMeta(cwd, draftKey, meta);
-        })
+        }],
+      }))
         .catch(() => {
           // The sidecar is evidence, not load-bearing: a failed write still
           // leaves the quotation in the draft.
@@ -968,11 +1024,12 @@ export function Composer({
         ...img,
         bytes: base64Bytes(img.data),
         id: next,
-        attachmentId: record?.attachmentId ?? `att-${next}`,
+        attachmentId: record?.attachmentId ?? `att-${crypto.randomUUID()}`,
         draftPath,
         sha256: record?.sha256 ?? null,
         state: "draft",
         error: null,
+        originalFile: metaRef.current?.attachments.find((att) => att.id === record?.attachmentId)?.original,
         name: draftPath
           ? draftPath.split(/[\\/]/).pop() || `image ${next}`
           : `image ${next}`,
@@ -983,11 +1040,15 @@ export function Composer({
     if (rejectedDraft.queueReturn) {
       editor.commands.focus("end");
       if (cwd) void saveDraft(cwd, draftKey, editor.getMarkdown()).catch((error) => setNotice(String(error)));
-      for (const chip of restored) recordAddAttachment(chip);
+      for (const chip of restored) {
+        if (cwd && chip.draftPath) void updateDraftMeta(cwd, draftKey, (meta) => ({
+          ...meta, attachments: [...meta.attachments.filter((att) => att.id !== chip.attachmentId), { ...meta.attachments.find((att) => att.id === chip.attachmentId), ...attachmentMeta(chip) }],
+        })).catch((error) => setNotice(String(error)));
+      }
     }
     clearRejectedDraft(tabId);
     for (const chip of restored) {
-      if (!chip.draftPath) void writeChipDraft(chip).then(applyChipUpdate);
+      if (!chip.draftPath) void persistChip(chip);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, rejectedDraft, clearRejectedDraft, tabId, recovering]);
@@ -995,6 +1056,11 @@ export function Composer({
   useEffect(() => {
     editor?.setEditable(!disabled && !recovering);
   }, [editor, disabled, recovering]);
+
+  const missingImages = images.filter((img) => !img.data);
+  const recoveryMessage = recoveryError ?? (missingImages.length
+    ? `${missingImages.map((img) => img.error ?? img.draftPath ?? img.name).join("; ")}. Remove or Relink the missing attachment. Text can still be sent.`
+    : null);
 
   return (
     <div
@@ -1043,9 +1109,9 @@ export function Composer({
       }}
     >
       {recovering && !recoveryError && <p aria-live="polite" className="mb-1.5 text-xs text-muted-foreground">Recovering draft...</p>}
-      {recoveryError && (
+      {recoveryMessage && (
         <div role="alert" className="mb-1.5 text-xs text-destructive">
-          Draft recovery failed: {recoveryError}
+          Draft recovery failed: {recoveryMessage}
           {recovering && <button type="button" className="ml-2 underline" onClick={() => setRecoveryAttempt((attempt) => attempt + 1)}>Retry recovery</button>}
         </div>
       )}
@@ -1056,6 +1122,7 @@ export function Composer({
               key={img.id}
               data-uat="attachment-chip"
               data-uat-key={img.attachmentId}
+              data-state={img.state}
               className="relative inline-flex max-w-48 flex-col gap-0.5"
             >
               <span className="relative inline-flex">
@@ -1076,7 +1143,10 @@ export function Composer({
                 <button
                   type="button"
                   aria-label={`Remove ${img.name}`}
-                  onClick={() => removeImage(img.id)}
+                  data-uat="attachment-remove"
+                  data-uat-key={img.attachmentId}
+                  disabled={img.state === "removing"}
+                  onClick={() => void removeImage(img.id)}
                   // Padding, not a bigger glyph: the hit area clears 24 px.
                   className="absolute -right-2 -top-2 rounded-full border border-border/60 bg-background p-2 text-muted-foreground hover:text-foreground"
                 >
@@ -1087,6 +1157,19 @@ export function Composer({
                   />
                 </button>
               </span>
+              {img.state === "missing" && (
+                <button type="button" aria-label={`Relink ${img.name}`} data-uat="attachment-relink" data-uat-key={img.attachmentId}
+                  className="self-start rounded px-1 py-1 text-xs underline" onClick={() => void pickRelink(img.id)}>Relink</button>
+              )}
+              {img.state === "failed" && img.data && (
+                <button type="button" aria-label={`Retry save ${img.name}`} className="self-start rounded px-1 py-1 text-xs underline"
+                  onClick={() => void persistChip(img)}>Retry save</button>
+              )}
+              {(img.originalFile || img.original) && (
+                <span data-uat="attachment-conversion" data-uat-key={img.attachmentId} title={img.originalFile?.path} className="max-w-48 text-xs text-muted-foreground">
+                  converted to JPEG, original {((img.originalFile?.bytes ?? img.original?.bytes ?? 0) / 1_000_000).toFixed(1)} MB
+                </span>
+              )}
               {/* The draft file the chip is backed by (K13); a failed write
                   or a missing file stands visible in place of the path. */}
               <span
@@ -1103,7 +1186,7 @@ export function Composer({
         </div>
       ) : null}
       {notice ? (
-        <div className="mb-1.5 text-xs text-destructive">{notice}</div>
+        <div role="status" data-uat="attachment-notice" className="mb-1.5 text-xs text-destructive">{notice}</div>
       ) : null}
       <div className="relative">
         {menuOpen && !disabled ? (
@@ -1132,7 +1215,7 @@ export function Composer({
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
+          accept={IMAGE_EXTENSIONS.map((ext) => `.${ext}`).join(",")}
           multiple
           className="hidden"
           tabIndex={-1}
@@ -1143,6 +1226,14 @@ export function Composer({
             void addFiles(files);
           }}
         />
+        <input ref={relinkInputRef} type="file" accept={IMAGE_EXTENSIONS.map((ext) => `.${ext}`).join(",")} className="hidden" tabIndex={-1} aria-hidden="true"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            const id = relinkIdRef.current;
+            event.target.value = "";
+            relinkIdRef.current = null;
+            if (file && id !== null) void relinkImage(id, file, file.name);
+          }} />
         <button
           type="button"
           aria-label="Attach images"

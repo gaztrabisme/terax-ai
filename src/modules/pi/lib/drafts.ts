@@ -86,6 +86,15 @@ export type DraftAttachmentMeta = {
   sha256: string;
   mime: string;
   state: string;
+  name?: string;
+  original?: DraftOriginalMeta;
+};
+
+export type DraftOriginalMeta = {
+  path: string;
+  sha256: string;
+  mime: string;
+  bytes: number;
 };
 
 export type ChatDraftMeta = {
@@ -226,33 +235,10 @@ export type DraftRecord = {
 // Recoverable listing (U4)
 // ---------------------------------------------------------------------------
 
-/** A queued attachment counts toward the offer only while its file exists. */
-async function attachmentFileExists(cwd: string, path: string): Promise<boolean> {
-  try {
-    await invoke("fs_stat", {
-      path: `${cwd.replace(/[\\/]+$/, "")}/${path}`,
-      workspace: currentWorkspaceEnv(),
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * U4 offer gate: the text must say something, or the record must still hold a
- * queued image whose file exists, or a K8 source. Anything else recovers
- * nothing and is deleted quietly by listRecoverableDrafts.
- */
-async function draftIsWorthOffering(cwd: string, record: DraftRecord): Promise<boolean> {
+function draftIsWorthOffering(record: DraftRecord): boolean {
   if (record.markdown.trim() !== "") return true;
   if (record.kind !== "chat") return false;
-  if (record.meta.queue?.length) return true;
-  if (record.meta.sources.length > 0) return true;
-  const existing = await Promise.all(
-    record.meta.attachments.map((attachment) => attachmentFileExists(cwd, attachment.path)),
-  );
-  return existing.some(Boolean);
+  return Boolean(record.meta.queue?.length) || record.meta.sources.length > 0 || record.meta.attachments.length > 0;
 }
 
 function draftFirstLine(markdown: string): string {
@@ -321,7 +307,14 @@ export async function loadDraftRecord(cwd: string, sid: string): Promise<DraftRe
         new Set(meta.attachments.map((attachment) => attachment.id)).size !== meta.attachments.length ||
         meta.attachments.some((attachment) => !attachment.id || !attachment.sha256 ||
           !attachment.mime.startsWith("image/") ||
-          !/^\.pi\/(drafts|attachments)\/[a-zA-Z0-9_.-]+$/.test(attachment.path))) {
+          !/^\.pi\/(drafts|attachments)\/[a-zA-Z0-9_.-]+$/.test(attachment.path) ||
+          (attachment.name !== undefined && typeof attachment.name !== "string") ||
+          (attachment.original !== undefined && (!isRecord(attachment.original) ||
+            typeof attachment.original.path !== "string" ||
+            !/^\.pi\/drafts\/[a-zA-Z0-9_-]+\.orig\.(png|jpg|gif|webp)$/.test(attachment.original.path) ||
+            typeof attachment.original.sha256 !== "string" || !attachment.original.sha256 ||
+            !["image/png", "image/jpeg", "image/gif", "image/webp"].includes(attachment.original.mime) ||
+            !Number.isSafeInteger(attachment.original.bytes) || attachment.original.bytes <= 4194304)))) {
       throw new Error(`${draftMetaPath(cwd, sid)}: Invalid attachment record`);
     }
     return { sid, kind: "chat", markdown: markdown ?? "", meta };
@@ -351,7 +344,7 @@ export async function listRecoverableDrafts(cwd: string, openSids: readonly stri
       // U4: an empty, attachment-free draft offers nothing to recover; clear
       // both files quietly so the row never comes back. Drafts bound to open
       // tabs never reach this loop.
-      if (!(await draftIsWorthOffering(cwd, record))) {
+      if (!draftIsWorthOffering(record)) {
         await deleteOrNull(draftPath(cwd, sid));
         await deleteOrNull(draftMetaPath(cwd, sid));
         return null;
@@ -398,7 +391,7 @@ export async function loadDraft(
 }
 
 export async function clearDraft(cwd: string, tabId: string): Promise<void> {
-  await serializeDraftMeta(cwd, tabId, async () => {
+  await queueDraftRecord(cwd, tabId, async () => {
     const raw = await readRecoveryText(draftMetaPath(cwd, tabId));
     const meta = raw === null ? null : parseChatMeta(raw);
     if (raw !== null && !meta && !parseEditorMeta(raw)) throw new Error(`${draftMetaPath(cwd, tabId)}: Invalid draft record`);
@@ -408,45 +401,71 @@ export async function clearDraft(cwd: string, tabId: string): Promise<void> {
         attachments: meta.attachments.filter((a) => ids.has(a.id)) });
       await deleteOrNull(draftPath(cwd, tabId));
     } else {
+      await cleanupOriginals(cwd, meta, emptyChatMeta());
       for (const path of [draftPath(cwd, tabId), draftMetaPath(cwd, tabId)]) await deleteOrNull(path);
     }
   });
 }
 
-const metaWrites = new Map<string, Promise<unknown>>();
+const draftRecordWrites = new Map<string, Promise<unknown>>();
 
-function serializeDraftMeta<T>(cwd: string, tabId: string, work: () => Promise<T>): Promise<T> {
-  const path = draftMetaPath(cwd, tabId);
-  const next = (metaWrites.get(path) ?? Promise.resolve()).catch(() => {}).then(work);
-  metaWrites.set(path, next);
-  void next.finally(() => { if (metaWrites.get(path) === next) metaWrites.delete(path); }).catch(() => {});
-  return next;
+function queueDraftRecord<T>(cwd: string, tabId: string, operation: () => Promise<T>): Promise<T> {
+  const key = JSON.stringify([currentWorkspaceEnv(), draftMetaPath(cwd, tabId)]);
+  const previous = draftRecordWrites.get(key) ?? Promise.resolve();
+  const write = previous.catch(() => {}).then(operation);
+  draftRecordWrites.set(key, write);
+  const release = () => {
+    if (draftRecordWrites.get(key) === write) draftRecordWrites.delete(key);
+  };
+  void write.then(release, release);
+  return write;
 }
 
-async function writeDraftMeta(cwd: string, tabId: string, meta: ChatDraftMeta): Promise<void> {
-  await ensureDraftDir(cwd);
-  await invoke("fs_write_file", { path: draftMetaPath(cwd, tabId), content: JSON.stringify(meta), workspace: currentWorkspaceEnv() });
-}
-
-export function updateDraftMeta(
-  cwd: string, tabId: string, update: (meta: ChatDraftMeta) => ChatDraftMeta | Promise<ChatDraftMeta>,
-): Promise<ChatDraftMeta> {
-  return serializeDraftMeta(cwd, tabId, async () => {
-    const raw = await readRecoveryText(draftMetaPath(cwd, tabId));
-    const meta = raw === null ? emptyChatMeta() : parseChatMeta(raw);
-    if (!meta) throw new Error(`${draftMetaPath(cwd, tabId)}: Invalid draft record`);
-    const next = await update(meta);
-    try { await writeDraftMeta(cwd, tabId, next); }
-    catch (error) { throw new Error(`${draftMetaPath(cwd, tabId)}: ${String(error)}`); }
-    return next;
-  });
-}
-
-export async function saveDraftMeta(
+async function writeDraftMeta(
   cwd: string,
   tabId: string,
   meta: ChatDraftMeta,
+  previous?: ChatDraftMeta | null,
 ): Promise<void> {
+  if (previous === undefined) {
+    const raw = await readTextOrNull(draftMetaPath(cwd, tabId));
+    previous = raw === null ? null : parseChatMeta(raw);
+  }
+  await ensureDraftDir(cwd);
+  await invoke("fs_write_file", {
+    path: draftMetaPath(cwd, tabId),
+    content: JSON.stringify(meta),
+    workspace: currentWorkspaceEnv(),
+  });
+  await cleanupOriginals(cwd, previous, meta);
+}
+
+async function deleteDraftAttachmentFile(cwd: string, path: string | undefined): Promise<void> {
+  // Sent copies belong to their submission and must survive composer removal.
+  if (!path || path.startsWith(".pi/attachments/")) return;
+  if (!/^\.pi\/drafts\/[a-zA-Z0-9_.-]+$/.test(path)) {
+    throw new Error(`Invalid draft attachment path: ${path}`);
+  }
+  try {
+    await invoke("fs_delete", {
+      path: `${cwd.replace(/[\\/]+$/, "")}/${path}`,
+      workspace: currentWorkspaceEnv(),
+    });
+  } catch (error) {
+    if (!isMissingDraftFile(error)) throw new Error(`${path}: ${String(error)}`);
+  }
+}
+
+async function cleanupOriginals(cwd: string, previous: ChatDraftMeta | null, next: ChatDraftMeta): Promise<void> {
+  const kept = new Set(next.attachments.map((entry) => entry.original?.path));
+  for (const entry of previous?.attachments ?? []) {
+    if (entry.original && !kept.has(entry.original.path)) {
+      await deleteDraftAttachmentFile(cwd, entry.original.path);
+    }
+  }
+}
+
+export async function saveDraftMeta(cwd: string, tabId: string, meta: ChatDraftMeta): Promise<void> {
   await updateDraftMeta(cwd, tabId, (current) => {
     const queue = current.queue ?? meta.queue;
     const ids = new Set(queue?.flatMap((q) => q.attachmentIds));
@@ -458,11 +477,44 @@ export async function saveDraftMeta(
   });
 }
 
+export function updateDraftMeta(
+  cwd: string,
+  tabId: string,
+  update: (meta: ChatDraftMeta) => ChatDraftMeta | Promise<ChatDraftMeta>,
+): Promise<ChatDraftMeta> {
+  return queueDraftRecord(cwd, tabId, async () => {
+    const path = draftMetaPath(cwd, tabId);
+    const raw = await readRecoveryText(path);
+    const meta = raw === null ? emptyChatMeta() : parseChatMeta(raw);
+    if (!meta) throw new Error(`${path}: Invalid draft record`);
+    const next = await update(meta);
+    try { await writeDraftMeta(cwd, tabId, next, meta); }
+    catch (error) { throw new Error(`${path}: ${String(error)}`); }
+    return next;
+  });
+}
+
+export function removeDraftAttachment(
+  cwd: string,
+  tabId: string,
+  attachment: DraftAttachmentMeta,
+): Promise<ChatDraftMeta> {
+  return updateDraftMeta(cwd, tabId, async (meta) => {
+    const recorded = meta.attachments.find((entry) => entry.id === attachment.id);
+    const saved = recorded ?? attachment;
+    await deleteDraftAttachmentFile(cwd, saved.path);
+    if (!recorded) await deleteDraftAttachmentFile(cwd, saved.original?.path);
+    return { ...meta, attachments: meta.attachments.filter((entry) => entry.id !== attachment.id) };
+  });
+}
+
 /** Chat record reader; an editor record under the same id yields null. */
 export async function loadDraftMeta(
   cwd: string,
   tabId: string,
 ): Promise<ChatDraftMeta | null> {
+  const key = JSON.stringify([currentWorkspaceEnv(), draftMetaPath(cwd, tabId)]);
+  await draftRecordWrites.get(key)?.catch(() => {});
   const raw = await readTextOrNull(draftMetaPath(cwd, tabId));
   return raw === null ? null : parseChatMeta(raw);
 }

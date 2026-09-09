@@ -17,12 +17,13 @@ import {
   loadDraft,
   loadDraftMeta,
   loadDraftRecord,
-  updateDraftMeta,
   loadEditorDraft,
   migrateNumericDraft,
   numericDraftPath,
   saveDraft,
   saveDraftMeta,
+  updateDraftMeta,
+  removeDraftAttachment,
   saveEditorDraft,
   sha256Hex,
   type ChatDraftMeta,
@@ -430,7 +431,7 @@ describe("recoverable draft listing (U4)", () => {
     expect(files.has("/w/.pi/drafts/imgs.json")).toBe(true);
   });
 
-  it("drops an attachments-only draft once every queued file is gone", async () => {
+  it("offers missing-only drafts so their images can be relinked", async () => {
     const files = memoryFs();
     await saveDraft("/w", "gone", "");
     await saveDraftMeta("/w", "gone", {
@@ -438,9 +439,9 @@ describe("recoverable draft listing (U4)", () => {
       attachments: [attachment(1)],
     });
 
-    expect(await listRecoverableDrafts("/w", [])).toEqual([]);
-    expect(files.has("/w/.pi/drafts/gone.md")).toBe(false);
-    expect(files.has("/w/.pi/drafts/gone.json")).toBe(false);
+    expect(await listRecoverableDrafts("/w", [])).toEqual([{ sid: "gone", firstLine: "1 queued image" }]);
+    expect(files.has("/w/.pi/drafts/gone.md")).toBe(true);
+    expect(files.has("/w/.pi/drafts/gone.json")).toBe(true);
   });
 
   it("labels a K8 quotation draft with the first line of the quotation", async () => {
@@ -552,4 +553,69 @@ describe("G1 queued draft recovery", () => {
     expect(await loadDraftMeta("/w", "tab")).toMatchObject({ queue: [], attachments: [] });
   });
 
+});
+
+describe("durable attachment edits", () => {
+  const attachment = { id: "image", path: ".pi/drafts/tab-image.png", sha256: "hash", mime: "image/png", state: "draft" };
+
+  it("serializes removal with overlapping record writes and preserves terminal sources", async () => {
+    const files = memoryFs();
+    files.set("/w/.pi/drafts/tab-image.png", "bytes");
+    const originalInvoke = invoke.getMockImplementation()!;
+    let release!: () => void;
+    const delayed = new Promise<void>((resolve) => { release = resolve; });
+    let first = true;
+    invoke.mockImplementation(async (cmd: string, args: { path?: string; content?: string }) => {
+      if (first && cmd === "fs_write_file") { first = false; await delayed; }
+      return originalInvoke(cmd, args);
+    });
+    const initial = saveDraftMeta("/w", "tab", { ...emptyChatMeta(), attachments: [attachment] });
+    const remove = removeDraftAttachment("/w", "tab", attachment);
+    const source = { blockId: 1, terminalId: 2, sha256: "quote-hash", insertedAt: "now" };
+    const append = updateDraftMeta("/w", "tab", (meta) => ({ ...meta, sources: [...meta.sources, source] }));
+    release();
+    await Promise.all([initial, remove, append]);
+    expect(files.has("/w/.pi/drafts/tab-image.png")).toBe(false);
+    expect(await loadDraftMeta("/w", "tab")).toEqual({ ...emptyChatMeta(), sources: [source] });
+  });
+
+  it("keeps the record and reports a failed deletion, allowing a later retry", async () => {
+    const files = memoryFs();
+    files.set("/w/.pi/drafts/tab-image.png", "bytes");
+    await saveDraftMeta("/w", "tab", { ...emptyChatMeta(), attachments: [attachment] });
+    const originalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (cmd: string, args: { path?: string }) => {
+      if (cmd === "fs_delete") throw new Error("permission denied");
+      return originalInvoke(cmd, args);
+    });
+    await expect(removeDraftAttachment("/w", "tab", attachment)).rejects.toThrow(".pi/drafts/tab-image.png");
+    expect((await loadDraftMeta("/w", "tab"))?.attachments).toEqual([attachment]);
+    expect(files.has("/w/.pi/drafts/tab-image.png")).toBe(true);
+    invoke.mockImplementation(originalInvoke);
+    await removeDraftAttachment("/w", "tab", attachment);
+    expect((await loadDraftMeta("/w", "tab"))?.attachments).toEqual([]);
+  });
+
+  it("retains originals during submission state changes and removes them after acknowledgement cleanup", async () => {
+    const files = memoryFs();
+    const original = { path: ".pi/drafts/tab-image.orig.png", sha256: "source-hash", mime: "image/png", bytes: 6_200_000 };
+    files.set(`/w/${original.path}`, "original bytes");
+    const meta = { ...emptyChatMeta(), attachments: [{ ...attachment, original }] };
+    await saveDraftMeta("/w", "tab", meta);
+    await saveDraftMeta("/w", "tab", { ...meta, submissionId: "submission", attachments: [{ ...meta.attachments[0], state: "failed" }] });
+    expect(files.has(`/w/${original.path}`)).toBe(true);
+    expect((await loadDraftRecord("/w", "tab"))?.kind).toBe("chat");
+    await saveDraftMeta("/w", "tab", emptyChatMeta());
+    expect(files.has(`/w/${original.path}`)).toBe(false);
+  });
+
+  it("clears an original when acknowledgement clears the whole draft", async () => {
+    const files = memoryFs();
+    const original = { path: ".pi/drafts/tab-image.orig.png", sha256: "source-hash", mime: "image/png", bytes: 6_200_000 };
+    files.set(`/w/${original.path}`, "original bytes");
+    await saveDraftMeta("/w", "tab", { ...emptyChatMeta(), attachments: [{ ...attachment, original }] });
+    await clearDraft("/w", "tab");
+    expect(files.has(`/w/${original.path}`)).toBe(false);
+    expect(await loadDraftMeta("/w", "tab")).toBeNull();
+  });
 });

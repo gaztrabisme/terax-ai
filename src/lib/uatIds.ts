@@ -133,6 +133,10 @@ export const UAT_IDS_K4: UatIdEntry[] = [
 export type UatStatefulEntry = { id: string; file: string; state: string };
 
 export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
+  { id: "attachment-remove", file: "src/modules/pi/components/Composer.tsx", state: "a draft attachment chip is present" },
+  { id: "attachment-relink", file: "src/modules/pi/components/Composer.tsx", state: "a recovered attachment is missing" },
+  { id: "attachment-conversion", file: "src/modules/pi/components/Composer.tsx", state: "an oversized image was converted to JPEG" },
+  { id: "attachment-notice", file: "src/modules/pi/components/Composer.tsx", state: "an attachment needs attention or was omitted from a submission" },
   {
     id: "terminal-history-reopen",
     file: "src/modules/terminal/components/TerminalHistory.tsx",
