@@ -1000,9 +1000,13 @@ export function PiSection() {
             >
               {omlxKeyStatusLabel(omlxStatus)}
             </span>
+            {/* K7C-D06: the Cloud keys group already keys its oMLX field by
+                the provider id on the window scope, so this endpoints copy
+                carries its own scope instead of repeating the identity. */}
             <Input
               type="password"
               data-uat="settings-secret"
+              data-uat-scope="endpoints"
               data-uat-key="omlx"
               value={omlxDraft}
               onChange={(e) =>
@@ -1175,7 +1179,14 @@ function ProviderRow({
 }: ProviderRowProps) {
   return (
     <>
-      <tr className="border-b border-border/40 text-[12px] last:border-b-0">
+      {/* K7C-D06: the repeated table rows carry the provider id as their
+          stable key, so the snapshot addresses each row instead of falling
+          back to bare positions. */}
+      <tr
+        data-uat="provider-row"
+        data-uat-key={row.id}
+        className="border-b border-border/40 text-[12px] last:border-b-0"
+      >
         <td className="px-3 py-1.5 font-mono">{row.id}</td>
         <td className="max-w-40 truncate px-3 py-1.5">{row.name}</td>
         <td className="max-w-52 truncate px-3 py-1.5 font-mono text-muted-foreground">
@@ -1235,10 +1246,15 @@ function ProviderRow({
         <tr className="border-b border-border/40 last:border-b-0">
           <td colSpan={5} className="px-3 py-1.5">
             <div className="flex items-center gap-2">
+              {/* K7C-D06: this table can name the same provider as the Cloud
+                  keys group, so its secret input is scoped to the table; the
+                  identical key would otherwise read as one repeated identity
+                  and fail the snapshot with DUPLICATE_TARGET. */}
               <Input
                 autoFocus
                 type="password"
                 data-uat="settings-secret"
+                data-uat-scope="providers"
                 data-uat-key={row.id}
                 value={keyDraft}
                 onChange={(e) => setKeyDraft(e.target.value)}

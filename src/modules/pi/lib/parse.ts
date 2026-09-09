@@ -69,13 +69,39 @@ export type PiToolBlock = {
   toolCallId: string;
   toolName: string;
   args: unknown;
-  status: "running" | "done" | "error";
+  /** "refused": the extension gate blocked the call; see toolRefusal. */
+  status: "running" | "done" | "error" | "refused";
   partialText: string | null;
   resultText: string | null;
   isError: boolean;
   /** Creation epoch ms; applyEvent pins it from its optional `now` argument. */
   at: number;
 };
+
+/** The prefix the board extension's gate puts on a refused tool result: pi
+ *  ends the execution cleanly and carries the refusal in the text (K7C K12),
+ *  so the prefix, not the error flag, is what marks the refusal. */
+export const TOOL_REFUSED_PREFIX = "Tool execution blocked";
+
+export type PiToolRefusal = {
+  /** The refusal text verbatim, as pi carried it on the result. */
+  reason: string;
+  /** Ticket id the reason names, e.g. "t2"; null when unnamed. */
+  ticket: string | null;
+  /** Permission log path the reason names; null when unnamed. */
+  logPath: string | null;
+};
+
+/** Reads a refused tool row: the reason verbatim plus the ticket and the
+ *  permission log path when the reason names them. Null unless the row is
+ *  refused. */
+export function toolRefusal(block: PiToolBlock): PiToolRefusal | null {
+  if (block.status !== "refused") return null;
+  const reason = block.resultText ?? "";
+  const ticket = /\(ticket\s+([^,)\s]+)/.exec(reason)?.[1] ?? null;
+  const logPath = /\bpermission log:\s*(\S+)/.exec(reason)?.[1] ?? null;
+  return { reason, ticket, logPath };
+}
 
 export type PiAskBlock = {
   kind: "ask";
@@ -840,9 +866,16 @@ function applyToolEnd(
       ? (result.content as PiResultPart[])
       : [];
   const isError = event.isError === true;
+  const text = textOfParts(content);
+  // A gate refusal is not a done call: the refusal rides the result text
+  // while pi reports a clean execution, so the prefix makes the row refused
+  // even when isError stays false. A refusal pi does flag as an error is
+  // still refused; a plain pi error keeps the error status.
   const patch = {
-    status: (isError ? "error" : "done") as PiToolBlock["status"],
-    resultText: textOfParts(content),
+    status: (
+      text.startsWith(TOOL_REFUSED_PREFIX) ? "refused" : isError ? "error" : "done"
+    ) as PiToolBlock["status"],
+    resultText: text,
     isError,
   };
   const index = state.toolPos[toolCallId];

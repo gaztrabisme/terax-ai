@@ -6,6 +6,7 @@ import {
   ChatQuestionIcon,
   CheckmarkCircle01Icon,
   CircuitBoardIcon,
+  CopyIcon,
   FileIcon,
   Loading03Icon,
   PencilEdit01Icon,
@@ -15,7 +16,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useState } from "react";
-import type { PiToolBlock } from "@/modules/pi/lib/parse";
+import { toolRefusal, type PiToolBlock } from "@/modules/pi/lib/parse";
 import type { ActionRecord } from "@/modules/pi/lib/ledgerStore";
 import { ActionFields } from "@/modules/pi/components/blocks/ActionRow";
 import { boardOp, isBoardTool } from "@/modules/pi/lib/turns";
@@ -76,6 +77,19 @@ function StatusMark({ status }: { status: PiToolBlock["status"] | ActionRecord["
       />
     );
   }
+  if (status === "refused") {
+    // A gate refusal: muted crossed circle, distinct from done (green) and
+    // from pi's own error (red).
+    return (
+      <HugeiconsIcon
+        icon={CancelCircleIcon}
+        size={13}
+        strokeWidth={1.75}
+        className="shrink-0 text-muted-foreground"
+        aria-label="refused"
+      />
+    );
+  }
   if (status === "error" || status === "failed" || status === "cancelled") {
     return (
       <HugeiconsIcon
@@ -116,6 +130,11 @@ export function ToolStep({ block, defaultOpen = false, action, footerId, childre
   const [open, setOpen] = useState(defaultOpen);
   const Icon = toolFamilyIcon(block.toolName);
   const PanelRenderer = panelForTool(block.toolName)?.renderer;
+  const refusal = toolRefusal(block);
+  const refusalLog =
+    refusal !== null && refusal.ticket !== null && refusal.logPath !== null
+      ? refusal.logPath
+      : null;
   return (
     <div
       data-uat="tool-row"
@@ -136,7 +155,9 @@ export function ToolStep({ block, defaultOpen = false, action, footerId, childre
           strokeWidth={1.75}
           className="shrink-0 text-muted-foreground"
         />
-        <span className="shrink-0 font-medium">{block.toolName}</span>
+        <span className="shrink-0 font-medium">
+          {block.status === "refused" ? `${block.toolName} refused` : block.toolName}
+        </span>
         <span
           className={cn(
             "min-w-0 flex-1 truncate text-muted-foreground",
@@ -176,12 +197,39 @@ export function ToolStep({ block, defaultOpen = false, action, footerId, childre
               Result
             </div>
             {block.resultText !== null ? (
-              PanelRenderer ? (
-                <PanelRenderer block={block} />
+              refusal ? (
+                <>
+                  <pre className="max-h-60 overflow-auto rounded bg-muted/40 p-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground">
+                    {refusal.reason}
+                  </pre>
+                  {refusalLog !== null ? (
+                    <div className="flex items-start gap-1">
+                      <span className="min-w-0 break-all font-mono text-xs text-muted-foreground">
+                        {refusalLog}
+                      </span>
+                      <button
+                        type="button"
+                        data-uat="refusal-copy-log"
+                        aria-label="Copy permission log path"
+                        title="Copy permission log path"
+                        onClick={() => {
+                          void navigator.clipboard?.writeText(refusalLog).catch(() => {});
+                        }}
+                        className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+                      >
+                        <HugeiconsIcon icon={CopyIcon} size={12} strokeWidth={1.75} />
+                      </button>
+                    </div>
+                  ) : null}
+                </>
               ) : (
-                <pre className="max-h-60 overflow-auto rounded bg-muted/40 p-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground">
-                  {block.resultText}
-                </pre>
+                PanelRenderer ? (
+                  <PanelRenderer block={block} />
+                ) : (
+                  <pre className="max-h-60 overflow-auto rounded bg-muted/40 p-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground">
+                    {block.resultText}
+                  </pre>
+                )
               )
             ) : (
               <div className="text-xs text-muted-foreground">{action && action.status !== "running" ? action.status : "running..."}</div>

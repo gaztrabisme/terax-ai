@@ -355,6 +355,60 @@ it("shows pi's Anthropic OAuth warning next to the sign-in button", async () => 
   expect(within(tableRow).getByText("Sign in")).toBeTruthy();
 });
 
+it("keys provider rows by provider id and scopes each secret group apart (K7C-D06)", async () => {
+  mockCloudCommands({ providers: true });
+  render(<PiSection />);
+
+  // The repeated table rows carry the provider id as their stable key.
+  const rows = await waitFor(() => {
+    const found = [
+      ...document.querySelectorAll('tr[data-uat="provider-row"]'),
+    ] as HTMLTableRowElement[];
+    expect(found).toHaveLength(3);
+    return found;
+  });
+  for (const row of rows) {
+    expect(row.getAttribute("data-uat-key")).toBe(
+      row.querySelector("td")?.textContent,
+    );
+  }
+
+  // Both oMLX masked inputs carry the provider id as their key, but the
+  // Cloud keys row sits on the window scope and the endpoints copy on its
+  // group scope: the identical key pair read as one repeated identity and
+  // failed every settings snapshot with DUPLICATE_TARGET.
+  const omlxInputs = screen.getAllByPlaceholderText(
+    "OMLX_API_KEY / EFFICIENT_PI_OMLX_KEY",
+  );
+  expect(omlxInputs).toHaveLength(2);
+  for (const input of omlxInputs) {
+    expect(input.getAttribute("data-uat")).toBe("settings-secret");
+    expect(input.getAttribute("data-uat-key")).toBe("omlx");
+  }
+  expect(
+    omlxInputs.filter((input) => input.getAttribute("data-uat-scope") === null),
+  ).toHaveLength(1);
+  expect(
+    omlxInputs.filter(
+      (input) => input.getAttribute("data-uat-scope") === "endpoints",
+    ),
+  ).toHaveLength(1);
+  // The cloud rows stay unscoped (window scope), keyed by provider id.
+  const cloud = screen.getByPlaceholderText("ANTHROPIC_API_KEY");
+  expect(cloud.getAttribute("data-uat")).toBe("settings-secret");
+  expect(cloud.getAttribute("data-uat-key")).toBe("anthropic");
+  expect(cloud.getAttribute("data-uat-scope")).toBeNull();
+
+  // The provider table's own key input scopes to the table, so opening it
+  // for a provider the Cloud keys group also lists stays a distinct target.
+  const tableRow = rows[0]!;
+  fireEvent.click(within(tableRow).getByText("Set key"));
+  const tableSecret = document.querySelector(
+    'input[data-uat="settings-secret"][data-uat-scope="providers"]',
+  );
+  expect(tableSecret?.getAttribute("data-uat-key")).toBe("anthropic");
+});
+
 it("commits the bppc host pref and saves the oMLX key under provider omlx", async () => {
   mockCloudCommands({});
   render(<PiSection />);

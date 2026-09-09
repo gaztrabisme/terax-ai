@@ -213,6 +213,37 @@ it("renders the report rows with their recorded sources", async () => {
   expect(screen.getByText("high (project)")).toBeTruthy();
 });
 
+it("keys every repeated check row with its stable check id (K7C-D06)", async () => {
+  seedPrefs("local-fixture", "local-fixture/child");
+  mockBackend({});
+  render(<PiFirstRun
+    onFocusPaths={() => {}}
+    onFocusRoles={() => {}}
+    onFocusEndpoints={() => {}}
+    onSignIn={() => {}}
+    onAddKey={() => {}}
+  />);
+
+  await openProjectTab();
+  await screen.findByText("Effective binary");
+  await waitFor(() => {
+    // The endpoint rows land with the probes, completing the panel.
+    expect(
+      document.querySelectorAll('[data-uat="check-row"]').length,
+    ).toBeGreaterThan(4);
+  });
+  const keys = [
+    ...document.querySelectorAll('[data-uat="check-row"]'),
+  ].map((row) => row.getAttribute("data-uat-key"));
+  // Every row carries the check name as its stable key and no two rows
+  // share one, so the settings snapshot identities stay unique.
+  expect(keys.length).toBeGreaterThan(4);
+  for (const key of keys) expect(key).toBeTruthy();
+  expect(new Set(keys).size).toBe(keys.length);
+  expect(keys).toContain("runtime-binary");
+  expect(keys).toContain("runtime-endpoint");
+});
+
 it("a failed report endpoint names the endpoint and error, with no fallback success", async () => {
   seedPrefs("bppc", "");
   // The fallback probe URL (the template's default host) would answer, but

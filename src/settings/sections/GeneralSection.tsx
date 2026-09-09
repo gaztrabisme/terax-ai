@@ -142,9 +142,14 @@ export function GeneralSection() {
           title="Vim mode"
           description="Enable Vim keybindings in the code editor."
         >
+          {/* K7C-D06: the repeated General switches share the settings-switch
+              id, each keyed by its preference key so the settings snapshot
+              never reports repeated unkeyed identities. */}
           <Switch
             checked={vimMode}
             onCheckedChange={(v) => void setVimMode(v)}
+            data-uat="settings-switch"
+            data-uat-key="vimMode"
             aria-label="Vim mode"
           />
         </SettingRow>
@@ -155,6 +160,8 @@ export function GeneralSection() {
           <Switch
             checked={editorAutoSave}
             onCheckedChange={(v) => void setEditorAutoSave(v)}
+            data-uat="settings-switch"
+            data-uat-key="editorAutoSave"
             aria-label="Auto save"
           />
         </SettingRow>
@@ -175,6 +182,8 @@ export function GeneralSection() {
           <Switch
             checked={showHidden}
             onCheckedChange={(v) => void setShowHidden(v)}
+            data-uat="settings-switch"
+            data-uat-key="showHidden"
             aria-label="Show hidden files"
           />
         </SettingRow>
@@ -231,6 +240,8 @@ export function GeneralSection() {
           <Switch
             checked={terminalWebglEnabled}
             onCheckedChange={(v) => void setTerminalWebglEnabled(v)}
+            data-uat="settings-switch"
+            data-uat-key="terminalWebglEnabled"
             aria-label="Use WebGL renderer"
           />
         </SettingRow>
@@ -319,6 +330,8 @@ export function GeneralSection() {
             <Switch
               checked={restoreWindowState}
               onCheckedChange={(v) => void setRestoreWindowState(v)}
+              data-uat="settings-switch"
+              data-uat-key="restoreWindowState"
               aria-label="Restore window position & size"
             />
           </SettingRow>

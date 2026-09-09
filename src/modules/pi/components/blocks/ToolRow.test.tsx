@@ -63,3 +63,64 @@ describe("ToolStep fold state", () => {
     expect(toolFamilyIcon("mystery_tool")).toBeTruthy();
   });
 });
+
+// The K7C K12 refusal, verbatim as the gate writes it into the tool result.
+const REFUSAL =
+  "Tool execution blocked: unticketed-action: board_start refused: delegation needs status in_progress (ticket t2, state todo). permission log: /private/tmp/standalone-proj/.pi/logs/session.jsonl";
+
+describe("ToolStep refusal (K7C K12)", () => {
+  const refused = toolBlock({
+    toolName: "board_start",
+    args: { id: "t2" },
+    status: "refused",
+    partialText: null,
+    resultText: REFUSAL,
+    isError: false,
+  });
+
+  it("folded row shows the muted refused mark and the refused title", () => {
+    const html = renderToStaticMarkup(<ToolRow block={refused} />);
+    expect(html).toContain("board_start refused");
+    expect(html).toContain('aria-label="refused"');
+    // Neither the green done mark nor the red error mark.
+    expect(html).not.toContain('aria-label="done"');
+    expect(html).not.toContain('aria-label="error"');
+    expect(html).not.toContain("text-green-600");
+    expect(html).not.toContain("text-destructive");
+  });
+
+  it("expanded row shows the reason verbatim and the copyable log path", () => {
+    const html = renderToStaticMarkup(<ToolRow block={refused} defaultOpen />);
+    expect(html).toContain("Tool execution blocked: unticketed-action");
+    expect(html).toContain(
+      "/private/tmp/standalone-proj/.pi/logs/session.jsonl",
+    );
+    expect(html).toContain('aria-label="Copy permission log path"');
+    expect(html).toContain('data-uat="refusal-copy-log"');
+  });
+
+  it("a refusal that names no log path shows no copy control", () => {
+    const html = renderToStaticMarkup(
+      <ToolRow
+        block={toolBlock({
+          status: "refused",
+          partialText: null,
+          resultText:
+            "Tool execution blocked: unticketed-action: board_new refused",
+        })}
+        defaultOpen
+      />,
+    );
+    expect(html).toContain("Tool execution blocked");
+    expect(html).not.toContain('aria-label="Copy permission log path"');
+  });
+
+  it("done rows keep the green mark and the plain title", () => {
+    const html = renderToStaticMarkup(
+      <ToolRow block={toolBlock({ toolName: "bash" })} />,
+    );
+    expect(html).toContain('aria-label="done"');
+    expect(html).toContain("bash");
+    expect(html).not.toContain("bash refused");
+  });
+});

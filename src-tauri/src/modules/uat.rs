@@ -327,17 +327,26 @@ fn qualified(element: &Value) -> String {
     )
 }
 
-fn duplicate_targets(elements: &[Value]) -> BTreeSet<String> {
+/// Addresses and identities are unique per window (K7C-D06): the reporting
+/// window id joins every deduplication tuple, so the settings observer's
+/// scopes and keys never compete with the main window's. Elements inside one
+/// window sharing an address or identity still report as duplicates.
+fn duplicate_targets(window_id: &str, elements: &[Value]) -> BTreeSet<String> {
     let mut tuples = HashMap::new();
     let mut keys = HashMap::new();
     let mut duplicates = BTreeSet::new();
     for element in elements {
         let address = (
+            window_id.to_string(),
             element["uat"].to_string(),
             element["scope"].to_string(),
             element["index"].to_string(),
         );
-        let identity = (element["scope"].to_string(), element["key"].to_string());
+        let identity = (
+            window_id.to_string(),
+            element["scope"].to_string(),
+            element["key"].to_string(),
+        );
         let target = qualified(element);
         for previous in [
             tuples.insert(address, target.clone()),
@@ -378,7 +387,7 @@ fn validate_snapshot(raw: &str, root: &Path) -> Result<Value, String> {
         return Err("TIME_INVALID: capturedAt is after ts".into());
     }
     let elements = value["elements"].as_array().ok_or("SCHEMA_INVALID")?;
-    let duplicates = duplicate_targets(elements);
+    let duplicates = duplicate_targets(value["windowId"].as_str().unwrap_or(""), elements);
     let reported: BTreeSet<_> = value["dupes"]
         .as_array()
         .ok_or("SCHEMA_INVALID")?
@@ -1442,12 +1451,83 @@ mod tests {
         let duplicate = value["elements"][0].clone();
         value["elements"].as_array_mut().unwrap().push(duplicate);
         assert!(validate_snapshot(&value.to_string(), dir.path()).is_err());
-        value["dupes"] = json!(duplicate_targets(value["elements"].as_array().unwrap()));
+        value["dupes"] = json!(duplicate_targets(
+            value["windowId"].as_str().unwrap_or(""),
+            value["elements"].as_array().unwrap()
+        ));
         value["health"] = json!("error");
         value["lastError"] = json!({"code": "DUPLICATE_TARGET", "message": "Duplicates", "at": now(), "consecutiveFailures": 1, "logPath": ".pi/logs/uat.jsonl"});
         value["elements"][0]["interactable"] = json!(false);
         value["elements"][2]["interactable"] = json!(false);
         validate_snapshot(&value.to_string(), dir.path()).unwrap();
+    }
+
+    #[test]
+    fn duplicate_identities_are_unique_per_window() {
+        let (dir, registry, state, value) = setup();
+        // K7C-D06: the Settings observer binds the same project beside main
+        // and reports the very same element shape. One window's identity is
+        // another window's identity no more: neither write flags or displaces
+        // the other's.
+        state
+            .start("settings", dir.path().to_str().unwrap(), &registry)
+            .unwrap();
+        let mut settings_value = value.clone();
+        settings_value["windowId"] = json!("settings");
+        state
+            .inner
+            .lock()
+            .unwrap()
+            .windows
+            .get_mut("settings")
+            .unwrap()
+            .sample = Some(settings_value["window"].clone());
+        state.write("main", &value.to_string(), &registry).unwrap();
+        state
+            .write("settings", &settings_value.to_string(), &registry)
+            .unwrap();
+        // Within one window the repeated identity is still a duplicate: an
+        // unreported repeat fails the write.
+        let mut reported = settings_value.clone();
+        let duplicate = reported["elements"][0].clone();
+        reported["elements"].as_array_mut().unwrap().push(duplicate);
+        reported["seq"] = json!(2);
+        state
+            .inner
+            .lock()
+            .unwrap()
+            .windows
+            .get_mut("settings")
+            .unwrap()
+            .sample = Some(reported["window"].clone());
+        assert!(state
+            .write("settings", &reported.to_string(), &registry)
+            .unwrap_err()
+            .starts_with("DUPES_INVALID"));
+        // Reported with error health, the commit stands and records the
+        // banner state the driver reads.
+        reported["dupes"] = json!(duplicate_targets(
+            reported["windowId"].as_str().unwrap_or(""),
+            reported["elements"].as_array().unwrap()
+        ));
+        reported["health"] = json!("error");
+        reported["lastError"] = json!({"code": "DUPLICATE_TARGET", "message": "Duplicates", "at": now(), "consecutiveFailures": 1, "logPath": ".pi/logs/uat.jsonl"});
+        reported["elements"][0]["interactable"] = json!(false);
+        reported["elements"][1]["interactable"] = json!(false);
+        state
+            .write("settings", &reported.to_string(), &registry)
+            .unwrap();
+        let snapshot: Value = serde_json::from_slice(
+            &fs::read(dir.path().join(".pi/uat-snapshot-settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(snapshot["health"], json!("error"));
+        // The main window's file keeps its own ok health and sequence.
+        let main: Value =
+            serde_json::from_slice(&fs::read(dir.path().join(".pi/uat-snapshot.json")).unwrap())
+                .unwrap();
+        assert_eq!(main["health"], json!("ok"));
+        assert_eq!(main["seq"], json!(1));
     }
 
     #[test]

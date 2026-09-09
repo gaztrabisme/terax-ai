@@ -119,6 +119,11 @@ export const UAT_IDS_K4: UatIdEntry[] = [
   { id: "check-row", file: "src/settings/sections/PiFirstRun.tsx" },
   { id: "pi-first-run-check", file: "src/settings/sections/PiFirstRun.tsx" },
   { id: "provider-table", file: "src/settings/sections/PiSection.tsx" },
+  // K7C-D06: the provider table's repeated rows are addressable per
+  // provider id, and the repeated General switches share one id keyed by
+  // the switch's preference key.
+  { id: "provider-row", file: "src/settings/sections/PiSection.tsx" },
+  { id: "settings-switch", file: "src/settings/sections/GeneralSection.tsx" },
   { id: "settings-secret", file: "src/settings/sections/PiSection.tsx" },
   {
     id: "terminal-composer-default",
@@ -282,6 +287,12 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
     file: "src/modules/pi/components/ArtifactPane.tsx",
     state:
       "the artifact viewer keeping its last good frame after a failed re-read (stale since marker, UX-19)",
+  },
+  {
+    id: "refusal-copy-log",
+    file: "src/modules/pi/components/blocks/ToolRow.tsx",
+    state:
+      "a refused tool row is expanded and its reason names a permission log path (K7C K12)",
   },
 ];
 

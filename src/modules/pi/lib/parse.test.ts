@@ -17,6 +17,7 @@ import {
   resetAsk,
   retryPendingLabel,
   sessionExited,
+  toolRefusal,
   type PiBlock,
   type PiErrorBlock,
   type PiRetryBlock,
@@ -139,6 +140,94 @@ describe("q2-rpc-tools: tool row lifecycle", () => {
   it("final usage.totalTokens comes from the last message_end", () => {
     const final = replay("q2-rpc-tools.jsonl");
     expect(final.tokens?.totalTokens).toBe(2049);
+  });
+});
+
+// The K7C K12 refusal, verbatim as the board extension's gate writes it into
+// the tool result: pi ends the execution cleanly (isError false) and the
+// refusal rides the text.
+const BLOCKED_RESULT =
+  "Tool execution blocked: unticketed-action: board_start refused: delegation needs status in_progress (ticket t2, state todo). permission log: /private/tmp/standalone-proj/.pi/logs/session.jsonl";
+
+function toolRun(
+  resultText: string,
+  isError = false,
+  withStart = true,
+): PiSessionState {
+  let state = applyEvent(initialPiSessionState(), '{"type":"agent_start","sessionId":"s1"}', 1000);
+  if (withStart) {
+    state = applyEvent(
+      state,
+      '{"type":"tool_execution_start","toolCallId":"call_r","toolName":"board_start","args":{"id":"t2"}}',
+      1000,
+    );
+  }
+  return applyEvent(
+    state,
+    JSON.stringify({
+      type: "tool_execution_end",
+      toolCallId: "call_r",
+      toolName: "board_start",
+      args: { id: "t2" },
+      result: { content: [{ type: "text", text: resultText }] },
+      isError,
+    }),
+    1000,
+  );
+}
+
+describe("refused tool rows: gate refusals (K7C K12)", () => {
+  it("marks the row refused from the exact blocked text while isError stays false", () => {
+    const row = blocksOfKind(toolRun(BLOCKED_RESULT), "tool")[0];
+    expect(row.status).toBe("refused");
+    expect(row.isError).toBe(false);
+    expect(row.resultText).toBe(BLOCKED_RESULT);
+  });
+
+  it("marks a refusal pi flags as an error refused too", () => {
+    const row = blocksOfKind(toolRun(BLOCKED_RESULT, true), "tool")[0];
+    expect(row.status).toBe("refused");
+    expect(row.isError).toBe(true);
+  });
+
+  it("keeps a plain pi error on the error status", () => {
+    const row = blocksOfKind(toolRun("board tool crashed", true), "tool")[0];
+    expect(row.status).toBe("error");
+  });
+
+  it("keeps a clean result done", () => {
+    const row = blocksOfKind(toolRun("started t2"), "tool")[0];
+    expect(row.status).toBe("done");
+  });
+
+  it("refuses a synthesized row when the end arrives without a start", () => {
+    const row = blocksOfKind(toolRun(BLOCKED_RESULT, false, false), "tool")[0];
+    expect(row.status).toBe("refused");
+  });
+
+  it("parses the ticket and the permission log path out of the reason", () => {
+    const refusal = toolRefusal(blocksOfKind(toolRun(BLOCKED_RESULT), "tool")[0]);
+    expect(refusal).not.toBeNull();
+    expect(refusal?.reason).toBe(BLOCKED_RESULT);
+    expect(refusal?.ticket).toBe("t2");
+    expect(refusal?.logPath).toBe(
+      "/private/tmp/standalone-proj/.pi/logs/session.jsonl",
+    );
+  });
+
+  it("returns nulls for a refusal that names no ticket or log path", () => {
+    const refusal = toolRefusal(
+      blocksOfKind(toolRun("Tool execution blocked: unticketed-action: board_new refused"), "tool")[0],
+    );
+    expect(refusal?.ticket).toBeNull();
+    expect(refusal?.logPath).toBeNull();
+  });
+
+  it("non-refused rows have no refusal", () => {
+    expect(toolRefusal(blocksOfKind(toolRun("started t2"), "tool")[0])).toBeNull();
+    expect(
+      toolRefusal(blocksOfKind(toolRun("crashed", true), "tool")[0]),
+    ).toBeNull();
   });
 });
 

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef } from "react";
 import { PI_OPEN_CWDS_EVENT, PI_OPEN_CWDS_QUERY_EVENT } from "@/modules/pi/lib/providers";
 import type { Tab } from "@/modules/tabs";
@@ -89,18 +90,22 @@ export function useUat(tabs: Tab[], activeId: number, fallback: string | null) {
  * main window's .pi/uat-snapshot.json.
  *
  * The settings webview has no tab strip; its one context tab carries kind
- * "settings" and the window's single data-uat scope key. The observed project
- * is the most recently active open pi session's cwd, mirrored by the main
- * window over the pi:open-cwds broadcast (the same source the Pi check rows
- * read); with no open project the collector idles and writes nothing.
+ * "settings" and the window's single data-uat scope key. That key is the
+ * window's own backend label (the windowId the snapshots report), so every
+ * element address this observer records is prefixed by the windowId and can
+ * never collide with the main window's tab-keyed scopes (K7C-D06). The
+ * observed project is the most recently active open pi session's cwd,
+ * mirrored by the main window over the pi:open-cwds broadcast (the same
+ * source the Pi check rows read); with no open project the collector idles
+ * and writes nothing.
  */
-export function settingsContext(cwd: string): Context {
+export function settingsContext(cwd: string, windowId: string): Context {
   return {
     cwd,
     tabs: [
       {
         uat: "tab-active",
-        key: "settings",
+        key: windowId,
         kind: "settings",
         title: "Settings",
         active: true,
@@ -119,13 +124,19 @@ export async function mountSettingsCollector(
 ): Promise<SettingsCollector | null> {
   const module = await loadCollector();
   if (!module) return null;
-  const controller = await module.mountCollector(settingsContext(""), io);
+  // The address prefix is the backend's own window label, the same string it
+  // reports as the snapshots' windowId and routes the commits by.
+  const windowId = getCurrentWindow().label;
+  const controller = await module.mountCollector(
+    settingsContext("", windowId),
+    io,
+  );
   const apply = (cwds: unknown) => {
     const cwd = Array.isArray(cwds)
       ? (cwds.find((c): c is string => typeof c === "string" && c.length > 0) ??
         "")
       : "";
-    controller.update(settingsContext(cwd));
+    controller.update(settingsContext(cwd, windowId));
   };
   const unlisten = await listen<{ cwds?: string[] }>(
     PI_OPEN_CWDS_EVENT,

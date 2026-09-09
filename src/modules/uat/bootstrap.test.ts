@@ -1,12 +1,16 @@
 import { beforeEach, expect, it, vi } from "vitest";
-const { invoke, imported, listen, emit } = vi.hoisted(() => ({
+const { invoke, imported, listen, emit, windowLabel } = vi.hoisted(() => ({
   invoke: vi.fn(),
   imported: vi.fn(),
   listen: vi.fn(),
   emit: vi.fn(),
+  windowLabel: { value: "settings" },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen, emit }));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ label: windowLabel.value }),
+}));
 vi.mock("@/modules/uat/snapshot", () => {
   imported();
   return { mountCollector: vi.fn() };
@@ -14,6 +18,7 @@ vi.mock("@/modules/uat/snapshot", () => {
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
+  windowLabel.value = "settings";
 });
 
 it("never imports the collector module without the startup flag", async () => {
@@ -55,7 +60,7 @@ it("settings observer mounts one settings tab and binds the broadcast project cw
   const { mountSettingsCollector, settingsContext } = await import(
     "@/modules/uat/bootstrap"
   );
-  expect(settingsContext("/proj-x")).toEqual({
+  expect(settingsContext("/proj-x", "settings")).toEqual({
     cwd: "/proj-x",
     tabs: [
       {
@@ -72,13 +77,40 @@ it("settings observer mounts one settings tab and binds the broadcast project cw
   expect(vi.mocked(mountCollector)).toHaveBeenCalledOnce();
   // Mounts idle with no project, pulls the open-cwds list once, then binds
   // the most recently active project cwd from the broadcast.
-  expect(mountCollector).toHaveBeenCalledWith(settingsContext(""), undefined);
+  expect(mountCollector).toHaveBeenCalledWith(
+    settingsContext("", "settings"),
+    undefined,
+  );
   expect(emit).toHaveBeenCalled();
   deliver!({ payload: { cwds: ["/proj-x", "/proj-y"] } });
-  expect(update).toHaveBeenCalledWith(settingsContext("/proj-x"));
+  expect(update).toHaveBeenCalledWith(settingsContext("/proj-x", "settings"));
   // No open cwd, no binding: the collector stays idle rather than guessing.
   deliver!({ payload: { cwds: [] } });
-  expect(update).toHaveBeenLastCalledWith(settingsContext(""));
+  expect(update).toHaveBeenLastCalledWith(settingsContext("", "settings"));
   await collector!.stop();
   expect(stop).toHaveBeenCalledOnce();
+});
+
+it("prefixes every settings address with the backend windowId (K7C-D06)", async () => {
+  const update = vi.fn();
+  const stop = vi.fn();
+  const { mountCollector } = await import("@/modules/uat/snapshot");
+  vi.mocked(mountCollector).mockResolvedValue({ update, stop } as never);
+  listen.mockResolvedValue(() => {});
+  invoke.mockResolvedValue(true);
+  emit.mockResolvedValue(undefined);
+  windowLabel.value = "settings-2";
+  const { mountSettingsCollector, settingsContext } = await import(
+    "@/modules/uat/bootstrap"
+  );
+  // The one context tab's key is the window's own backend label (the same
+  // string the snapshots report as windowId), so every element scope this
+  // observer records carries the windowId and can never equal the main
+  // window's tab-keyed scopes, whatever the label is.
+  expect(settingsContext("/p", "settings-2").tabs[0].key).toBe("settings-2");
+  await mountSettingsCollector();
+  expect(vi.mocked(mountCollector)).toHaveBeenCalledWith(
+    settingsContext("", "settings-2"),
+    undefined,
+  );
 });

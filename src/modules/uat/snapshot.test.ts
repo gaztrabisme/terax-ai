@@ -163,6 +163,109 @@ describe("DOM snapshot", () => {
     });
   });
 
+  it("keys the Settings surface repeats and scopes every address by the windowId (K7C-D06)", () => {
+    document.body.innerHTML = `
+      <div data-uat="check-row" data-uat-key="path-pi"><span>pi binary</span></div>
+      <div data-uat="check-row" data-uat-key="path-agentDir"><span>agent dir</span></div>
+      <table data-uat="provider-table"><tr data-uat="provider-row" data-uat-key="anthropic"><td>anthropic</td></tr><tr data-uat="provider-row" data-uat-key="openai"><td>openai</td></tr></table>
+      <input type="password" data-uat="settings-secret" data-uat-key="omlx">
+      <input type="password" data-uat="settings-secret" data-uat-scope="endpoints" data-uat-key="omlx">
+      <input type="password" data-uat="settings-secret" data-uat-scope="providers" data-uat-key="anthropic">
+      <button data-uat="settings-switch" data-uat-key="vimMode" aria-checked="true"></button>
+      <button data-uat="settings-switch" data-uat-key="showHidden" aria-checked="false"></button>`;
+    const settingsContext: Context = {
+      cwd: "/project",
+      tabs: [
+        {
+          uat: "tab-active",
+          key: "settings",
+          kind: "settings",
+          title: "Settings",
+          active: true,
+        },
+      ],
+    };
+    const snapshot = collectSnapshot(
+      document,
+      window,
+      settingsContext,
+      { ...session, windowId: "settings" },
+      geometry,
+      1,
+      null,
+    );
+    // The oMLX key once appeared twice under one identity (the Cloud keys
+    // row and the endpoints copy) and failed every settings snapshot with
+    // DUPLICATE_TARGET; the group scopes and the stable row keys now keep
+    // every address unique.
+    expect(snapshot.dupes).toEqual([]);
+    expect(snapshot.health).toBe("ok");
+    expect(conforms(snapshot)).toBe(true);
+    // Every address lives in this window's namespace: the root scope is the
+    // windowId itself (the tab key the observer derives from the backend
+    // label) and the only other scopes name settings groups.
+    expect(snapshot.windowId).toBe("settings");
+    expect(snapshot.activeTab.key).toBe("settings");
+    for (const el of snapshot.elements)
+      expect(["settings", "endpoints", "providers"]).toContain(el.scope);
+    // The repeats carry their stable names, not bare positions.
+    const keys = (uat: string) =>
+      snapshot.elements.filter((el) => el.uat === uat).map((el) => el.key);
+    expect(keys("check-row")).toEqual([
+      "path-pi/check-row",
+      "path-agentDir/check-row",
+    ]);
+    expect(keys("provider-row")).toEqual([
+      "anthropic/provider-row",
+      "openai/provider-row",
+    ]);
+    expect(keys("settings-switch")).toEqual([
+      "vimMode/settings-switch",
+      "showHidden/settings-switch",
+    ]);
+    // One provider id in two groups stays two identities: the endpoints and
+    // provider-table copies are scoped to their groups.
+    expect(
+      snapshot.elements.filter((el) => el.uat === "settings-secret"),
+    ).toMatchObject([
+      { scope: "settings", key: "omlx/settings-secret", index: null },
+      { scope: "endpoints", key: "omlx", index: null },
+      { scope: "providers", key: "anthropic", index: null },
+    ]);
+  });
+
+  it("fails closed when two Settings rows claim one stable key", () => {
+    document.body.innerHTML =
+      '<div data-uat="check-row" data-uat-key="path-pi"></div><div data-uat="check-row" data-uat-key="path-pi"></div>';
+    const settingsContext: Context = {
+      cwd: "/project",
+      tabs: [
+        {
+          uat: "tab-active",
+          key: "settings",
+          kind: "settings",
+          title: "Settings",
+          active: true,
+        },
+      ],
+    };
+    const snapshot = collectSnapshot(
+      document,
+      window,
+      settingsContext,
+      { ...session, windowId: "settings" },
+      geometry,
+      1,
+      null,
+    );
+    expect(snapshot.dupes).toHaveLength(2);
+    expect(snapshot.health).toBe("error");
+    expect(snapshot.lastError).toMatchObject({ code: "DUPLICATE_TARGET" });
+    expect(
+      snapshot.elements.every((el) => "secret" in el || !el.interactable),
+    ).toBe(true);
+  });
+
   it("keeps copy attached to a durable turn while repeat indices move", () => {
     document.body.innerHTML =
       '<div data-uat="pi-turn" data-uat-key="t7" data-uat-index="0"><button data-uat="copy">Copy</button></div><div data-uat="pi-turn" data-uat-key="t8" data-uat-index="1"><button data-uat="copy">Copy</button></div>';
