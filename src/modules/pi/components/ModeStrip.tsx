@@ -32,7 +32,6 @@ export const viewButtonClass =
 
 export function ModeStrip({
   view,
-  hasArtifact,
   boardCount,
   graphCount,
   buttons,
@@ -55,7 +54,7 @@ export function ModeStrip({
       className="flex shrink-0 flex-col items-center border-l border-border/60 text-xs font-medium"
       style={{ width: MODE_STRIP_WIDTH }}
     >
-      {CHAT_VIEWS.filter((name) => name !== "artifact" || hasArtifact).map(
+      {CHAT_VIEWS.map(
         (name) => {
           const count =
             name === "board" ? boardCount : name === "graph" ? graphCount : 0;

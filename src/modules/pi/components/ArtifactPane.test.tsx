@@ -219,6 +219,17 @@ describe("ArtifactPane file-first viewer", () => {
   it("shows the empty state before any artifact", () => {
     const { container } = render(<ArtifactPane doc={null} cwd="/proj" />);
     expect(container.querySelector("iframe")).toBeNull();
-    expect(container.textContent).toContain("No artifact yet");
+    expect(container.textContent).toContain("No files yet. Files the model writes appear here.");
   });
+});
+
+it("prepares without reading or enabling a viewer, then shows the completed file", async () => {
+  const view = render(<ArtifactPane doc={null} preparing cwd="/proj" />);
+  expect(view.getByRole("status").textContent).toContain("Preparing files");
+  expect(view.getByRole("status").getAttribute("aria-busy")).toBe("true");
+  expect(view.container.querySelector("iframe, button")).toBeNull();
+  expect(invokeMock).not.toHaveBeenCalled();
+  view.rerender(<ArtifactPane doc={DOC} cwd="/proj" />);
+  await waitFor(() => expect(view.container.querySelector("iframe")).not.toBeNull());
+  expect(view.queryByRole("status")).toBeNull();
 });

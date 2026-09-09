@@ -1,3 +1,4 @@
+import { BOARD_STATE_ORDER } from "@/modules/pi/components/board/stateOrder";
 import { stateLabel, type BoardSnapshot } from "@/modules/pi/lib/board";
 import { TicketCard } from "./TicketCard";
 
@@ -15,7 +16,7 @@ type Props = {
 export function LaneList({ snapshot, onOpen }: Props) {
   return (
     <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-2">
-      {snapshot.states.map((state, li) => {
+      {BOARD_STATE_ORDER.map((state, li) => {
         const tickets = snapshot.tickets.filter((t) => t.status === state);
         return (
           <section

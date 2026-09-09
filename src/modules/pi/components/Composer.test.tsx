@@ -18,9 +18,10 @@ import {
   type PendingImage,
 } from "./Composer";
 
-const { invokeMock, dialogOpenMock, dragDropHandlers } = vi.hoisted(() => ({
+const { invokeMock, dialogOpenMock, windowFocusMock, dragDropHandlers } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   dialogOpenMock: vi.fn(),
+  windowFocusMock: vi.fn().mockResolvedValue(undefined),
   dragDropHandlers: [] as ((e: unknown) => void)[],
 }));
 
@@ -42,6 +43,10 @@ vi.mock("@tauri-apps/api/webview", () => ({
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialogOpenMock }));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ setFocus: windowFocusMock }),
+}));
 
 import { initialPiSessionState } from "@/modules/pi/lib/parse";
 import { usePiStore } from "@/modules/pi/lib/piStore";
@@ -133,6 +138,7 @@ beforeEach(() => {
   document.elementFromPoint = () => null;
   dragDropHandlers.length = 0;
   dialogOpenMock.mockReset();
+  windowFocusMock.mockClear();
   invokeMock.mockReset();
   invokeMock.mockImplementation(async (cmd: string) => {
     if (cmd === "fs_read_file") throw new Error("no such file");
@@ -510,6 +516,8 @@ describe("composer attach dialog", () => {
       expect(container.querySelector("img[alt='one.png']")).toBeTruthy();
     });
     expect(container.querySelector("img[alt='two.jpg']")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(container.querySelector('[aria-label="pi composer"]')));
+    expect(windowFocusMock).toHaveBeenCalledOnce();
   });
 
   it("falls back to the hidden input when the dialog is unavailable", async () => {
@@ -525,11 +533,13 @@ describe("composer attach dialog", () => {
     await waitFor(() => {
       expect(clickSpy).toHaveBeenCalled();
     });
+    await waitFor(() => expect(document.activeElement).toBe(container.querySelector('[aria-label="pi composer"]')));
+    expect(windowFocusMock).toHaveBeenCalledOnce();
     expect(container.querySelectorAll("img")).toHaveLength(0);
   });
 
-  it("does nothing when the dialog is cancelled", async () => {
-    dialogOpenMock.mockResolvedValue(null);
+  it.each([null, []])("restores focus and leaves no backdrop or busy attribute when the picker returns %j", async (selection) => {
+    dialogOpenMock.mockResolvedValue(selection);
     const { container } = renderComposer();
     const input = container.querySelector(
       "input[type='file']",
@@ -541,6 +551,9 @@ describe("composer attach dialog", () => {
     await waitFor(() => {
       expect(dialogOpenMock).toHaveBeenCalled();
     });
+    await waitFor(() => expect(document.activeElement).toBe(container.querySelector('[aria-label="pi composer"]')));
+    expect(windowFocusMock).toHaveBeenCalledOnce();
+    expect(document.querySelector('[aria-busy="true"], [data-slot="dialog-overlay"], [data-slot="sheet-overlay"], [data-uat="picker-backdrop"]')).toBeNull();
     expect(clickSpy).not.toHaveBeenCalled();
     expect(container.querySelectorAll("img")).toHaveLength(0);
   });
@@ -1052,6 +1065,8 @@ describe("trusted draft attachments (G3)", () => {
     await waitFor(() => expect(dialogOpenMock).toHaveBeenCalled());
     expect(view.container.querySelector('[data-state="missing"]')).toBeTruthy();
     expect(JSON.parse(files.get(metaPath)!).attachments).toEqual([saved]);
+    await waitFor(() => expect(windowFocusMock).toHaveBeenCalledOnce());
+    expect(document.activeElement).toBe(view.pm);
   });
 
   it("keeps Remove, Relink and text sending available when the relink write fails", async () => {

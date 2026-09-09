@@ -56,6 +56,7 @@ type LoadedArtifact = {
 
 type Props = {
   doc: ArtifactDoc | null;
+  preparing?: boolean;
   cwd?: string;
 };
 
@@ -69,7 +70,7 @@ const toolbarBtn =
  * path copies the absolute path, and a missing or unreadable file shows a
  * path-bearing error. Opening the viewer causes no save operation.
  */
-export function ArtifactPane({ doc, cwd }: Props) {
+export function ArtifactPane({ doc, cwd, preparing = false }: Props) {
   const [loaded, setLoaded] = useState<LoadedArtifact | null>(null);
   const [error, setError] = useState<string | null>(null);
   const absolute = doc?.path ?? null;
@@ -116,8 +117,8 @@ export function ArtifactPane({ doc, cwd }: Props) {
 
   if (!doc || !absolute) {
     return (
-      <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground">
-        No artifact yet: a completed artifact file shows here.
+      <div role="status" aria-busy={preparing || undefined} className="p-4 text-xs text-muted-foreground">
+        {preparing ? "Preparing files... Files appear here when the write completes." : "No files yet. Files the model writes appear here."}
       </div>
     );
   }

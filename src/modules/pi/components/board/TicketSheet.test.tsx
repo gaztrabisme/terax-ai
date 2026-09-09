@@ -187,14 +187,14 @@ describe("TicketSheet harness authority", () => {
     expect((close as HTMLButtonElement).disabled).toBe(true);
     expect(close.getAttribute("title")).toBe("Close is not offered from Todo");
 
-    // The aligned-attempt gate is the harness reason, verbatim gate name.
+    // The harness reason uses the readable gate label.
     const rework = verbButton("board-rework");
     expect((rework as HTMLButtonElement).disabled).toBe(true);
-    expect(rework.getAttribute("title")).toBe("Rework needs criteria_confirmed");
+    expect(rework.getAttribute("title")).toBe("Rework needs Criteria confirmed");
 
     // One muted line carries every disabled verb's reason, in button order.
     const line = screen.getByText(
-      "Land is not offered from Todo · Close is not offered from Todo · Rework needs criteria_confirmed",
+      "Land is not offered from Todo · Close is not offered from Todo · Rework needs Criteria confirmed",
     );
     expect(line).not.toBeNull();
   });
@@ -216,11 +216,11 @@ describe("TicketSheet harness authority", () => {
     const close = verbButton("board-close");
     expect((close as HTMLButtonElement).disabled).toBe(true);
     expect(close.getAttribute("aria-disabled")).toBe("true");
-    expect(close.getAttribute("title")).toBe("Close needs resolved, wiki-close");
+    expect(close.getAttribute("title")).toBe("Close needs resolved, Wiki close");
     // One muted line, in button order: align is not a review successor.
     expect(
       screen.getByText(
-        "Align is not offered from Review · Close needs resolved, wiki-close",
+        "Align is not offered from Review · Close needs resolved, Wiki close",
       ),
     ).not.toBeNull();
 
@@ -318,7 +318,7 @@ describe("TicketSheet arm and confirm", () => {
     const area = document.body.querySelector('[data-uat="board-confirm-area"]')!;
     expect(area.getAttribute("aria-label")).toBe("Confirm Align");
     expect(area.textContent).toContain("aa: todo to in_progress through align");
-    expect(area.textContent).toContain("Consequences: criteria_confirmed");
+    expect(area.textContent).toContain("Consequences: Criteria confirmed");
     const confirm = area.querySelector('[data-uat="board-confirm"]')!;
     expect(confirm.textContent).toBe("Confirm");
     const cancel = area.querySelector('[data-uat="board-cancel"]')!;
@@ -586,7 +586,7 @@ describe("TicketSheet gates and acceptance ids", () => {
     // The wiki-close verdict is its own named row.
     const wiki = document.body.querySelector('[data-uat="ticket-wiki-close"]');
     expect(wiki).not.toBeNull();
-    expect(wiki?.textContent).toContain("wiki-close");
+    expect(wiki?.textContent).toContain("Wiki close");
     expect(wiki?.textContent).toContain("fail");
     // The evidence itself stays on the keyed gate row.
     expect(rows[1].textContent).toContain("no entry yet");
@@ -599,4 +599,27 @@ describe("TicketSheet gates and acceptance ids", () => {
     expect(wiki).not.toBeNull();
     expect(wiki?.textContent).toContain("no verdict recorded");
   });
+});
+
+it("separates readable gate labels from identifiers and human or machine sources", async () => {
+  const ticket = { ...REVIEW_TICKET, gates: [...REVIEW_TICKET.gates, {
+    id: 3, gate: "criteria_confirmed", passed: true, provider: "gary", source: "human",
+    attempt: 1, note: "Confirmed", created_at: "2026-09-09",
+  }] };
+  invokeMock.mockImplementation(async (cmd: string) => cmd === "pi_paths"
+    ? { agent: { path: "/bin/agent", source: "bundled", candidates: [] } }
+    : { stdout: JSON.stringify(ticket), stderr: "", exit_code: 0 });
+  renderSheet("wc");
+  await waitFor(() => expect(screen.getByText("Criteria confirmed")).toBeTruthy());
+  for (const [id, label, source] of [
+    ["criteria_confirmed", "Criteria confirmed", "human/gary"],
+    ["tests_green", "Tests green", "machine/bash"],
+    ["wiki-close", "Wiki close", "machine/board"],
+  ]) {
+    const row = document.querySelector(`[data-uat="ticket-gate"][data-uat-key="${id}"]`)!;
+    expect(row.firstElementChild?.textContent).toContain(label);
+    expect(row.firstElementChild?.textContent).not.toContain(id);
+    expect(row.querySelector("p")?.textContent).toContain(`${id} · Source: ${source}`);
+    expect(row.querySelector("button")).toBeNull();
+  }
 });

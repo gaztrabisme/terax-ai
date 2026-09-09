@@ -84,11 +84,23 @@ const RUN_STATUS_LABELS: Record<
   string
 > = { running: "Running", done: "Done", failed: "Failed", cancelled: "Cancelled" };
 
+function gateLabel(identifier: string): string {
+  const words = identifier.replace(/[_-]+/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function readableReasons(reasons: string[]): string {
+  return reasons.map((reason) => reason.replace(
+    /criteria_confirmed|tests_green|wiki-close/g,
+    gateLabel,
+  )).join(", ");
+}
+
 function consequenceText(verb: BoardVerb, ticket: Ticket): string {
   const entry = allowedActionFor(ticket, verb);
   const reasons = entry?.reasons ?? [];
   const base =
-    reasons.length > 0 ? reasons.join(", ") : "none recorded by the harness";
+    reasons.length > 0 ? readableReasons(reasons) : "none recorded by the harness";
   return verb === "rework" ? `${base}; ${REWORK_CLEANUP_NOTE}` : base;
 }
 
@@ -116,7 +128,7 @@ function fallbackEnabled(status: string | null, verb: BoardVerb): boolean {
 /**
  * Verb enablement from the harness authority (design.md section 3.2): the
  * allowedActions entry decides, and a disabled verb's reason is the harness
- * reason list verbatim. A verb the harness did not offer from the current
+ * reason list with readable gate labels. A verb the harness did not offer from the current
  * status (no spine successor entry) is disabled with that named instead.
  */
 function verbAuthority(ticket: Ticket | null, verb: BoardVerb): VerbAuthority {
@@ -135,7 +147,7 @@ function verbAuthority(ticket: Ticket | null, verb: BoardVerb): VerbAuthority {
   }
   if (entry.allowed) return { allowed: true, reason: null };
   const reasons =
-    entry.reasons.length > 0 ? entry.reasons.join(", ") : "harness refused";
+    entry.reasons.length > 0 ? readableReasons(entry.reasons) : "harness refused";
   return { allowed: false, reason: `${label} needs ${reasons}` };
 }
 
@@ -467,19 +479,15 @@ export function TicketSheet({
                       >
                         <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
                           <GateDot passed={gate.passed} />
-                          <span className="text-foreground">{gate.gate}</span>
+                          <span className="text-foreground">{gateLabel(gate.gate)}</span>
                           <span>{gate.passed ? "pass" : "fail"}</span>
-                          <span aria-hidden>&middot;</span>
-                          <span>
-                            {gate.source}/{gate.provider}
-                          </span>
-                          {gate.created_at ? (
-                            <>
-                              <span aria-hidden>&middot;</span>
-                              <span>{gate.created_at}</span>
-                            </>
-                          ) : null}
                         </div>
+                        <p className="mt-1 break-words text-[12px] text-muted-foreground">
+                          {gate.gate} · Source: {gate.source}/{gate.provider}
+                          {gate.created_at ? (
+                            <span> · {gate.created_at}</span>
+                          ) : null}
+                        </p>
                         {gate.note ? (
                           <p className="mt-0.5 text-[14px] text-foreground">
                             {gate.note}
@@ -493,7 +501,7 @@ export function TicketSheet({
                   data-uat="ticket-wiki-close"
                   className="mt-2 flex items-center gap-1.5 text-[12px]"
                 >
-                  <span className="text-foreground">wiki-close</span>
+                  <span className="text-foreground">Wiki close</span>
                   {wikiGate ? (
                     <span
                       className={cn(

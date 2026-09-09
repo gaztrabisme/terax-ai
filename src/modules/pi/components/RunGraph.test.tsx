@@ -6,9 +6,9 @@ import type { ReactNode } from "react";
 import { RunGraph } from "@/modules/pi/components/RunGraph";
 import { usePiStore } from "@/modules/pi/lib/piStore";
 import { loadChildTranscript, useChildStore } from "@/modules/pi/lib/childStore";
-import { ledgerPath, resetLedgerStore } from "@/modules/pi/lib/ledgerStore";
+import { ledgerPath, resetLedgerStore, useLedgerStore } from "@/modules/pi/lib/ledgerStore";
 import { initialPiSessionState } from "@/modules/pi/lib/parse";
-import { actionRecord, jsonLines, sourceRecord } from "@/modules/pi/lib/__fixtures__/ledger";
+import { actionRecord, jsonLines, sourceRecord, ledgerSnapshot } from "@/modules/pi/lib/__fixtures__/ledger";
 import { watchTranscripts } from "@/modules/pi/lib/rpc-client";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -16,7 +16,7 @@ vi.mock("@/modules/workspace", () => ({ currentWorkspaceEnv: () => ({ kind: "loc
 vi.mock("@/modules/pi/lib/rpc-client", () => ({ watchTranscripts: vi.fn(), openPiSession: vi.fn() }));
 vi.mock("@xyflow/react", () => ({
   ReactFlow: ({ nodes, children }: { nodes: { id: string; data: { label: ReactNode } }[]; children: ReactNode }) => <div>{nodes.map((node) => <div key={node.id}>{node.data.label}</div>)}{children}</div>,
-  Background: () => null,
+  Background: () => <div data-testid="graph-background" />,
 }));
 
 const file = actionRecord().evidencePath!;
@@ -73,6 +73,9 @@ describe("run graph reconstruction", () => {
     expect(orchestrator).not.toBeNull();
     expect(orchestrator?.textContent).toContain("Orchestrator");
     expect(orchestrator?.textContent).toContain("idle");
+    expect(screen.getByText("No child runs yet")).toBeTruthy();
+    expect(screen.getByText("Nodes appear when the orchestrator delegates work.")).toBeTruthy();
+    expect(screen.queryByTestId("graph-background")).toBeNull();
   });
 
   it("renders the orchestrator with its role and model, diagnostics compactly below the canvas", async () => {
@@ -144,4 +147,16 @@ describe("run graph reconstruction", () => {
     await act(() => loadChildTranscript(file));
     expect(useChildStore.getState().children[file].blocks).toHaveLength(2);
   });
+});
+
+it.each(["delegation", "tool"] as const)("switches from summary to canvas for a recorded %s", async (kind) => {
+  files.set(ledgerPath("/project", "session-1"), "");
+  render(<RunGraph tabId={1} onOpenChild={() => {}} />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+  expect(screen.getByText("No child runs yet")).toBeTruthy();
+  act(() => useLedgerStore.setState({ sessions: {
+    [ledgerPath("/project", "session-1")]: ledgerSnapshot([actionRecord({ kind })]),
+  } }));
+  await waitFor(() => expect(screen.getByTestId("graph-background")).toBeTruthy());
+  expect(screen.queryByText("No child runs yet")).toBeNull();
 });

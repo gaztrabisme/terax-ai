@@ -589,6 +589,19 @@ export function Composer({
     }
   };
 
+  const restorePickerFocus = async () => {
+    // Return native window focus as well as editor focus after dismissal.
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().setFocus();
+    } catch {
+      // Browser fallback has no native window.
+    }
+    if (editor && !editor.isDestroyed && editor.view.dom.isConnected) {
+      editor.view.dom.focus({ preventScroll: true });
+    }
+  };
+
   const pickRelink = async (id: number) => {
     try {
       const picked = await open({ multiple: false, filters: [{ name: "Images", extensions: [...IMAGE_EXTENSIONS] }] });
@@ -601,27 +614,31 @@ export function Composer({
       relinkInputRef.current?.click();
       setNotice(`Relink file picker: ${String(error)}. Choose an image file.`);
     } finally {
-      editor?.commands.focus();
+      await restorePickerFocus();
     }
   };
 
   // Attach button: the Tauri file dialog (image filter, multiple) plus the
   // bytes bridge. The hidden input stays as the fallback when the dialog is
-  // unavailable; a cancelled dialog does nothing.
+  // unavailable; every return path restores the composer focus.
   const pickImages = async () => {
-    let picked: string | string[] | null;
     try {
-      picked = await open({
-        multiple: true,
-        filters: [{ name: "Images", extensions: [...IMAGE_EXTENSIONS] }],
-      });
-    } catch {
-      fileInputRef.current?.click();
-      return;
+      let picked: string | string[] | null;
+      try {
+        picked = await open({
+          multiple: true,
+          filters: [{ name: "Images", extensions: [...IMAGE_EXTENSIONS] }],
+        });
+      } catch {
+        fileInputRef.current?.click();
+        return;
+      }
+      if (picked == null) return;
+      const paths = Array.isArray(picked) ? picked : [picked];
+      if (paths.length > 0) await addImagePaths(paths);
+    } finally {
+      await restorePickerFocus();
     }
-    if (picked == null) return;
-    const paths = Array.isArray(picked) ? picked : [picked];
-    if (paths.length > 0) await addImagePaths(paths);
   };
 
   // The window keeps dragDropEnabled (the terminal pane's handler depends on

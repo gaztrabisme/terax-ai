@@ -107,6 +107,7 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
       ),
     [parent, scopedChildren, ledger, cwd, entry?.roles.model],
   );
+  const hasTopology = graph.nodes.some((node) => node.role === "child") || Object.keys(ledger.actions).length > 0;
   const [positions, setPositions] = useState<
     Record<string, { x: number; y: number }>
   >({});
@@ -131,6 +132,12 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
   };
 
   useEffect(() => {
+    if (!hasTopology) {
+      rfRef.current = null;
+      fittedFor.current = null;
+      setLayoutError(null);
+      return;
+    }
     let alive = true;
     void layout(graph.nodes, graph.edges)
       .then((pos) => {
@@ -148,7 +155,7 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph]);
+  }, [graph, hasTopology]);
 
   // Zero-based position of each child node within the child collection; the
   // orchestrator ("parent") is the singleton graph-node-orchestrator target.
@@ -227,7 +234,16 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
   return (
     <div className="flex h-full w-full flex-col">
       <div className="min-h-0 flex-1" aria-label={errors.length ? "Stale run graph" : "Run graph"}>
-      <SuspenseWithFallback>
+      {!hasTopology ? (
+        <div className="m-2 max-w-md rounded-md border border-border/60 bg-card p-3" role="status">
+          <div data-uat="graph-node-orchestrator" data-uat-key="parent">
+            <div className="text-xs font-medium">{graph.nodes[0].label}</div>
+            <div className="mt-1 text-xs text-muted-foreground">{formatNodeStatus(graph.nodes[0])}</div>
+          </div>
+          <p className="mt-3 text-sm font-medium">No child runs yet</p>
+          <p className="mt-1 text-xs text-muted-foreground">Nodes appear when the orchestrator delegates work.</p>
+        </div>
+      ) : <SuspenseWithFallback>
         <ReactFlow
           nodes={flowNodes}
           edges={flowEdges}
@@ -251,7 +267,7 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
         >
           <Background />
         </ReactFlow>
-      </SuspenseWithFallback>
+      </SuspenseWithFallback>}
       </div>
       {diagnostics.length > 0 ? (
         <div

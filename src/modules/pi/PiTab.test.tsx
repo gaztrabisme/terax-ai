@@ -328,7 +328,7 @@ describe("PiTab mode strip", () => {
       within(strip)
         .getAllByRole("button")
         .map((b) => b.getAttribute("aria-label")),
-    ).toEqual(["Board", "Graph", "Sessions"]);
+    ).toEqual(["Board", "Graph", "Sessions", "Artifact"]);
     expect(
       within(strip)
         .getAllByRole("button")
@@ -372,7 +372,7 @@ describe("PiTab mode strip", () => {
     mount();
     const id = name.toLowerCase();
     if (name === "Artifact") {
-      await waitFor(() => expect(uat("artifact-button")).toBeTruthy());
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("pi_write_artifact", expect.anything()));
     }
     click(name);
     click(`Full screen ${name}`);
@@ -558,7 +558,7 @@ describe("PiTab mode strip", () => {
     );
     expect(screen.getByLabelText("1 running children")).toBeTruthy();
     setSession(1, { blocks: [message("```html\n<p>new artifact</p>\n```")] });
-    await waitFor(() => expect(uat("artifact-button")).toBeTruthy());
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("pi_write_artifact", expect.anything()));
     expect(document.querySelectorAll("section[data-mode]")).toHaveLength(0);
     const polls = invokeMock.mock.calls.filter(
       ([cmd]) => cmd === "shell_run_command",
@@ -687,7 +687,7 @@ describe("dimensions and tab lifetime", () => {
     setSession(1, { blocks: [message("```html\n<p>artifact</p>\n```")] });
     mount();
     if (name === "Artifact") {
-      await waitFor(() => expect(uat("artifact-button")).toBeTruthy());
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("pi_write_artifact", expect.anything()));
     }
     resize(599);
     click(name);
@@ -733,7 +733,7 @@ describe("focused-control priority and active-tab shortcuts", () => {
     expect(uat("board-panel")).toBeTruthy();
     shortcut("g", true);
     expect(uat("graph-panel")).toBeTruthy();
-    await waitFor(() => expect(uat("artifact-button")).toBeTruthy());
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("pi_write_artifact", expect.anything()));
     shortcut("a", true);
     expect(uat("artifact-panel")).toBeTruthy();
     shortcut("j");
@@ -748,9 +748,11 @@ describe("focused-control priority and active-tab shortcuts", () => {
     expect(hidden.querySelector("section[data-mode]")).toBeNull();
   });
 
-  it("does not consume Artifact when unavailable or shell Tab, Enter, Escape and view shortcuts", () => {
+  it("opens the Artifact empty state on its shortcut and never consumes shell Tab, Enter, Escape", () => {
     mount();
-    expect(shortcut("a", true)).toBe(true);
+    // The Artifact entry is always present (empty state until a file exists).
+    expect(shortcut("a", true)).toBe(false);
+    expect(uat("artifact-panel")).toBeTruthy();
     click("Board");
     const terminal = document.createElement("textarea");
     terminal.dataset.uat = "terminal-composer";

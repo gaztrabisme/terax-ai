@@ -123,10 +123,14 @@ function boardData(overrides: Partial<{
 }
 
 beforeEach(() => {
+  vi.stubGlobal("ResizeObserver", class {
+    observe() {}
+    disconnect() {}
+  });
   invokeMock.mockReset();
 });
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("BoardView loud refresh failures", () => {
   it("keeps the previous snapshot marked stale under a named board-error line", () => {

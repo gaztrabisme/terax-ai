@@ -337,15 +337,11 @@ export function PiTab({
       "pi.sessions": () => {
         transition({ type: "open", view: "sessions", narrow });
       },
-      "pi.toggleArtifact": () => {
-        if (selectedArtifact) toggle("artifact");
-      },
+      "pi.toggleArtifact": () => toggle("artifact"),
     },
     {
       enabled: active,
-      isDisabled: (id, event) =>
-        isTerminalTarget(event.target) ||
-        (id === "pi.toggleArtifact" && !selectedArtifact),
+      isDisabled: (_id, event) => isTerminalTarget(event.target),
     },
   );
 
@@ -398,13 +394,15 @@ export function PiTab({
   // K13 file-first: detection alone opens nothing. Each detected document
   // is written through pi_write_artifact (idempotent on an unchanged hash),
   // and only a completed file under .pi/artifacts unlocks the viewer
-  // controls and the strip button.
+  // controls. The strip remains available before a file exists.
+  const [artifactPreparing, setArtifactPreparing] = useState(false);
   const [artifactFiles, setArtifactFiles] = useState<
     Record<string, ArtifactFileRef>
   >({});
   const artifactFilesRef = useRef<Record<string, ArtifactFileRef>>({});
   const writtenHashesRef = useRef<Record<string, string>>({});
   useEffect(() => {
+    setArtifactPreparing(false);
     if (!cwd) return;
     let alive = true;
     void (async () => {
@@ -412,12 +410,14 @@ export function PiTab({
         if (!alive) return;
         const key = artifactFileKey(doc.turnKey ?? "", doc.n ?? 0);
         const hash = await sha256Hex(doc.source);
-        if (!alive || writtenHashesRef.current[key] === hash) return;
+        if (!alive) return;
+        if (writtenHashesRef.current[key] === hash) continue;
         if (artifactFilesRef.current[key]?.sha256 === hash) {
           writtenHashesRef.current[key] = hash;
           continue;
         }
         try {
+          setArtifactPreparing(true);
           const res = await invoke<{
             path: string;
             sha256: string;
@@ -446,14 +446,16 @@ export function PiTab({
           // No file, no control: a later transcript change retries the write.
         }
       }
-    })();
+    })().catch(() => {}).finally(() => {
+      if (alive) setArtifactPreparing(false);
+    });
     return () => {
       alive = false;
     };
   }, [cwd, artifacts]);
 
   // The viewer's authoritative input is an existing file: only file-backed
-  // documents reach the pane, the strip button and the open events.
+  // documents reach the viewer and the open events.
   const fileArtifacts: ArtifactDoc[] = useMemo(
     () =>
       (artifacts
@@ -499,16 +501,6 @@ export function PiTab({
     return () => window.removeEventListener("pi:open-artifact", handler);
   }, [active, fileArtifacts, narrow, viewState]);
 
-  useEffect(() => {
-    if (
-      !selectedArtifact &&
-      (viewState.view === "artifact" ||
-        viewState.narrowRestoreView === "artifact")
-    ) {
-      dispatch({ type: "close" });
-      if (active) buttons.current.sessions?.focus();
-    }
-  }, [active, selectedArtifact, viewState]);
 
   useEffect(() => {
     let changed = false;
@@ -670,7 +662,7 @@ export function PiTab({
               <RunGraph tabId={tabId} onOpenChild={onOpenChild} />
             )}
             {view === "artifact" && (
-              <ArtifactPane doc={selectedArtifact} cwd={cwd} />
+              <ArtifactPane doc={selectedArtifact} cwd={cwd} preparing={artifactPreparing} />
             )}
             {view === "sessions" && (
               <SessionSearch
