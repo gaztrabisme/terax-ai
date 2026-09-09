@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { SearchAddon } from "@xterm/addon-search";
+import type { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { BlockStore } from "./blocks";
 import { parseJournalRecord, storageError, type JournalRecord, type StorageError } from "@/modules/terminal/lib/journal";
@@ -34,7 +35,7 @@ type Callbacks = {
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
-  /** The per-session block store, replaced on every slot bind, nulled on unbind. */
+  /** Null signals an unbound renderer; the session still retains its blocks. */
   onBlockStore?: (store: BlockStore | null) => void;
   onJournalError?: (error: StorageError | null) => void;
   onTerminalIdentity?: (identity: { terminalId: string; project: string }) => void;
@@ -47,6 +48,7 @@ type Session = {
   journalRecords: Map<string, JournalRecord>;
   journalStarts: JournalRecord[];
   journalError: StorageError | null;
+  shellState: ReturnType<typeof createShellIntegrationState>;
   initialCwd: string | undefined;
   lastCwd: string | null;
   pendingExit: number | null;
@@ -67,7 +69,7 @@ type Session = {
   // at the most recent release. Read once on the next bind to trigger a
   // SIGWINCH-driven repaint instead of replaying dormant bytes.
   altScreenAtRelease: boolean;
-  /** Command blocks for the bound slot; null while the leaf is dormant. */
+  /** Command metadata survives dormancy; only buffer markers are rebound. */
   blockStore: BlockStore | null;
 };
 
@@ -184,6 +186,7 @@ function ensureSession(leafId: number, initialCwd?: string): Session {
     journalRecords: new Map(),
     journalStarts: [],
     journalError: null,
+    shellState: createShellIntegrationState(),
     initialCwd,
     lastCwd: null,
     pendingExit: null,
@@ -201,7 +204,9 @@ function ensureSession(leafId: number, initialCwd?: string): Session {
     dormantRing: new DormantRing(),
     hasSlot: false,
     altScreenAtRelease: false,
-    blockStore: null,
+    blockStore: new BlockStore({
+      createMarker: () => getSlotForLeaf(leafId)?.term.registerMarker(0) ?? null,
+    }),
   };
   sessions.set(leafId, session);
 
@@ -290,12 +295,22 @@ function bindLeafToSlot(leafId: number, s: Session): void {
   if (!s.container) return;
   const altScreen = s.altScreenAtRelease;
   let acceptBlocks = false;
-  s.journalStarts = [];
+  const restoreMarkers = (term: Terminal) => {
+    if (term.buffer.active.type !== "normal") return;
+    const cursor = term.buffer.normal.baseY + term.buffer.normal.cursorY;
+    s.blockStore?.restoreMarkers((line) => term.registerMarker(line - cursor) ?? null);
+  };
   s.altScreenAtRelease = false;
   acquireSlot({
     leafId,
     container: s.container,
     snapshot: s.snapshot,
+    onSnapshotRestored: (term) => {
+      if (s.disposed || getSlotForLeaf(leafId)?.term !== term) return;
+      restoreMarkers(term);
+      acceptBlocks = true;
+      bindCommittedRecords(s);
+    },
     altScreen,
     drainRing: (write) => s.dormantRing.drain(write),
     shellExited: s.shellExited,
@@ -303,28 +318,11 @@ function bindLeafToSlot(leafId: number, s: Session): void {
     cols: s.cols,
     rows: s.rows,
     registerOsc: (term) => {
-      // Shared in-command flag — see osc-handlers.ts. The prompt tracker
-      // flips it on OSC 133 B/C/D/A; the cwd handler reads it to ignore OSC
-      // 7 emitted by untrusted command output (remote SSH, `cat` of an
-      // attacker file, etc.).
-      const shellState = createShellIntegrationState();
-      // Block store fed by the prompt tracker's A/C/D events; its lifetime
-      // matches this bind, so it rides the oscDisposers (marker disposal on
-      // pane eviction, decorations via the store's listeners).
-      s.blockStore?.dispose();
-      const blocks = new BlockStore({
-        createMarker: () => {
-          try {
-            return term.registerMarker(0) ?? null;
-          } catch {
-            return null;
-          }
-        },
-      });
-      s.blockStore = blocks;
+      const shellState = s.shellState;
+      const blocks = s.blockStore!;
       s.callbacks.onBlockStore?.(blocks);
       let tracker: PromptTracker | null = null;
-      let currentBlock: ReturnType<BlockStore["getBlocks"]>[number] | null = null;
+      let currentBlock: ReturnType<BlockStore["getBlocks"]>[number] | null = blocks.getBlocks()[blocks.getBlocks().length - 1] ?? null;
       const attachRecord = (block: ReturnType<BlockStore["getBlocks"]>[number]) => {
         const index = s.journalStarts.findIndex((r) => (r.command || null) === block.command);
         if (index < 0 || !s.project) return;
@@ -366,17 +364,17 @@ function bindLeafToSlot(leafId: number, s: Session): void {
         },
         shellState,
       );
+      const bufferChange = term.buffer.onBufferChange(() => {
+        if (acceptBlocks) restoreMarkers(term);
+      });
       return [
         prompt.dispose,
         cwd,
-        () => {
-          blocks.dispose();
-        },
+        () => bufferChange.dispose(),
       ];
     },
     onSearchReady: (addon) => s.callbacks.onSearchReady?.(addon),
   });
-  getSlotForLeaf(leafId)?.term.write("", () => { acceptBlocks = true; });
   s.snapshot = null;
   s.hasSlot = true;
   if (s.lastCwd !== null) s.callbacks.onCwd?.(s.lastCwd);
@@ -389,7 +387,7 @@ function bindLeafToSlot(leafId: number, s: Session): void {
 
 function unbindLeafFromSlot(leafId: number, s: Session): void {
   if (!s.hasSlot) return;
-  const out = releaseSlot(leafId);
+  const out = releaseSlot(leafId, (firstLine) => s.blockStore?.detachMarkers(firstLine));
   if (out) {
     s.snapshot = out.snapshot;
     if (out.cols > 0) s.cols = out.cols;
@@ -397,7 +395,6 @@ function unbindLeafFromSlot(leafId: number, s: Session): void {
     s.altScreenAtRelease = out.altScreen;
   }
   s.hasSlot = false;
-  s.blockStore = null;
   s.callbacks.onBlockStore?.(null);
 }
 
@@ -464,6 +461,7 @@ export async function respawnSession(
   s.shellExited = false;
   s.pendingExit = null;
   s.altScreenAtRelease = false;
+  s.shellState.inCommand = false;
 
   const slot = getSlotForLeaf(leafId);
   if (slot) {
@@ -529,6 +527,7 @@ export function disposeSession(leafId: number): void {
   if (!s) return;
   s.disposed = true;
   unbindLeafFromSlot(leafId, s);
+  s.blockStore?.dispose();
   s.snapshot = null;
   s.pty?.close();
   s.pty = null;

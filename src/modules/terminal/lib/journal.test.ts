@@ -7,6 +7,7 @@ import {
   readBlockOutput,
   terminalHistory,
   terminalList,
+  terminalHistoryEntries,
   type JournalRecord,
 } from "@/modules/terminal/lib/journal";
 
@@ -139,6 +140,43 @@ describe("terminal journal parsing", () => {
 });
 
 describe("file backed terminal commands", () => {
+  it("merges the active terminal journal that the native list excludes, with a command summary and real stream size", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "pty_terminal_list") return [];
+      if (command === "pty_terminal_history") return [start, finish];
+      if (command === "fs_stat") return { size: 91, mtime: Date.parse(finish.endedAt!), kind: "file" };
+      throw new Error(`Unexpected command ${command}`);
+    });
+    expect(await terminalHistoryEntries("/project", start.terminalId)).toEqual([{
+      terminalId: start.terminalId,
+      cwd: "/project",
+      time: finish.endedAt,
+      streamBytes: 91,
+      lastCommand: finish.command,
+    }]);
+    expect(invoke).toHaveBeenCalledWith("pty_terminal_history", {
+      project: "/project", terminalId: start.terminalId, workspace: { kind: "local" },
+    });
+  });
+
+  it("uses the last command of listed journals and does not duplicate the active id", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "pty_terminal_list") return [{ terminalId: start.terminalId, cwd: "/project", time: finish.endedAt, streamBytes: 90 }];
+      if (command === "pty_terminal_history") return [start, finish];
+      throw new Error(`Unexpected command ${command}`);
+    });
+    const entries = await terminalHistoryEntries("/project", start.terminalId);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].lastCommand).toBe("echo hello");
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves an active terminal with no journaled commands out of the empty history", async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+    expect(await terminalHistoryEntries("/project", start.terminalId)).toEqual([]);
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
   it("reads both history commands with explicit project and opaque terminal identity", async () => {
     vi.mocked(invoke)
       .mockResolvedValueOnce([start, finish])

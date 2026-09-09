@@ -16,6 +16,7 @@ import {
   readBlockOutput,
   terminalList,
   terminalHistory,
+  terminalHistoryEntries,
   exportBlock,
   readTerminalStream,
   type JournalRecord,
@@ -57,6 +58,7 @@ vi.mock("@/modules/terminal/lib/journal", async (original) => ({
   readBlockOutput: vi.fn(),
   terminalList: vi.fn(),
   terminalHistory: vi.fn(),
+  terminalHistoryEntries: vi.fn(),
   readTerminalStream: vi.fn(),
   exportBlock: vi.fn(),
 }));
@@ -90,6 +92,13 @@ beforeEach(() => {
     },
   ]);
   vi.mocked(terminalHistory).mockResolvedValue([record]);
+  vi.mocked(terminalHistoryEntries).mockResolvedValue([{
+    terminalId: record.terminalId,
+    cwd: "/project/last",
+    time: record.endedAt!,
+    streamBytes: 12,
+    lastCommand: record.command,
+  }]);
   vi.mocked(terminalHistoryCanReplace).mockResolvedValue(true);
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
@@ -126,11 +135,11 @@ describe("recovered block chrome", () => {
         .querySelector('[data-uat="terminal-block"]')
         ?.getAttribute("data-uat-key"),
     ).toBe("saved-block");
-    expect(
-      container
-        .querySelector(".terax-block-recovered")
-        ?.getAttribute("tabindex"),
-    ).toBe("0");
+    const menu = screen.getByRole("button", { name: "Block actions" });
+    expect(menu.tabIndex).toBe(0);
+    expect(menu.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(menu);
+    expect(menu.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("makes interrupted status visible and refuses rerun without inventing exit zero", async () => {
@@ -154,6 +163,7 @@ describe("recovered block chrome", () => {
       hidden: true,
     }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
+    expect(button.title).toBe("Command did not finish");
     fireEvent.click(button);
     expect(writeToSession).not.toHaveBeenCalled();
     expect(
@@ -233,6 +243,24 @@ describe("recovered block chrome", () => {
 });
 
 describe("terminal history tab control", () => {
+  it("includes the active terminal with its last command and copyable identity", async () => {
+    render(<TerminalHistory project="/project" terminalId={record.terminalId} leafId={4} onError={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "List terminal history" }));
+    const row = await screen.findByRole("button", { name: "Reopen terminal history" });
+    expect(terminalHistoryEntries).toHaveBeenCalledWith("/project", record.terminalId);
+    expect(row.textContent?.startsWith(record.command)).toBe(true);
+    expect(row.textContent).not.toContain("/project");
+    expect(row.textContent).not.toContain(record.endedAt);
+    expect(row.title).toBe(`/project/.pi/terminal/${record.terminalId}/blocks.jsonl\nTerminal id: ${record.terminalId}`);
+    expect(screen.queryByText("No terminal history yet.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Copy id" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(record.terminalId);
+    expect(respawnSession).not.toHaveBeenCalled();
+    fireEvent.click(row);
+    await screen.findByRole("region", { name: "Recovered terminal history" });
+    expect(respawnSession).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(respawnSession).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(terminalHistory).mock.invocationCallOrder[0]);
+  });
   it("lists opaque terminal ids and opens finished blocks above a fresh shell", async () => {
     render(
       <TerminalHistory

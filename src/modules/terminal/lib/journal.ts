@@ -53,6 +53,7 @@ export type TerminalInfo = {
   time: string;
   streamBytes: number;
 };
+export type TerminalHistoryEntry = TerminalInfo & { lastCommand: string };
 export type StorageError = { path: string; message: string };
 export type JournalEvent =
   | { kind: "record"; record: JournalRecord }
@@ -166,6 +167,41 @@ export async function terminalList(project: string): Promise<TerminalInfo[]> {
   } catch (error) {
     throw storageError(error, `${project}/.pi/terminal`);
   }
+}
+
+export async function terminalHistoryEntries(
+  project: string,
+  activeTerminalId?: string,
+): Promise<TerminalHistoryEntry[]> {
+  const terminals = await terminalList(project);
+  const entries = await Promise.all(terminals.map(async (info) => {
+    const records = await terminalHistory(project, info.terminalId);
+    return { ...info, lastCommand: records[records.length - 1]?.command ?? "" };
+  }));
+  // The native list excludes live PTYs, but their committed journal is readable.
+  if (activeTerminalId && !terminals.some((info) => info.terminalId === activeTerminalId)) {
+    id.parse(activeTerminalId);
+    const records = await terminalHistory(project, activeTerminalId);
+    const last = records[records.length - 1];
+    if (last) {
+      const path = `${project}/.pi/terminal/${activeTerminalId}/stream.ansi`;
+      try {
+        const stat = z.object({ size: integer, mtime: integer }).parse(
+          await invoke("fs_stat", { path, workspace: currentWorkspaceEnv() }),
+        );
+        entries.push({
+          terminalId: activeTerminalId,
+          cwd: last.cwd,
+          time: new Date(stat.mtime).toISOString(),
+          streamBytes: stat.size,
+          lastCommand: last.command,
+        });
+      } catch (error) {
+        throw storageError(error, path);
+      }
+    }
+  }
+  return entries.sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
 }
 
 export async function readBlockOutput(

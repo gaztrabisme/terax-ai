@@ -9,6 +9,7 @@ import {
   type PiSessionSummary,
 } from "../lib/sessions";
 import { usePiStore } from "../lib/piStore";
+import { formatHistoryTime } from "@/modules/terminal/lib/historyTime";
 
 const SEARCH_LIMIT = 20;
 const DEBOUNCE_MS = 200;
@@ -17,10 +18,7 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** "2026-06-08T15:07:02.400Z" as "2026-06-08 15:07": stable, no locale. */
-export function sessionLabel(startedAt: string): string {
-  return startedAt.slice(0, 16).replace("T", " ");
-}
+export const sessionLabel = formatHistoryTime;
 
 /** The searchable core of a snippet: cut edges and runs of dots off, all
  *  whitespace folded, capped. The transcript renders the same text, so this
@@ -67,9 +65,9 @@ export function scrollToSnippet(snippet: string, tabId: number): boolean {
   return true;
 }
 
-/** basename of a session file path, for compact group headers. */
-function pathLabel(path: string): string {
-  return path.split(/[\\/]/).pop() ?? path;
+export function sessionIdFromPath(path: string): string {
+  const name = (path.split(/[\\/]/).pop() ?? path).replace(/\.jsonl$/, "");
+  return name.replace(/^\d{4}-\d{2}-\d{2}T[^_]+_/, "");
 }
 
 /**
@@ -136,10 +134,13 @@ export function SessionSearch({
                 setHits(null);
               }
             })
-          : piSessionsSearch(cwd, agentDir, trimmed, SEARCH_LIMIT).then((r) => {
+          : Promise.all([
+              piSessionsSearch(cwd, agentDir, trimmed, SEARCH_LIMIT),
+              sessions ?? piSessionsList(cwd, agentDir),
+            ]).then(([r, summaries]) => {
               if (alive) {
                 setHits(r);
-                setSessions(null);
+                setSessions(summaries);
               }
             });
       load.catch((e: unknown) => {
@@ -180,6 +181,12 @@ export function SessionSearch({
       startedAt: summary.startedAt,
       role: "user",
       snippet: summary.firstPrompt,
+    });
+  };
+
+  const copyId = (path: string) => {
+    void navigator.clipboard.writeText(sessionIdFromPath(path)).catch((e: unknown) => {
+      if (mounted.current) setError(`Copy id failed: ${errorMessage(e)}`);
     });
   };
 
@@ -229,52 +236,31 @@ export function SessionSearch({
         className="min-h-0 flex-1 overflow-y-auto text-xs"
       >
         {hits !== null
-          ? groupHits(hits).map(([path, group]) => (
-              <div key={path} className="mb-2">
-                <div className="sticky top-0 bg-card px-1 py-0.5 text-muted-foreground">
-                  {sessionLabel(group[0].startedAt)} {pathLabel(path)}
-                </div>
-                {group.map((hit, i) => (
-                  <button
-                    key={`${path}-${i}`}
-                    type="button"
-                    data-uat="session-row"
-                    data-uat-key={`${path}-${i}`}
-                    data-uat-index={sessionRowIndex++}
-                    onClick={() => openHit(hit)}
-                    className="block w-full rounded-md px-1 py-0.5 text-left hover:bg-accent hover:text-foreground"
-                  >
-                    <span className="me-1.5 rounded border border-border/60 px-1 text-[10px] text-muted-foreground">
-                      {hit.role}
-                    </span>
-                    <span className="text-foreground">{hit.snippet}</span>
-                  </button>
-                ))}
-              </div>
-            ))
+          ? groupHits(hits).flatMap(([path, group]) => group.map((hit, i) => (
+              <SessionRow
+                key={`${path}-${i}`}
+                summary={sessions?.find((summary) => summary.path === path)}
+                hit={hit}
+                index={sessionRowIndex++}
+                rowKey={`${path}-${i}`}
+                onOpen={() => openHit(hit)}
+                onCopy={() => copyId(path)}
+              />
+            )))
           : null}
         {hits !== null && hits.length === 0 && query.trim() !== "" ? (
           <p className="px-1 text-muted-foreground">No matches.</p>
         ) : null}
-        {sessions !== null
+        {hits === null && sessions !== null
           ? sessions.map((session) => (
-              <button
+              <SessionRow
                 key={session.path}
-                type="button"
-                data-uat="session-row"
-                data-uat-key={session.path}
-                data-uat-index={sessionRowIndex++}
-                onClick={() => openSummary(session)}
-                className="block w-full rounded-md px-1 py-1 text-left hover:bg-accent hover:text-foreground"
-              >
-                <span className="block truncate text-foreground">
-                  {session.firstPrompt || "(no prompt)"}
-                </span>
-                <span className="block text-muted-foreground">
-                  {sessionLabel(session.startedAt)} - {session.turns} turns -{" "}
-                  {session.tokens.toLocaleString()} tok
-                </span>
-              </button>
+                summary={session}
+                index={sessionRowIndex++}
+                rowKey={session.path}
+                onOpen={() => openSummary(session)}
+                onCopy={() => copyId(session.path)}
+              />
             ))
           : null}
         {sessions !== null && sessions.length === 0 && query.trim() === "" ? (
@@ -284,6 +270,49 @@ export function SessionSearch({
           <p className="px-1 text-muted-foreground">Loading...</p>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function SessionRow({ summary, hit, index, rowKey, onOpen, onCopy }: {
+  summary?: PiSessionSummary;
+  hit?: PiSessionHit;
+  index: number;
+  rowKey: string;
+  onOpen: () => void;
+  onCopy: () => void;
+}) {
+  const path = summary?.path ?? hit!.path;
+  const startedAt = summary?.startedAt ?? hit!.startedAt;
+  const id = sessionIdFromPath(path);
+  const title = `${path}\nSession id: ${id}`;
+  const prompt = (summary?.firstPrompt || hit?.snippet || "(no prompt)").replace(/\s+/g, " ").trim();
+  return (
+    <div className="flex items-start gap-2" title={title}>
+      <button
+        type="button"
+        data-uat="session-row"
+        data-uat-key={rowKey}
+        data-uat-index={index}
+        title={title}
+        aria-description={`Session id: ${id}. File: ${path}`}
+        onClick={onOpen}
+        className="block min-w-0 flex-1 rounded-md px-1 py-1 text-left hover:bg-accent hover:text-foreground"
+      >
+        <span className="block truncate text-foreground">{prompt}</span>
+        <span className="block text-muted-foreground">
+          <time dateTime={startedAt}>{sessionLabel(startedAt)}</time>
+          {" - "}{summary ? `${summary.turns} ${summary.turns === 1 ? "turn" : "turns"}` : "Turn count unavailable"}
+        </span>
+        {hit && <span className="block truncate text-foreground">
+          <span className="me-1.5 rounded border border-border/60 px-1 text-[10px] text-muted-foreground">{hit.role}</span>
+          {hit.snippet !== prompt ? hit.snippet : null}
+        </span>}
+      </button>
+      <button type="button" aria-label="Copy id" title={title} onClick={onCopy}
+        className="shrink-0 rounded px-1 py-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-ring">
+        Copy id
+      </button>
     </div>
   );
 }

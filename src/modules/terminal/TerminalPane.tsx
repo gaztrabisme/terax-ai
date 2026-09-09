@@ -52,6 +52,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
     // written from another window.
     const composerEnabled = usePreferencesStore((s) => s.terminalComposer);
     const [blockStore, setBlockStore] = useState<BlockStore | null>(null);
+    const [slotBound, setSlotBound] = useState(false);
+    const onBlockStore = useCallback((store: BlockStore | null) => {
+      if (store) setBlockStore(store);
+      setSlotBound(store !== null);
+    }, []);
     const [identity, setIdentity] = useState<{ terminalId: string; project: string } | null>(null);
     const [journalError, setJournalError] = useState<StorageError | null>(null);
     const [actionError, setActionError] = useState<StorageError | null>(null);
@@ -87,7 +92,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onSearchReady: (a) => onSearchReady?.(leafId, a),
       onExit: (c) => onExit?.(leafId, c),
       onCwd: (c) => onCwd?.(leafId, c),
-      onBlockStore: setBlockStore,
+      onBlockStore,
       onJournalError: setJournalError,
       onTerminalIdentity: setIdentity,
     });
@@ -127,22 +132,23 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
           </div>
         )}
         {project && <TerminalHistory project={project} terminalId={identity?.terminalId} leafId={leafId} onError={reportError} />}
-        {/* The pooled slot host is appended into this inner node. */}
-        <div
-          ref={containerRef}
-          data-uat="terminal-emulator"
-          data-uat-key={String(leafId)}
-          className="relative min-h-0 w-full flex-1"
-        />
+        <div className="relative min-h-0 w-full flex-1">
+          <BlockChrome leafId={leafId} store={blockStore} visible={visible && slotBound} onError={reportError} />
+          <div
+            ref={containerRef}
+            data-uat="terminal-emulator"
+            data-uat-key={String(leafId)}
+            className="absolute inset-0"
+          />
+        </div>
         {composerEnabled ? (
           <TerminalComposer
             leafId={leafId}
-            bound={blockStore !== null}
+            bound={slotBound}
             onWrite={(data) => writeToSession(leafId, data)}
             onFocusEmulator={session.focus}
           />
         ) : null}
-        <BlockChrome leafId={leafId} store={blockStore} onError={reportError} />
         <button
           type="button"
           data-uat="composer-toggle"

@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 import { initialPiSessionState } from "../lib/parse";
 import { usePiStore } from "../lib/piStore";
-import { SessionSearch, groupHits, snippetProbe } from "./SessionSearch";
+import { SessionSearch, groupHits, snippetProbe, sessionLabel, sessionIdFromPath } from "./SessionSearch";
 import type { PiSessionHit, PiSessionSummary } from "../lib/sessions";
 
 const CWD = "/tmp/proj";
@@ -54,6 +54,14 @@ function seedTab(tabId: number, sessionId: string | null) {
 }
 
 describe("helpers", () => {
+  it("formats local calendar days and time, including midnight and month boundaries", () => {
+    const now = new Date(2026, 8, 1, 0, 5);
+    expect(sessionLabel(new Date(2026, 8, 1, 0, 3).toISOString(), now)).toBe("today 00:03");
+    expect(sessionLabel(new Date(2026, 7, 31, 9, 12).toISOString(), now)).toBe("yesterday 09:12");
+    expect(sessionLabel(new Date(2026, 7, 30, 14, 3).toISOString(), now)).toBe("30 Aug 14:03");
+    expect(sessionLabel("unavailable", now)).toBe("Time unavailable");
+    expect(sessionIdFromPath("C:\\sessions\\2026-06-08T15-07-02-400Z_stable_id.jsonl")).toBe("stable_id");
+  });
   it("snippetProbe strips cut edges and folds whitespace", () => {
     expect(snippetProbe("...please find the grail diary...")).toBe(
       "please find the grail diary",
@@ -121,15 +129,56 @@ describe("SessionSearch", () => {
       await findByText("newest first prompt"),
     ).toBeTruthy();
     expect(queryByText("older prompt")).toBeTruthy();
-    expect(
-      queryByText("2026-06-08 15:07 - 2 turns - 413 tok"),
-    ).toBeTruthy();
+    expect(queryByText(sessionLabel("2026-06-08T15:07:02.400Z"))?.parentElement?.textContent)
+      .toBe(`${sessionLabel("2026-06-08T15:07:02.400Z")} - 2 turns`);
     // Only the two read commands run: no search with an empty query.
     const cmds = invokeMock.mock.calls.map((c) => c[0]);
     expect(cmds).toContain("pi_sessions_list");
     expect(cmds).not.toContain("pi_sessions_search");
     const listCall = invokeMock.mock.calls.find((c) => c[0] === "pi_sessions_list");
     expect(listCall?.[1]).toMatchObject({ cwd: CWD, agentDir: AGENT_DIR });
+  });
+
+  it("leads with one line of prompt and keeps the locator and stable id in the title and Copy id action", async () => {
+    const saved = summary({ firstPrompt: "Find the\n  useful report" });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "pi_paths") return { runtimeAgentDir: { path: AGENT_DIR } };
+      if (cmd === "pi_sessions_list") return [saved];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const { findByText, getByRole, container } = render(<SessionSearch tabId={7} cwd={CWD} />);
+    const prompt = await findByText("Find the useful report");
+    const row = container.querySelector<HTMLButtonElement>('[data-uat="session-row"]')!;
+    expect(row.firstElementChild).toBe(prompt);
+    expect(prompt.classList.contains("truncate")).toBe(true);
+    expect(row.title).toBe(`${saved.path}\nSession id: a`);
+    expect(row.textContent).not.toContain(saved.path);
+    expect(row.textContent).not.toContain(saved.startedAt);
+    expect(row.getAttribute("aria-description")).toContain(saved.path);
+    fireEvent.click(getByRole("button", { name: "Copy id" }));
+    expect(writeText).toHaveBeenCalledWith("a");
+    expect(invokeMock.mock.calls.some((call) => call[0] === "pi_sessions_search")).toBe(false);
+  });
+
+  it("uses summary prompts and turn counts for search rows without showing filename headers", async () => {
+    const match = hit();
+    const saved = summary({ path: match.path, firstPrompt: "Recover our research", turns: 8 });
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "pi_paths") return { runtimeAgentDir: { path: AGENT_DIR } };
+      if (cmd === "pi_sessions_list") return [saved];
+      if (cmd === "pi_sessions_search") return [match];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const { findByText, container } = render(<SessionSearch tabId={7} cwd={CWD} query="grail" />);
+    await findByText("Recover our research");
+    const row = container.querySelector<HTMLButtonElement>('[data-uat="session-row"]')!;
+    expect(row.firstElementChild?.textContent).toBe(saved.firstPrompt);
+    expect(row.textContent).toContain("8 turns");
+    expect(row.textContent).toContain(match.snippet);
+    expect(row.title).toBe(`${match.path}\nSession id: other`);
+    expect(container.textContent).not.toContain(".jsonl");
   });
 
   it("searches on input and renders hits grouped per session", async () => {

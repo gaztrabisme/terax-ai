@@ -50,6 +50,43 @@ function makeStore(capacity = 200) {
   };
 }
 
+describe("pooled block markers", () => {
+  it("preserves block identity and status while rebasing markers into the serialized scrollback", () => {
+    const { store, markers } = makeStore();
+    store.onCommandStart("echo saved");
+    store.onCommandDone(0);
+    const block = store.getBlocks()[0];
+    store.detachMarkers(4);
+    expect(markers[0].isDisposed).toBe(true);
+    expect(block.marker).toBeNull();
+    const create = vi.fn((line: number) => fakeMarker(line));
+    store.restoreMarkers(create);
+    expect(create).toHaveBeenCalledWith(6);
+    expect(store.getBlocks()[0]).toBe(block);
+    expect(block).toMatchObject({ id: 1, command: "echo saved", status: "ok", exitCode: 0 });
+    expect(block.marker?.line).toBe(6);
+    store.onCommandStart("next");
+    expect(store.getBlocks()[1].id).toBe(2);
+  });
+
+  it("does not anchor a trimmed block to another command, and reset clears saved positions", () => {
+    const { store } = makeStore();
+    store.onCommandStart("old");
+    store.onCommandDone(1);
+    store.detachMarkers(11);
+    const create = vi.fn((line: number) => fakeMarker(line));
+    store.restoreMarkers(create);
+    expect(create).not.toHaveBeenCalled();
+    expect(store.getBlocks()[0].marker).toBeNull();
+    store.onCommandStart("new");
+    store.detachMarkers(0);
+    store.reset();
+    store.restoreMarkers(create);
+    expect(create).not.toHaveBeenCalled();
+    expect(store.getBlocks()).toHaveLength(0);
+  });
+});
+
 describe("BlockStore", () => {
   it("opens a running block on C with command text, start time and marker", () => {
     const h = makeStore();

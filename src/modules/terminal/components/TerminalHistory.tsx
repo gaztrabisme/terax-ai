@@ -8,10 +8,13 @@ import {
   readTerminalStream,
   terminalHistory,
   terminalList,
+  terminalHistoryEntries,
   storageError,
   type JournalRecord,
   type TerminalInfo,
+  type TerminalHistoryEntry,
 } from "@/modules/terminal/lib/journal";
+import { formatHistoryTime } from "@/modules/terminal/lib/historyTime";
 import {
   respawnSession,
   terminalHistoryCanReplace,
@@ -24,7 +27,7 @@ import { getSlotForLeaf } from "@/modules/terminal/lib/rendererPool";
 import { buildTerminalTheme } from "@/styles/terminalTheme";
 import { useTheme } from "@/modules/theme";
 import {
-  renderRecoveredChrome,
+  BlockChromeRow,
   type BlockErrorHandler,
 } from "@/modules/terminal/components/BlockChrome";
 
@@ -39,33 +42,28 @@ export function RecoveredBlock({
   leafId: number;
   onError: BlockErrorHandler;
 }) {
-  const header = useRef<HTMLDivElement>(null);
   const [output, setOutput] = useState<OutputSpan[][] | null>(null);
   const [limit, setLimit] = useState(64 * 1024);
   const { themeId, resolvedMode, customThemes } = useTheme();
-  useEffect(() => {
-    if (!header.current) return;
-    const block: Block = {
-      id: record.seq,
-      command: record.command || null,
-      startedAt:
-        record.startedAt === null ? null : Date.parse(record.startedAt),
-      endedAt: record.endedAt === null ? null : Date.parse(record.endedAt),
-      durationMs: record.durationMs,
-      exitCode: typeof record.exit === "number" ? record.exit : null,
-      status:
-        record.exit === 0
-          ? "ok"
-          : typeof record.exit === "number"
-            ? "error"
-            : "unknown",
-      marker: null,
-      interrupted: record.event === "interrupted",
-      commandTruncated: record.commandTruncated,
-      file: { project, record },
-    };
-    renderRecoveredChrome(header.current, leafId, block, onError);
-  }, [record, project, leafId, onError]);
+  const block: Block = {
+    id: record.seq,
+    command: record.command || null,
+    startedAt:
+      record.startedAt === null ? null : Date.parse(record.startedAt),
+    endedAt: record.endedAt === null ? null : Date.parse(record.endedAt),
+    durationMs: record.durationMs,
+    exitCode: typeof record.exit === "number" ? record.exit : null,
+    status:
+      record.exit === 0
+        ? "ok"
+        : typeof record.exit === "number"
+          ? "error"
+          : "unknown",
+    marker: null,
+    interrupted: record.event === "interrupted",
+    commandTruncated: record.commandTruncated,
+    file: { project, record },
+  };
   useEffect(() => {
     let cancelled = false;
     setOutput(null);
@@ -97,12 +95,8 @@ export function RecoveredBlock({
     onError,
   ]);
   return (
-    <section
-      data-uat="terminal-block"
-      data-uat-key={record.blockId}
-      className="border-b border-border/60 p-2"
-    >
-      <div ref={header} />
+    <section className="border-b border-border/60 p-2">
+      <BlockChromeRow block={block} leafId={leafId} recovered onError={onError} />
       <pre
         aria-label="Recorded terminal output"
         className="m-0 overflow-x-auto whitespace-pre py-2 font-[inherit]"
@@ -144,7 +138,7 @@ export function TerminalHistory({
   leafId: number;
   onError: BlockErrorHandler;
 }) {
-  const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
+  const [terminals, setTerminals] = useState<TerminalHistoryEntry[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -164,7 +158,7 @@ export function TerminalHistory({
   const refresh = async () => {
     setLoading(true);
     try {
-      setTerminals(await terminalList(project));
+      setTerminals(await terminalHistoryEntries(project, terminalId));
     } finally {
       setLoading(false);
     }
@@ -173,10 +167,16 @@ export function TerminalHistory({
     setBusy(true);
     try {
       if (!(await terminalHistoryCanReplace(leafId))) return;
+      // Closing the selected live shell commits any interrupted block first.
+      const active = info.terminalId === terminalId;
+      if (active) {
+        await respawnSession(leafId, info.cwd);
+        info = (await terminalList(project)).find((t) => t.terminalId === info.terminalId) ?? info;
+      }
       const restored = finishedBlocks(
         await terminalHistory(project, info.terminalId),
       );
-      await respawnSession(leafId, info.cwd);
+      if (!active) await respawnSession(leafId, info.cwd);
       setRecords(restored);
       setSelected(info);
       setPage(
@@ -226,18 +226,17 @@ export function TerminalHistory({
             ) : terminals.length === 0 ? (
               <span>No terminal history yet.</span>
             ) : (
-              terminals
-                .filter((t) => t.terminalId !== terminalId)
-                .map((info) => (
+              terminals.map((info) => (
+                <div key={info.terminalId} className="flex items-start gap-2">
                   <button
-                    key={info.terminalId}
                     type="button"
                     data-uat="terminal-history-reopen"
                     data-uat-key={info.terminalId}
                     aria-label="Reopen terminal history"
                     disabled={busy}
-                    title={info.terminalId}
-                    className="rounded p-2 text-left hover:bg-muted focus-visible:outline focus-visible:outline-ring disabled:opacity-50"
+                    title={`${project}/.pi/terminal/${info.terminalId}/blocks.jsonl\nTerminal id: ${info.terminalId}`}
+                    aria-description={`Terminal id: ${info.terminalId}`}
+                    className="min-w-0 flex-1 rounded p-2 text-left hover:bg-muted focus-visible:outline focus-visible:outline-ring disabled:opacity-50"
                     onClick={() => {
                       void reopen(info).catch((e) =>
                         onError(
@@ -250,9 +249,16 @@ export function TerminalHistory({
                       );
                     }}
                   >
-                    <span className="block">{info.cwd}</span>
-                    <time dateTime={info.time}>{info.time}</time>
+                    <span className="block truncate text-foreground">{info.lastCommand || "No command recorded"}</span>
+                    <time dateTime={info.time}>{formatHistoryTime(info.time)}</time>
                   </button>
+                  <button type="button" aria-label="Copy id" title={info.terminalId}
+                    className="shrink-0 rounded p-2 hover:bg-muted focus-visible:outline focus-visible:outline-ring"
+                    onClick={() => {
+                      const copy = () => navigator.clipboard.writeText(info.terminalId);
+                      void copy().catch((e) => onError(storageError(e, `${project}/.pi/terminal/${info.terminalId}/blocks.jsonl`), copy));
+                    }}>Copy id</button>
+                </div>
                 ))
             )}
           </div>

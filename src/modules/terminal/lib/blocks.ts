@@ -57,6 +57,7 @@ export class BlockStore {
   private listeners = new Set<Listener>();
   private nextId = 1;
   private disposed = false;
+  private markerLines = new Map<number, number>();
   private readonly capacity: number;
 
   constructor(private readonly opts: BlockStoreOptions = {}) {
@@ -142,6 +143,30 @@ export class BlockStore {
     return () => this.listeners.delete(fn);
   }
 
+  detachMarkers(firstSnapshotLine: number): void {
+    const suspended = this.markerLines;
+    this.markerLines = new Map();
+    for (const block of this.blocks) {
+      const originalLine = liveMarker(block.marker) ? block.marker.line : suspended.get(block.id);
+      if (originalLine !== undefined) {
+        const line = originalLine - firstSnapshotLine;
+        if (line >= 0) this.markerLines.set(block.id, line);
+      }
+      if (block.marker) safeDispose(block.marker);
+      block.marker = null;
+    }
+    this.notify();
+  }
+
+  restoreMarkers(create: (line: number) => IMarker | null): void {
+    for (const block of this.blocks) {
+      const line = this.markerLines.get(block.id);
+      if (line !== undefined) block.marker = create(line);
+    }
+    this.markerLines.clear();
+    this.notify();
+  }
+
   /** Drop everything (markers disposed). Used when a session respawns its shell. */
   reset(): void {
     this.clear();
@@ -157,6 +182,7 @@ export class BlockStore {
   }
 
   private clear(): void {
+    this.markerLines.clear();
     for (const b of this.blocks) {
       if (liveMarker(b.marker)) {
         try {

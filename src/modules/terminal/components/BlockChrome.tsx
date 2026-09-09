@@ -1,319 +1,233 @@
-import type { Terminal } from "@xterm/xterm";
+import type { IDecoration, IDisposable, IMarker, Terminal } from "@xterm/xterm";
+import { useId, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { exportBlock, plainOutput, readBlockOutput, storageError, type StorageError } from "@/modules/terminal/lib/journal";
-import { useEffect, useRef } from "react";
-import {
-  blockDurationMs,
-  formatDuration,
-  liveMarker,
-  reconcileBlockDecorations,
-  safeDispose,
-  type Block,
-  type BlockDecorationEntry,
-  type BlockStore,
-  type DecorationLike,
-} from "../lib/blocks";
-import { getSlotForLeaf, type Slot } from "../lib/rendererPool";
-import { writeToSession } from "../lib/useTerminalSession";
-import {
-  SEND_TO_CHAT_EVENT,
-  type SendToChatDetail,
-} from "@/modules/pi/lib/sendToChat";
-
-/**
- * Block chrome for one pane (philosophy 9): one decoration pair per block
- * anchored to its marker. The left decoration carries the status dot and the
- * action row (file-backed Copy, Copy ANSI, editor export and Rerun); the right decoration shows the duration once the block closed.
- * Renders nothing itself: the decorations live inside the pooled emulator,
- * and the store notifies this component to create or dispose them.
- */
+import { blockDurationMs, formatDuration, liveMarker, safeDispose, type Block, type BlockStore } from "@/modules/terminal/lib/blocks";
+import { getSlotForLeaf } from "@/modules/terminal/lib/rendererPool";
+import { writeToSession } from "@/modules/terminal/lib/useTerminalSession";
+import { SEND_TO_CHAT_EVENT, type SendToChatDetail } from "@/modules/pi/lib/sendToChat";
 
 const STYLE_ID = "terax-block-chrome-style";
-
 const BLOCK_CSS = `
+.terax-block-overlay { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 2; }
 .terax-block { pointer-events: none; }
-.terax-block-dot {
-  pointer-events: auto;
-  position: absolute;
-  left: 1px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 4px;
-  height: 62%;
-  border-radius: 9999px;
-}
+.terax-block-live { position: absolute; top: -10000px; }
+.terax-block-dot { pointer-events: auto; position: absolute; left: 1px; top: 50%; transform: translateY(-50%); width: 4px; height: 62%; border-radius: 9999px; }
 .terax-block-dot.is-running { background: var(--amber-400, #d29922); }
 .terax-block-dot.is-ok { background: var(--green-400, #3fb950); }
 .terax-block-dot.is-error { background: var(--red-400, #f85149); }
 .terax-block-dot.is-unknown { background: var(--muted-foreground, #8b949e); }
-.terax-block-duration {
-  pointer-events: none;
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  white-space: pre;
-  font-size: 10px;
-  line-height: 1;
-  color: var(--muted-foreground);
-  opacity: 0.8;
-}
-.terax-block-row {
-  display: none;
-  pointer-events: auto;
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--background);
-  box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
-}
-.terax-block-dot:hover ~ .terax-block-row,
-.terax-block-row:hover,
-.terax-block:focus-within > .terax-block-row { display: flex; }
-.terax-block-btn {
-  pointer-events: auto;
-  border: 0;
-  border-radius: 4px;
-  padding: 0 8px;
-  font-size: 10px;
-  line-height: 1.4;
-  color: var(--muted-foreground);
-  background: transparent;
-  cursor: pointer;
-}
+.terax-block-duration { position: absolute; right: 100px; top: 50%; transform: translateY(-50%); white-space: pre; font-size: 10px; line-height: 1; color: var(--muted-foreground); opacity: 0.8; }
+.terax-block-menu { position: absolute; right: 8px; top: 0; min-height: 100%; }
+.terax-block-row { display: flex; position: absolute; right: 0; top: 0; width: 0; height: 0; overflow: hidden; pointer-events: none; align-items: center; justify-content: flex-end; gap: 8px; }
+.terax-block[data-expanded="true"] { z-index: 3; }
+.terax-block[data-expanded="true"] .terax-block-row { top: 100%; width: max-content; max-width: 100%; height: auto; overflow: visible; pointer-events: auto; flex-wrap: wrap; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--background); box-shadow: 0 1px 4px rgb(0 0 0 / 0.25); }
+.terax-block[data-menu-above="true"] .terax-block-row { top: auto; bottom: 100%; }
+.terax-block-btn { pointer-events: auto; border: 0; border-radius: 4px; padding: 0 8px; font-size: 10px; line-height: 1.4; color: var(--muted-foreground); background: transparent; cursor: pointer; }
+.terax-block-row .terax-block-btn { pointer-events: inherit; white-space: nowrap; }
 .terax-block-btn:disabled { opacity: 0.5; cursor: default; }
 .terax-block-btn:focus-visible { outline: 1px solid var(--ring); }
-.terax-block-recovered { position: relative; pointer-events: auto; min-height: 1.4em; }
-.terax-block-recovered { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.terax-block-btn:hover { background: var(--muted); color: var(--foreground); }
+.terax-block-menu { background: var(--background); }
+.terax-block-recovered { position: relative; pointer-events: auto; min-height: 1.4em; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding-right: 100px; }
 .terax-block-command { padding-left: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .terax-block-recovered > .terax-block-duration { position: static; transform: none; line-height: 1.4; white-space: normal; text-align: right; max-width: 24ch; }
-.terax-block-recovered > .terax-block-row { z-index: 2; flex-wrap: wrap; }
-.terax-block-state { font-size: 10px; color: var(--muted-foreground); white-space: nowrap; }
-.terax-block-btn:hover {
-  background: var(--muted);
-  color: var(--foreground);
-}
 `;
 
 export function injectStyleOnce(): void {
-  if (typeof document === "undefined") return;
-  if (document.getElementById(STYLE_ID)) return;
+  if (typeof document === "undefined" || document.getElementById(STYLE_ID)) return;
   const style = document.createElement("style");
   style.id = STYLE_ID;
   style.textContent = BLOCK_CSS;
   document.head.appendChild(style);
 }
 
-type Props = {
-  leafId: number;
-  store: BlockStore | null;
-  onError?: BlockErrorHandler;
-};
-
 export type BlockErrorHandler = (error: StorageError, retry: () => Promise<void>) => void;
 
-export function BlockChrome({ leafId, store, onError }: Props) {
-  const entriesRef = useRef(new Map<number, BlockDecorationEntry>());
+type Anchor = { marker: IMarker; decoration: IDecoration };
 
-  useEffect(() => {
+export function BlockChrome({ leafId, store, visible = true, onError }: {
+  leafId: number;
+  store: BlockStore | null;
+  visible?: boolean;
+  onError?: BlockErrorHandler;
+}) {
+  const overlay = useRef<HTMLDivElement>(null);
+  const rows = useRef(new Map<number, HTMLDivElement>());
+  const layout = useRef<(() => void) | null>(null);
+  const [blocks, setBlocks] = useState<readonly Block[]>([]);
+
+  useLayoutEffect(() => {
     injectStyleOnce();
-    if (!store) return;
-    const entries = entriesRef.current;
-    const disposeAll = () => {
-      for (const [, entry] of [...entries]) safeDispose(entry.decoration);
-      entries.clear();
-    };
-    const reconcile = () => {
-      const slot = getSlotForLeaf(leafId);
-      if (!slot) {
-        // No pooled slot bound: nothing to anchor decorations to.
-        disposeAll();
-        return;
+    if (!store) { setBlocks([]); return; }
+    let term: Terminal | undefined;
+    let events: IDisposable[] = [];
+    const anchors = new Map<number, Anchor>();
+    let frame: number | null = null;
+    const position = () => {
+      const layer = overlay.current;
+      const screen = term?.element?.querySelector<HTMLElement>(".xterm-screen");
+      if (!layer || !screen || !term) return;
+      const bounds = layer.getBoundingClientRect();
+      const screenBounds = screen.getBoundingClientRect();
+      const scale = layer.offsetHeight ? bounds.height / layer.offsetHeight : 1;
+      for (const block of store.getBlocks()) {
+        const row = rows.current.get(block.id);
+        if (!row) continue;
+        const anchor = anchors.get(block.id)?.decoration.element;
+        const height = Number.parseFloat(anchor?.style.height ?? "") || screenBounds.height / scale / term.rows;
+        const available = liveMarker(block.marker) && term.buffer.active.type === "normal";
+        const top = available ? (screenBounds.top - bounds.top) / scale + (block.marker!.line - term.buffer.active.viewportY) * height : -10000;
+        row.style.top = `${top}px`;
+        row.style.left = `${(screenBounds.left - bounds.left) / scale}px`;
+        row.style.width = `${screenBounds.width / scale}px`;
+        row.style.height = `${height}px`;
+        row.dataset.menuAbove = String(top + height + 64 > layer.clientHeight && top > 64);
       }
-      reconcileBlockDecorations(store.getBlocks(), entries, (block) =>
-        createBlockDecorations(slot, leafId, store, block, onError),
-      );
+    };
+    const schedulePosition = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => { frame = null; position(); });
+    };
+    layout.current = position;
+    const reconcile = () => {
+      const nextTerm = visible ? getSlotForLeaf(leafId)?.term : undefined;
+      if (term !== nextTerm) {
+        for (const event of events) safeDispose(event);
+        for (const anchor of anchors.values()) safeDispose(anchor.decoration);
+        anchors.clear();
+        term = nextTerm;
+        events = term ? [term.onScroll(schedulePosition), term.onResize(schedulePosition), term.onRender(schedulePosition)] : [];
+      }
+      const current = store.getBlocks();
+      const byId = new Map(current.map((block) => [block.id, block]));
+      for (const [id, anchor] of anchors) {
+        const block = byId.get(id);
+        if (!block || block.marker !== anchor.marker || !liveMarker(block.marker)) {
+          safeDispose(anchor.decoration);
+          anchors.delete(id);
+        }
+      }
+      for (const block of current) {
+        if (!term || !liveMarker(block.marker) || anchors.has(block.id)) continue;
+        const decoration = term.registerDecoration({ marker: block.marker, width: 1, height: 1 });
+        if (decoration) {
+          anchors.set(block.id, { marker: block.marker, decoration });
+          decoration.onRender(schedulePosition);
+        }
+      }
+      setBlocks([...current]);
+      position();
     };
     const unsubscribe = store.subscribe(reconcile);
+    const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedulePosition);
+    if (overlay.current) resize?.observe(overlay.current);
     reconcile();
     return () => {
       unsubscribe();
-      disposeAll();
+      if (frame !== null) cancelAnimationFrame(frame);
+      resize?.disconnect();
+      for (const event of events) safeDispose(event);
+      for (const anchor of anchors.values()) safeDispose(anchor.decoration);
+      layout.current = null;
     };
-  }, [store, leafId, onError]);
+  }, [leafId, store, visible]);
+  useLayoutEffect(() => { layout.current?.(); }, [blocks]);
 
-  return null;
+  return <div ref={overlay} className="terax-block-overlay" style={{ visibility: visible ? undefined : "hidden" }}>
+    {blocks.map((block, index) => <BlockChromeRow
+      key={block.id} block={block} leafId={leafId} index={index} onError={onError}
+      rowRef={(row) => { if (row) rows.current.set(block.id, row); else rows.current.delete(block.id); }}
+      onFocus={() => {
+        const term = getSlotForLeaf(leafId)?.term;
+        if (term && liveMarker(block.marker) && (block.marker.line < term.buffer.active.viewportY || block.marker.line >= term.buffer.active.viewportY + term.rows)) {
+          term.scrollToLine(block.marker.line);
+          layout.current?.();
+        }
+      }}
+    />)}
+  </div>;
 }
 
-/**
- * The decoration pair for one block. Disposing the returned composite removes
- * both halves; reconcileBlockDecorations calls this again whenever a block's
- * visible state (status, exit code, duration, command) changes.
- */
-function createBlockDecorations(
-  slot: Slot,
-  leafId: number,
-  store: BlockStore,
-  block: Block,
-  onError?: BlockErrorHandler,
-): DecorationLike | undefined {
-  if (!liveMarker(block.marker)) return undefined;
-  const term = slot.term;
-  const dot = term.registerDecoration({
-    marker: block.marker,
-    anchor: "left",
-    x: 0,
-    width: 1,
-    height: 1,
-  });
-  const duration =
-    block.endedAt !== null
-      ? term.registerDecoration({
-          marker: block.marker,
-          anchor: "right",
-          width: 1,
-          height: 1,
-        })
-      : undefined;
-  if (!dot && !duration) return undefined;
-  dot?.onRender((el) => renderDot(el, term, slot, leafId, store, block, onError));
-  duration?.onRender((el) => renderDuration(el, block));
-  return {
-    dispose: () => {
-      safeDispose(dot);
-      safeDispose(duration);
-    },
-  };
-}
-
-/** Canonical UAT id of a closed block's status dot; a running block has none. */
-function exitDotUatId(status: Block["status"]): string | null {
-  switch (status) {
-    case "ok":
-      return "exit-dot-ok";
-    case "error":
-      return "exit-dot-fail";
-    case "unknown":
-      return "exit-dot-unknown";
-    default:
-      return null;
-  }
-}
-
-/** Dot plus hover action row, inside the one-cell left decoration element. */
-function renderDot(
-  el: HTMLElement,
-  term: Terminal,
-  _slot: Slot,
-  leafId: number,
-  store: BlockStore,
-  block: Block,
-  onError?: BlockErrorHandler,
-): void {
-  // Never overwrite className: xterm positions the element through it.
-  el.classList.add("terax-block");
-  el.setAttribute("data-uat", "terminal-block");
-  el.setAttribute("data-uat-key", block.file?.record.blockId ?? String(block.id));
-  el.tabIndex = 0;
-  el.setAttribute("aria-label", `Terminal block ${block.command ?? "command unavailable"}`);
-  el.setAttribute(
-    "data-uat-index",
-    String(Math.max(0, store.getBlocks().indexOf(block))),
-  );
-  let dot = el.querySelector<HTMLDivElement>(":scope > .terax-block-dot");
-  if (!dot) {
-    dot = document.createElement("div");
-    dot.className = "terax-block-dot";
-    el.appendChild(dot);
-  }
-  dot.className = `terax-block-dot is-${block.status}`;
-  const exitDotId = exitDotUatId(block.status);
-  if (exitDotId) dot.setAttribute("data-uat", exitDotId);
-  else dot.removeAttribute("data-uat");
-  // Only "unknown" carries a title: ok and error are self-evident.
-  dot.setAttribute("aria-label", block.interrupted ? "interrupted / exit unknown" : `exit ${block.exitCode ?? block.status}`);
-  if (block.status === "unknown") dot.title = block.interrupted ? "interrupted / exit unknown" : "exit status unknown";
-  else dot.removeAttribute("title");
-
-  let row = el.querySelector<HTMLDivElement>(":scope > .terax-block-row");
-  if (!row) {
-    row = buildActionRow(leafId, block, onError);
-    el.appendChild(row);
-  }
-  // The row spans the terminal width so its actions right-align; width
-  // follows resizes because xterm re-fires onRender on viewport refreshes.
-  row.style.width = `${term.element?.clientWidth ?? 0}px`;
-}
-
-export function buildActionRow(
-  leafId: number,
-  block: Block,
-  onError?: BlockErrorHandler,
-): HTMLDivElement {
-  const row = document.createElement("div");
-  row.className = "terax-block-row";
-  const key = block.file?.record.blockId ?? block.id;
+export function BlockChromeRow({ block, leafId, index, recovered = false, rowRef, onFocus, onError }: {
+  block: Block;
+  leafId: number;
+  index?: number;
+  recovered?: boolean;
+  rowRef?: Ref<HTMLDivElement>;
+  onFocus?: () => void;
+  onError?: BlockErrorHandler;
+}) {
+  const menuId = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const expanded = open || hovered;
+  const key = block.file?.record.blockId ?? String(block.id);
+  const duration = blockDurationMs(block);
+  const status = block.interrupted ? "interrupted / exit unknown" : block.status === "unknown" ? "exit unknown" : "";
+  const exitDot = block.status === "ok" ? "exit-dot-ok" : block.status === "error" ? "exit-dot-fail" : block.status === "unknown" ? "exit-dot-unknown" : undefined;
+  useLayoutEffect(injectStyleOnce, []);
+  useLayoutEffect(() => () => { if (hoverTimer.current) clearTimeout(hoverTimer.current); }, []);
   const perform = (task: () => Promise<void>) => {
     void task().catch((error) => onError?.(storageError(error, block.file ? `${block.file.project}/${block.file.record.outputPath}` : "Terminal output"), task));
   };
-  const fileAction = (label: string, uat: string, task: () => Promise<void>) => {
-    const button = makeButton(label, () => perform(task), uat, key);
-    button.disabled = !block.file || block.status === "running";
-    row.appendChild(button);
-  };
-  fileAction("Copy", "block-copy", async () => {
-    if (block.file) await navigator.clipboard.writeText(plainOutput(await readBlockOutput(block.file)));
-  });
-  fileAction("Copy ANSI", "block-copy-ansi", async () => {
-    if (block.file) await navigator.clipboard.writeText(await readBlockOutput(block.file));
-  });
-  fileAction("Open in editor", "open-in-editor", async () => {
-    if (block.file) await exportBlock(block.file);
-  });
-  const rerun = makeButton("Rerun", () => {
-    if (!block.interrupted && block.command) writeToSession(leafId, `${block.command}\r`);
-  }, "block-rerun", key);
-  rerun.disabled = block.interrupted === true || !block.command || block.status === "running";
-  row.appendChild(rerun);
-  const send = makeSendToChatButton(leafId, block, async () => block.file ? plainOutput(await readBlockOutput(block.file)) : "", onError);
-  send.disabled = !block.file || block.status === "running";
-  row.appendChild(send);
-  if (block.commandTruncated || block.interrupted || block.status === "unknown") {
-    const state = document.createElement("span");
-    state.className = "terax-block-state";
-    state.textContent = [block.commandTruncated ? "Truncated command" : "", block.interrupted ? "interrupted / exit unknown" : block.status === "unknown" ? "exit unknown" : ""].filter(Boolean).join(" / ");
-    row.appendChild(state);
-  }
-  return row;
-}
-
-export function renderRecoveredChrome(el: HTMLElement, leafId: number, block: Block, onError?: BlockErrorHandler): void {
-  injectStyleOnce();
-  el.replaceChildren();
-  el.className = "terax-block terax-block-recovered";
-  el.tabIndex = 0;
-  el.setAttribute("aria-label", `Terminal block ${block.command ?? "command unavailable"}`);
-  const dot = document.createElement("span");
-  dot.className = `terax-block-dot is-${block.status}`;
-  dot.setAttribute("data-uat", exitDotUatId(block.status) ?? "exit-dot-unknown");
-  dot.setAttribute("aria-label", block.interrupted ? "interrupted / exit unknown" : `exit ${block.exitCode ?? "unknown"}`);
-  el.appendChild(dot);
-  const command = document.createElement("span");
-  command.className = "terax-block-command";
-  command.textContent = block.command ?? "Command unavailable";
-  el.appendChild(command);
-  const duration = document.createElement("span");
-  renderDuration(duration, block);
-  el.appendChild(duration);
-  const row = buildActionRow(leafId, block, onError);
-  row.style.width = "100%";
-  el.appendChild(row);
+  const fileDisabled = !block.file || block.status === "running";
+  const action = (label: string, uat: string, disabled: boolean, task: () => Promise<void>, title?: string) => (
+    <button type="button" className="terax-block-btn" aria-label={label} title={title}
+      data-uat={uat} data-uat-key={key} disabled={disabled} tabIndex={expanded ? 0 : -1}
+      onClick={() => perform(task)}>{label}</button>
+  );
+  return <div ref={rowRef} data-uat="terminal-block" data-uat-key={key} data-uat-index={index}
+    data-uat-status={block.status} data-uat-exit={block.exitCode ?? (block.status === "running" ? "running" : "unknown")}
+    data-uat-duration-ms={duration ?? "null"} role="group" aria-label={`Terminal block ${key}`} aria-describedby={`${menuId}-command`}
+    className={`terax-block ${recovered ? "terax-block-recovered" : "terax-block-live"}`}
+    data-expanded={expanded} onFocus={onFocus}
+    onMouseEnter={() => { if (hoverTimer.current) clearTimeout(hoverTimer.current); setHovered(true); }}
+    onMouseLeave={() => { hoverTimer.current = setTimeout(() => setHovered(false), 100); }}
+    onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}
+    onKeyDown={(event) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        setOpen(false); setHovered(false); trigger.current?.focus();
+      }
+    }}>
+    <span className={`terax-block-dot is-${block.status}`} data-uat={exitDot} role="status"
+      aria-label={block.interrupted ? "interrupted / exit unknown" : `exit ${block.exitCode ?? block.status}`}
+      title={block.status === "unknown" ? status : undefined} />
+    <span id={`${menuId}-command`} className={recovered ? "terax-block-command" : "sr-only"}
+      title={recovered ? block.command ?? "Command unavailable" : undefined}>{block.command ?? "Command unavailable"}</span>
+    <span className="terax-block-duration">{[
+      block.commandTruncated ? "Truncated command" : "", status,
+      duration === null ? (block.status === "running" ? "" : "duration unknown") : formatDuration(duration),
+    ].filter(Boolean).join(" / ")}</span>
+    <button ref={trigger} type="button" className="terax-block-btn terax-block-menu"
+      data-uat="block-actions" data-uat-key={key} aria-label="Block actions" aria-expanded={expanded} aria-controls={menuId}
+      onClick={() => { setOpen(!open); setHovered(false); }}>Block actions</button>
+    <div id={menuId} className="terax-block-row" role="group" aria-label="Block commands">
+      {action("Copy", "block-copy", fileDisabled, async () => {
+        if (block.file) await navigator.clipboard.writeText(plainOutput(await readBlockOutput(block.file)));
+      })}
+      {action("Copy ANSI", "block-copy-ansi", fileDisabled, async () => {
+        if (block.file) await navigator.clipboard.writeText(await readBlockOutput(block.file));
+      })}
+      {action("Open in editor", "open-in-editor", fileDisabled, async () => {
+        if (block.file) await exportBlock(block.file);
+      })}
+      {action("Rerun", "block-rerun", block.interrupted === true || !block.command || block.status === "running", async () => {
+        if (!block.interrupted && block.command) writeToSession(leafId, `${block.command}\r`);
+      }, block.interrupted ? "Command did not finish" : undefined)}
+      {action("Send to chat", "block-send-to-chat", fileDisabled, async () => {
+        if (!block.file) return;
+        const raw = plainOutput(await readBlockOutput(block.file));
+        const detail: SendToChatDetail = {
+          text: buildQuotation(block.command, raw, block.id),
+          source: { blockId: block.id, terminalId: leafId, sha256: await sha256Hex(raw) },
+        };
+        window.dispatchEvent(new CustomEvent<SendToChatDetail>(SEND_TO_CHAT_EVENT, { detail }));
+      })}
+    </div>
+  </div>;
 }
 
 /** Output lines carried into a transfer quotation before truncation. */
@@ -357,69 +271,4 @@ export async function sha256Hex(text: string): Promise<string> {
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-}
-
-/**
- * The K8 button: builds the quotation from the block's captured output and
- * hands {text, source:{blockId, terminalId, sha256}} to the shell through the
- * window CustomEvent "pi:send-to-chat". App retargets it to a chat tab whose
- * composer appends it to the draft; nothing here ever sends.
- */
-export function makeSendToChatButton(
-  leafId: number,
-  block: Block,
-  getRawOutput: () => string | Promise<string>,
-  onError?: BlockErrorHandler,
-): HTMLButtonElement {
-  const btn = makeButton(
-    "Send to chat",
-    () => {
-      if (!block.file && !liveMarker(block.marker)) return;
-      const transfer = async () => {
-        const raw = await getRawOutput();
-        const sha256 = await sha256Hex(raw);
-        const detail: SendToChatDetail = {
-          text: buildQuotation(block.command, raw, block.id),
-          source: { blockId: block.id, terminalId: leafId, sha256 },
-        };
-        window.dispatchEvent(new CustomEvent<SendToChatDetail>(SEND_TO_CHAT_EVENT, { detail }));
-      };
-      void transfer().catch((error) => onError?.(storageError(error, block.file?.record.outputPath ?? "Terminal output"), transfer));
-    },
-    "block-send-to-chat",
-    block.file?.record.blockId ?? block.id,
-  );
-  btn.setAttribute("aria-label", "Send to chat");
-  return btn;
-}
-
-/** Right-anchored duration label, shown once the block has closed. */
-function renderDuration(el: HTMLElement, block: Block): void {
-  el.classList.add("terax-block", "terax-block-duration");
-  const duration = blockDurationMs(block);
-  el.textContent = [block.commandTruncated ? "Truncated command" : "", block.interrupted ? "interrupted / exit unknown" : block.status === "unknown" ? "exit unknown" : "", duration === null ? (block.endedAt ? "duration unknown" : "") : formatDuration(duration)].filter(Boolean).join(" / ");
-}
-
-function makeButton(
-  label: string,
-  onClick: () => void,
-  uatId?: string,
-  uatKey?: number | string,
-): HTMLButtonElement {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.setAttribute("aria-label", label);
-  btn.className = "terax-block-btn";
-  btn.textContent = label;
-  if (uatId) {
-    btn.setAttribute("data-uat", uatId);
-    if (uatKey !== undefined) btn.setAttribute("data-uat-key", String(uatKey));
-  }
-  // Keep keyboard focus in the emulator when a block action is clicked.
-  btn.addEventListener("mousedown", (e) => e.preventDefault());
-  btn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    onClick();
-  });
-  return btn;
 }

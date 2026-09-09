@@ -129,7 +129,7 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
   {
     id: "terminal-history-reopen",
     file: "src/modules/terminal/components/TerminalHistory.tsx",
-    state: "the terminal history list contains a past terminal for this project",
+    state: "the terminal history list contains recorded work, including the active terminal",
   },
   {
     id: "terminal-tab",
@@ -149,7 +149,7 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
   {
     id: "terminal-block",
     file: "src/modules/terminal/components/BlockChrome.tsx",
-    state: "a completed command block decorated inside the live emulator",
+    state: "a command block in the persistent live overlay or recovered history",
   },
   {
     id: "exit-dot-ok",
@@ -167,24 +167,29 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
     state: "a block closed without a parseable exit code",
   },
   {
+    id: "block-actions",
+    file: "src/modules/terminal/components/BlockChrome.tsx",
+    state: "a focusable action menu on a live or recovered block",
+  },
+  {
     id: "block-copy",
     file: "src/modules/terminal/components/BlockChrome.tsx",
-    state: "a block's hover action row",
+    state: "a block's persistent action group, revealed by Block actions or hover",
   },
   {
     id: "block-copy-ansi",
     file: "src/modules/terminal/components/BlockChrome.tsx",
-    state: "a block's hover action row",
+    state: "a block's persistent action group, revealed by Block actions or hover",
   },
   {
     id: "block-rerun",
     file: "src/modules/terminal/components/BlockChrome.tsx",
-    state: "a block with a known command's hover action row",
+    state: "a block with a known command in the persistent action group",
   },
   {
     id: "block-send-to-chat",
     file: "src/modules/terminal/components/BlockChrome.tsx",
-    state: "a completed command block decorated inside the live emulator",
+    state: "a command block in the persistent live overlay or recovered history",
   },
   {
     id: "graph-node-orchestrator",

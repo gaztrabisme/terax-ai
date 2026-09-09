@@ -278,6 +278,7 @@ export type AcquireParams = {
   leafId: number;
   container: HTMLDivElement;
   snapshot: string | null;
+  onSnapshotRestored?: (term: Terminal) => void;
   // True if the slot was in alt-screen mode (TUI like vim, htop, dofek)
   // at the time it was released. When set, bindSlot skips ring replay
   // and kicks SIGWINCH so the TUI repaints from scratch.
@@ -337,13 +338,9 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
     slot.term.resize(p.cols, p.rows);
   }
 
-  if (p.snapshot) {
-    try {
-      slot.term.write(p.snapshot);
-    } catch (e) {
-      console.warn("[terax] snapshot replay failed:", e);
-    }
-  }
+  slot.term.write(p.snapshot ?? "", () => {
+    if (slot.currentLeafId === p.leafId) p.onSnapshotRestored?.(slot.term);
+  });
   if (p.altScreen) {
     // Discard the dormant ring. TUI output is incremental cursor-positioned
     // updates that can't be replayed coherently on top of a stale snapshot
@@ -363,32 +360,35 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
   slot.oscDisposers = p.registerOsc(slot.term);
 
-  setupResizeObserver(slot, p);
-  slot.fitAddon.fit();
-  slot.lastCols = slot.term.cols;
-  slot.lastRows = slot.term.rows;
-  slot.lastW = p.container.clientWidth;
-  slot.lastH = p.container.clientHeight;
-  if (slot.lastCols !== p.cols || slot.lastRows !== p.rows) {
-    // resizePty updates session.cols/rows + pty backend; no separate scope call.
-    adapter?.resolveLeaf(p.leafId)?.resizePty(slot.lastCols, slot.lastRows);
-  }
+  slot.term.write("", () => {
+    if (slot.currentLeafId !== p.leafId) return;
+    setupResizeObserver(slot, p);
+    slot.fitAddon.fit();
+    slot.lastCols = slot.term.cols;
+    slot.lastRows = slot.term.rows;
+    slot.lastW = p.container.clientWidth;
+    slot.lastH = p.container.clientHeight;
+    if (slot.lastCols !== p.cols || slot.lastRows !== p.rows) {
+      // resizePty updates session.cols/rows + pty backend; no separate scope call.
+      adapter?.resolveLeaf(p.leafId)?.resizePty(slot.lastCols, slot.lastRows);
+    }
 
-  if (p.searchQuery) {
-    try {
-      slot.searchAddon.findNext(p.searchQuery);
-    } catch {}
-  }
+    if (p.searchQuery) {
+      try {
+        slot.searchAddon.findNext(p.searchQuery);
+      } catch {}
+    }
 
-  applyCursorBlinkOnSlot(slot, adapter?.isLeafFocused(p.leafId) ?? false);
+    applyCursorBlinkOnSlot(slot, adapter?.isLeafFocused(p.leafId) ?? false);
 
-  if (p.altScreen && !p.shellExited) {
-    adapter?.resolveLeaf(p.leafId)?.kickPty(slot.term.cols, slot.term.rows);
-  }
+    if (p.altScreen && !p.shellExited) {
+      adapter?.resolveLeaf(p.leafId)?.kickPty(slot.term.cols, slot.term.rows);
+    }
 
-  scheduleUnhide(slot, stale);
+    scheduleUnhide(slot, stale);
 
-  p.onSearchReady(slot.searchAddon);
+    p.onSearchReady(slot.searchAddon);
+  });
 }
 
 function scheduleUnhide(slot: Slot, stale: boolean): void {
@@ -472,32 +472,32 @@ function setupResizeObserver(slot: Slot, p: AcquireParams): void {
 
 export type SerializeOutput = {
   snapshot: string | null;
+  firstLine: number;
   cols: number;
   rows: number;
   altScreen: boolean;
 };
 
-export function releaseSlot(leafId: number): SerializeOutput | null {
+export function releaseSlot(leafId: number, beforeDetach?: (firstLine: number) => void): SerializeOutput | null {
   const slot = slots.find((s) => s.currentLeafId === leafId);
   if (!slot) return null;
   const out = serializeSlot(slot);
+  beforeDetach?.(out.firstLine);
   detachSlotFromLeaf(slot);
   return out;
 }
 
 function serializeSlot(slot: Slot): SerializeOutput {
   let snapshot: string | null = null;
+  const cap = Math.min(SNAPSHOT_SCROLLBACK_CAP, usePreferencesStore.getState().terminalScrollback);
   try {
-    const cap = Math.min(
-      SNAPSHOT_SCROLLBACK_CAP,
-      usePreferencesStore.getState().terminalScrollback,
-    );
     snapshot = slot.serializeAddon.serialize({ scrollback: cap });
   } catch (e) {
     console.warn("[terax] serialize failed:", e);
   }
   return {
     snapshot,
+    firstLine: Math.max(0, slot.term.buffer.normal.length - cap - slot.term.rows),
     cols: slot.term.cols,
     rows: slot.term.rows,
     altScreen: isAltScreen(slot),
