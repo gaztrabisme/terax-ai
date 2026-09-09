@@ -55,6 +55,24 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("pi tab titles (UX2-08, G4)", () => {
+  it("titles pi tabs by their project folder and keeps the bare name without one", () => {
+    memoryFs();
+    const { result } = renderHook(() => useTabs());
+    act(() => result.current.newPiTab("/tmp/standalone-proj"));
+    act(() => result.current.newPiTab());
+    expect(result.current.tabs[1]).toMatchObject({
+      kind: "pi",
+      title: "pi: standalone-proj",
+      cwd: "/tmp/standalone-proj",
+    });
+    expect(result.current.tabs[2]).toMatchObject({
+      kind: "pi",
+      title: "pi",
+    });
+  });
+});
+
 describe("useTabs stable ids (K11c)", () => {
   it("keeps batched chat and editor creation and selects the exact file", () => {
     memoryFs();

@@ -15,8 +15,14 @@ export const UAT_IDS_K4: UatIdEntry[] = [
   { id: "tab-bar", file: "src/modules/tabs/TabBar.tsx" },
   { id: "tab", file: "src/modules/tabs/TabBar.tsx" },
   { id: "tab-active", file: "src/modules/tabs/TabBar.tsx" },
+  // G4 (UX2-04): each tab's own close control, keyed by tab id, so scripts
+  // close a tab through the control inside it rather than the tab itself.
+  { id: "tab-close", file: "src/modules/tabs/TabBar.tsx" },
   { id: "new-tab", file: "src/modules/tabs/TabBar.tsx" },
   { id: "new-pi-session", file: "src/modules/tabs/TabBar.tsx" },
+  // G4 (UX2-08): the picker variant moved off the scripted menu item id; the
+  // New-tab menu item "New pi session" now owns `new-pi-session`.
+  { id: "new-pi-session-picker", file: "src/modules/tabs/TabBar.tsx" },
   { id: "sidebar", file: "src/app/App.tsx" },
   { id: "statusbar", file: "src/modules/statusbar/StatusBar.tsx" },
   { id: "cwd-breadcrumb", file: "src/modules/statusbar/CwdBreadcrumb.tsx" },

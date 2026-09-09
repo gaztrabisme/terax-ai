@@ -119,6 +119,50 @@ describe("DOM snapshot", () => {
     expect(snapshot.ts >= snapshot.capturedAt).toBe(true);
   });
 
+  it("collects the Settings window under its own windowId and one settings tab (G4)", () => {
+    document.body.innerHTML = `
+      <button data-uat="terminal-composer-default" role="switch" aria-label="Terminal composer" aria-checked="true"></button>
+      <button data-uat="pi-first-run-check" aria-label="Run first-run check">Run first-run check</button>`;
+    const settingsContext: Context = {
+      cwd: "/project",
+      tabs: [
+        {
+          uat: "tab-active",
+          key: "settings",
+          kind: "settings",
+          title: "Settings",
+          active: true,
+        },
+      ],
+    };
+    const settingsSession: Session = { ...session, windowId: "settings" };
+    const snapshot = collectSnapshot(
+      document,
+      window,
+      settingsContext,
+      settingsSession,
+      geometry,
+      1,
+      null,
+    );
+    expect(snapshot.windowId).toBe("settings");
+    expect(snapshot.activeTab).toMatchObject({ key: "settings", kind: "settings" });
+    expect(conforms(snapshot)).toBe(true);
+    const byId = new Map(snapshot.elements.map((el) => [el.uat, el]));
+    expect(byId.get("terminal-composer-default")).toMatchObject({
+      // The collector's role vocabulary has no "switch"; the Radix switch is
+      // a button whose state rides in checked.
+      role: "button",
+      label: "Terminal composer",
+      checked: true,
+      interactable: true,
+    });
+    expect(byId.get("pi-first-run-check")).toMatchObject({
+      role: "button",
+      label: "Run first-run check",
+    });
+  });
+
   it("keeps copy attached to a durable turn while repeat indices move", () => {
     document.body.innerHTML =
       '<div data-uat="pi-turn" data-uat-key="t7" data-uat-index="0"><button data-uat="copy">Copy</button></div><div data-uat="pi-turn" data-uat-key="t8" data-uat-index="1"><button data-uat="copy">Copy</button></div>';

@@ -1,7 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import { emit, listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
+import { PI_OPEN_CWDS_EVENT, PI_OPEN_CWDS_QUERY_EVENT } from "@/modules/pi/lib/providers";
 import type { Tab } from "@/modules/tabs";
 import { labelFor } from "@/modules/tabs/lib/tabLabel";
+import type { CollectorIO } from "@/modules/uat/snapshot";
 import type { Context, Controller, TabSummary } from "@/modules/uat/types";
 
 export async function loadCollector() {
@@ -75,4 +78,66 @@ export function useUat(tabs: Tab[], activeId: number, fallback: string | null) {
     if (controller.current)
       controller.current.update(contextFor(tabs, activeId, fallback));
   }, [tabs, activeId, fallback]);
+}
+
+/**
+ * The native Settings window (Tauri label "settings", the label the backend
+ * reports as windowId) is its own UAT surface: section 5 says the --uat
+ * collector covers it too while it is open. The backend routes this second
+ * observer's commits to .pi/uat-snapshot-settings.json so the Settings
+ * switches and rows are targetable by data-uat there without displacing the
+ * main window's .pi/uat-snapshot.json.
+ *
+ * The settings webview has no tab strip; its one context tab carries kind
+ * "settings" and the window's single data-uat scope key. The observed project
+ * is the most recently active open pi session's cwd, mirrored by the main
+ * window over the pi:open-cwds broadcast (the same source the Pi check rows
+ * read); with no open project the collector idles and writes nothing.
+ */
+export function settingsContext(cwd: string): Context {
+  return {
+    cwd,
+    tabs: [
+      {
+        uat: "tab-active",
+        key: "settings",
+        kind: "settings",
+        title: "Settings",
+        active: true,
+      },
+    ],
+  };
+}
+
+export type SettingsCollector = {
+  controller: Controller;
+  stop: () => Promise<void>;
+};
+
+export async function mountSettingsCollector(
+  io?: CollectorIO,
+): Promise<SettingsCollector | null> {
+  const module = await loadCollector();
+  if (!module) return null;
+  const controller = await module.mountCollector(settingsContext(""), io);
+  const apply = (cwds: unknown) => {
+    const cwd = Array.isArray(cwds)
+      ? (cwds.find((c): c is string => typeof c === "string" && c.length > 0) ??
+        "")
+      : "";
+    controller.update(settingsContext(cwd));
+  };
+  const unlisten = await listen<{ cwds?: string[] }>(
+    PI_OPEN_CWDS_EVENT,
+    (event) => apply(event.payload?.cwds),
+  );
+  // A fresh settings window missed earlier broadcasts; pull the list once.
+  void emit(PI_OPEN_CWDS_QUERY_EVENT, {}).catch(() => {});
+  return {
+    controller,
+    stop: async () => {
+      unlisten();
+      await controller.stop();
+    },
+  };
 }

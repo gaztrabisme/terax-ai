@@ -642,7 +642,7 @@ export function PiFirstRun({
 
   // Runs on mount and whenever the project selector changes, so the rows
   // never describe a project other than the selected one; every other later
-  // run comes from the Run check button. The run id keeps a slow earlier
+  // run comes from the Run first-run check button. The run id keeps a slow earlier
   // run (previous selection) from overwriting the selected one's rows.
   const runRef = useRef(runCheck);
   runRef.current = runCheck;
@@ -723,11 +723,12 @@ export function PiFirstRun({
           size="sm"
           className="h-7 shrink-0 text-[12px]"
           data-uat="pi-first-run-check"
+          aria-label="Run first-run check"
           disabled={loading}
           onClick={() => void runCheck()}
         >
           <HugeiconsIcon icon={RefreshIcon} size={12} strokeWidth={1.75} />
-          Run check
+          Run first-run check
         </Button>
       </div>
       <div className="overflow-hidden rounded-lg border border-border/60">

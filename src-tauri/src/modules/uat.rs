@@ -30,8 +30,29 @@ where
     args.into_iter().any(|arg| arg.as_ref() == "--uat")
 }
 
-fn days_before_year(year: i64) -> i64 {
-    let y = year - 1;
+/// The snapshot file each window commits to. The native Settings window
+/// (label "settings") is the second --uat observer: its commits go to a
+/// dedicated file so the main window's snapshot is never displaced while
+/// both surfaces are open.
+fn snapshot_file(window_id: &str) -> &'static str {
+    if window_id == "settings" {
+        "uat-snapshot-settings.json"
+    } else {
+        "uat-snapshot.json"
+    }
+}
+
+/// Same split for the health evidence file, keeping the primary window's
+/// .pi/uat-status.json canonical.
+fn status_file(window_id: &str) -> &'static str {
+    if window_id == "settings" {
+        "uat-status-settings.json"
+    } else {
+        "uat-status.json"
+    }
+}
+
+fn days_before_year(year: i64) -> i64 {    let y = year - 1;
     365 * y + y / 4 - y / 100 + y / 400
 }
 
@@ -620,11 +641,16 @@ impl UatState {
             return Err("PROJECT_UNAUTHORIZED: project is not authorized".into());
         }
         let mut inner = self.inner.lock().map_err(|_| "UAT_STATE_UNAVAILABLE")?;
-        if inner
-            .windows
-            .iter()
-            .any(|(id, state)| id != window_id && state.root.as_ref() == Some(&root))
-        {
+        // Snapshot ownership is per snapshot file: a window is busy only when
+        // another window committing to the same file already owns the
+        // project. The Settings observer writes its own file, so it may bind
+        // the same project beside the main window.
+        let destination = snapshot_file(window_id);
+        if inner.windows.iter().any(|(id, state)| {
+            id != window_id
+                && snapshot_file(id) == destination
+                && state.root.as_ref() == Some(&root)
+        }) {
             return Err("WINDOW_BUSY: another window owns this project snapshot".into());
         }
         let state = inner.windows.entry(window_id.into()).or_default();
@@ -682,7 +708,7 @@ impl UatState {
             let status = json!({"v": 1, "runId": self.run_id, "windowId": window_id, "health": "error", "lastError": error, "ts": now()});
             let written = (|| {
                 let pi = private_dir(root, ".pi")?;
-                atomic_write(&pi.join("uat-status.json"), status.to_string().as_bytes())?;
+                atomic_write(&pi.join(status_file(window_id)), status.to_string().as_bytes())?;
                 append_uat_log(root, &status)
             })();
             if let Err(error) = written {
@@ -713,6 +739,32 @@ impl UatState {
             return Err("REFRESH_INVALID: invalid request fields".into());
         }
         let mut inner = self.inner.lock().map_err(|_| "UAT_STATE_UNAVAILABLE")?;
+        // The refresh request file is one file per project and every window's
+        // watcher reads it. A request addressed to another window this run
+        // knows (the Settings observer) belongs to that window, so this
+        // watcher skips it with a log line instead of failing its own health;
+        // a request naming a window that owns no snapshot stays rejected.
+        if request.window_id != window_id {
+            let addressed = inner
+                .windows
+                .get(&request.window_id)
+                .is_some_and(|s| s.root.is_some());
+            if !addressed {
+                return Err("WINDOW_UNKNOWN: refresh is for another window".into());
+            }
+            if let Some(root) = inner
+                .windows
+                .get(window_id)
+                .and_then(|s| s.root.as_deref())
+            {
+                append_uat_log(
+                    root,
+                    &json!({"time": now(), "event": "ignored-refresh", "nonce": request.nonce, "runId": request.run_id, "windowId": request.window_id}),
+                )
+                .unwrap_or_else(|error| eprintln!("UAT refresh log unavailable: {error}"));
+            }
+            return Ok(None);
+        }
         let state = inner
             .windows
             .get_mut(window_id)
@@ -810,12 +862,12 @@ impl UatState {
         }
         let pi = private_dir(root, ".pi")?;
         let status = json!({"v": 1, "runId": self.run_id, "windowId": window_id, "health": snapshot["health"], "lastError": snapshot["lastError"], "ts": snapshot["ts"]});
-        atomic_write(&pi.join("uat-status.json"), status.to_string().as_bytes())?;
+        atomic_write(&pi.join(status_file(window_id)), status.to_string().as_bytes())?;
         let bytes = snapshot.to_string();
         if bytes.len() > CAP {
             return Err("SNAPSHOT_TOO_LARGE: limit is 262144 bytes".into());
         }
-        atomic_write(&pi.join("uat-snapshot.json"), bytes.as_bytes())?;
+        atomic_write(&pi.join(snapshot_file(window_id)), bytes.as_bytes())?;
         state.seq = seq;
         state.layout_seq = layout_seq;
         state.sample = None;
@@ -1507,8 +1559,93 @@ mod tests {
     }
 
     #[test]
-    fn accepted_refreshes_and_acknowledged_writes_append_event_lines() {
-        let (dir, registry, state, mut value) = setup();
+    fn settings_observer_binds_beside_main_and_writes_its_own_files() {
+        let (dir, registry, state, value) = setup();
+        // The Settings window is the second observer: it binds the same
+        // project while main owns the shared snapshot file, because its
+        // commits go to a dedicated file.
+        state
+            .start("settings", dir.path().to_str().unwrap(), &registry)
+            .unwrap();
+        // A third window committing to the shared file stays busy.
+        assert!(state
+            .start("other", dir.path().to_str().unwrap(), &registry)
+            .unwrap_err()
+            .starts_with("WINDOW_BUSY"));
+        let mut settings_value = value.clone();
+        settings_value["windowId"] = json!("settings");
+        state
+            .inner
+            .lock()
+            .unwrap()
+            .windows
+            .get_mut("settings")
+            .unwrap()
+            .sample = Some(settings_value["window"].clone());
+        state
+            .write("settings", &settings_value.to_string(), &registry)
+            .unwrap();
+        let snapshot: Value = serde_json::from_slice(
+            &fs::read(dir.path().join(".pi/uat-snapshot-settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(snapshot["windowId"], json!("settings"));
+        let status: Value = serde_json::from_slice(
+            &fs::read(dir.path().join(".pi/uat-status-settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["windowId"], json!("settings"));
+        assert_eq!(status["health"], "ok");
+        // The main window's files were not displaced.
+        assert!(!dir.path().join(".pi/uat-snapshot.json").exists());
+        assert!(!dir.path().join(".pi/uat-status.json").exists());
+    }
+
+    #[test]
+    fn refresh_addressed_to_another_known_window_is_skipped_without_health_change() {
+        let (dir, registry, state, _value) = setup();
+        state
+            .start("settings", dir.path().to_str().unwrap(), &registry)
+            .unwrap();
+        let request = json!({"v": 1, "runId": state.run_id, "windowId": "settings", "nonce": "n-set", "afterSeq": 0, "requestedAt": now()});
+        // Main's watcher sees the settings-addressed request and skips it.
+        let accepted = state
+            .accept_refresh("main", request.to_string().as_bytes(), None)
+            .unwrap();
+        assert!(accepted.is_none());
+        {
+            let inner = state.inner.lock().unwrap();
+            let main = &inner.windows["main"];
+            assert!(main.requests.is_empty());
+            assert!(main.acknowledged.is_none());
+            assert!(main.error.is_none());
+            assert_eq!(main.failures, 0);
+            assert!(!main.seen_nonces.contains("n-set"));
+            assert!(inner.windows["settings"].requests.is_empty());
+        }
+        let lines: Vec<Value> = fs::read_to_string(dir.path().join(".pi/logs/uat.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["event"], json!("ignored-refresh"));
+        assert_eq!(lines[0]["windowId"], json!("settings"));
+        // The request was not consumed: its own window's watcher accepts it.
+        assert!(state
+            .accept_refresh("settings", request.to_string().as_bytes(), None)
+            .unwrap()
+            .is_some());
+        // A request naming a window that owns no snapshot stays rejected.
+        let stray = json!({"v": 1, "runId": state.run_id, "windowId": "ghost", "nonce": "n-ghost", "afterSeq": 0, "requestedAt": now()});
+        assert!(state
+            .accept_refresh("main", stray.to_string().as_bytes(), None)
+            .unwrap_err()
+            .starts_with("WINDOW_UNKNOWN"));
+    }
+
+    #[test]
+    fn accepted_refreshes_and_acknowledged_writes_append_event_lines() {        let (dir, registry, state, mut value) = setup();
         let request = json!({"v": 1, "runId": state.run_id, "windowId": "main", "nonce": "n1", "afterSeq": 0, "requestedAt": now()});
         state
             .accept_refresh("main", request.to_string().as_bytes(), None)

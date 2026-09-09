@@ -190,9 +190,12 @@ export function GeneralSection() {
             checked={terminalComposer}
             onCheckedChange={(v) => void setTerminalComposer(v)}
             data-uat="terminal-composer-default"
-            // UX-15/K7-D01: the switch was unnamed in AX; the label names its
-            // scope, the default for new terminals.
-            aria-label="Terminal composer by default"
+            // UX-15/K7-D01 and G4: the switch was unnamed in AX, then named
+            // "Terminal composer by default", which the K2/K4 scripts cannot
+            // resolve ("the switch titled Terminal composer"). The exact
+            // scripted name is the label; the scope rides in the description.
+            aria-label="Terminal composer"
+            aria-description="on by default in new terminals"
           />
         </SettingRow>
         <SettingRow

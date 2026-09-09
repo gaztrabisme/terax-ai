@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-// UX-15/K7-D01: every Switch in the General section carries a unique
-// contextual accessible name; the Terminal composer switch, unnamed in the
-// K7 AX capture, is named by its scope ("by default"), the others by their
-// visible labels.
+// UX-15/K7-D01 and G4: every Switch in the General section carries a unique
+// accessible name; the Terminal composer switch, unnamed in the K7 AX
+// capture, carries the exact name the K2/K4 scripts resolve ("Terminal
+// composer") with its scope in the description, the others their visible
+// labels.
 
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -43,13 +44,17 @@ import { GeneralSection } from "./GeneralSection";
 afterEach(() => cleanup());
 
 describe("GeneralSection switch names", () => {
-  it("names the Terminal composer switch by its scope (K7-D01)", () => {
+  it("names the Terminal composer switch exactly as the scripts target (K7-D01, G4)", () => {
     render(<GeneralSection />);
     const composer = screen.getByRole("switch", {
-      name: "Terminal composer by default",
+      name: "Terminal composer",
     });
     expect(composer.getAttribute("data-uat")).toBe(
       "terminal-composer-default",
+    );
+    // The scope ("by default") survives as the description, not the name.
+    expect(composer.getAttribute("aria-description")).toBe(
+      "on by default in new terminals",
     );
   });
 

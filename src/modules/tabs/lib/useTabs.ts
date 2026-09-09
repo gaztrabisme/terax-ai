@@ -156,6 +156,12 @@ function basename(path: string): string {
   return parts.length ? parts[parts.length - 1] : path;
 }
 
+/** A pi tab's differentiating title: "pi: <project folder name>", or the
+ *  bare "pi" while no project folder is known (UX2-08). */
+function piTabTitle(cwd?: string): string {
+  return cwd ? `pi: ${basename(cwd)}` : "pi";
+}
+
 export function useTabs(initial?: Partial<TerminalTab>) {
   const [tabs, setTabsState] = useState<Tab[]>(() => {
     const tabId = 1;
@@ -384,7 +390,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     const id = nextIdRef.current++;
     const sid = mintSid();
     registerStableId(id, sid);
-    setTabs((t) => [...t, { id, sid, kind: "pi", title: "pi", cwd }]);
+    // UX2-08: "pi" alone made every chat tab look alike; the project folder
+    // name differentiates them (the short session id rides in the tab's
+    // title attribute once a session exists).
+    setTabs((t) => [
+      ...t,
+      { id, sid, kind: "pi", title: piTabTitle(cwd), cwd },
+    ]);
     setActiveId(id);
     return id;
   }, []);
@@ -411,7 +423,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           const id = nextIdRef.current++;
           registerStableId(id, tab.id);
           return tab.kind === "pi"
-            ? { id, sid: tab.id, kind: "pi", title: "pi", cwd, sessionId: tab.sessionId }
+            ? { id, sid: tab.id, kind: "pi", title: piTabTitle(cwd), cwd, sessionId: tab.sessionId }
             : { id, sid: tab.id, kind: "editor", title: basename(tab.path!), path: tab.path!, cwd, dirty: false, preview: false };
         });
       const next = [...tabsRef.current, ...restored];
@@ -421,7 +433,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         const id = nextIdRef.current++;
         const sid = mintSid();
         registerStableId(id, sid);
-        chat = { id, sid, kind: "pi", title: "pi", cwd };
+        chat = { id, sid, kind: "pi", title: piTabTitle(cwd), cwd };
         next.push(chat);
       }
       tabsRef.current = next;
@@ -446,7 +458,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     const id = nextIdRef.current++;
     registerStableId(id, sid);
     const tab: Tab = record.kind === "chat"
-      ? { id, sid, kind: "pi", title: "pi", cwd }
+      ? { id, sid, kind: "pi", title: piTabTitle(cwd), cwd }
       : { id, sid, kind: "editor", title: basename(record.meta.path), path: record.meta.path, cwd, dirty: false, preview: false };
     const next = [...tabsRef.current, tab];
     tabsRef.current = next;

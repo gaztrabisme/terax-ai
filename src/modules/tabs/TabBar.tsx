@@ -31,8 +31,27 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtShortcut, MOD_KEY, SHIFT_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
+import { shortSessionId } from "@/modules/pi/lib/sessionFile";
 import { labelFor } from "./lib/tabLabel";
 import type { EditorTab, Tab } from "./lib/useTabs";
+
+/**
+ * One physical activation must create one tab. Two activations of the same
+ * menu action arriving inside this window count as the click-plus-select
+ * replay described above, not as two requests.
+ */
+const ACTIVATION_BURST_MS = 300;
+
+/** Collapses repeat activations of one action inside a burst window. */
+export function activationGuard(burstMs: number = ACTIVATION_BURST_MS) {
+  let last: { action: string; at: number } | null = null;
+  return (action: string, run: () => void) => {
+    const now = Date.now();
+    if (last && last.action === action && now - last.at < burstMs) return;
+    last = { action, at: now };
+    run();
+  };
+}
 
 type Props = {
   tabs: Tab[];
@@ -70,6 +89,15 @@ export function TabBar({
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
+  // UX2-08 (G4): one physical activation of a Radix menu item can surface as
+  // two select events (the MenuItem composes handleSelect onto click and its
+  // pointerup handler replays click when the pointerdown landed elsewhere, so
+  // "New pi session" created two pi tabs from one click). Repeated
+  // activations of the same action inside one burst collapse to one call; a
+  // deliberate second click always lands after the burst window.
+  const guard = useRef<ReturnType<typeof activationGuard> | null>(null);
+  if (!guard.current) guard.current = activationGuard();
+  const oncePerActivation = guard.current;
 
   // Horizontal wheel scroll without holding shift.
   useEffect(() => {
@@ -108,6 +136,15 @@ export function TabBar({
           <TabsList className="h-7 w-max gap-0.5 bg-transparent p-0">
             {tabs.map((t, ti) => {
               const isPreview = t.kind === "editor" && (t as EditorTab).preview;
+              const label = labelFor(t);
+              const closeRendered = tabs.length > 1;
+              // Once a pi session id exists, the tab's tooltip names its
+              // short session id (pi writes the first 8 characters into
+              // session file names) so lookalike project tabs stay apart.
+              const sessionHint =
+                t.kind === "pi" && t.sessionId
+                  ? `${label} (session ${shortSessionId(t.sessionId)})`
+                  : undefined;
 
               // While renaming, render a non-button cell so the <input> is not
               // nested inside the trigger <button> (invalid HTML, and WebKit
@@ -143,6 +180,11 @@ export function TabBar({
                   data-uat={t.id === activeId ? "tab-active" : "tab"}
                   data-uat-key={String(t.id)}
                   data-uat-index={ti}
+                  // G4: keep the scripted radio name "<title> Close tab"
+                  // stable while the close control inside carries its own
+                  // longer label.
+                  aria-label={closeRendered ? `${label} Close tab` : undefined}
+                  title={sessionHint}
                   onDoubleClick={() => isPreview && onPin(t.id)}
                   onAuxClick={(e) => {
                     if (e.button === 1 && tabs.length > 1) {
@@ -173,7 +215,7 @@ export function TabBar({
                     {/* Preview tabs use italic to signal the transient state,
                         matching the visual convention from VSCode. */}
                     <span className={cn("truncate", isPreview && "italic")}>
-                      {labelFor(t)}
+                      {label}
                     </span>
                     {t.kind === "editor" && t.dirty ? (
                       <span
@@ -182,10 +224,12 @@ export function TabBar({
                       />
                     ) : null}
                   </span>
-                  {tabs.length > 1 && (
+                  {closeRendered && (
                     <span
                       role="button"
-                      aria-label="Close tab"
+                      aria-label={`Close tab ${label}`}
+                      data-uat="tab-close"
+                      data-uat-key={String(t.id)}
                       onClick={(e) => {
                         e.stopPropagation();
                         onClose(t.id);
@@ -282,9 +326,12 @@ export function TabBar({
                 {fmtShortcut(MOD_KEY, "E")}
               </span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onNewPi()}>
+            <DropdownMenuItem
+              data-uat="new-pi-session"
+              onSelect={() => oncePerActivation("new-pi-session", onNewPi)}
+            >
               <HugeiconsIcon icon={AiChat02Icon} size={14} strokeWidth={1.75} />
-              <span className="flex-1">Pi</span>
+              <span className="flex-1">New pi session</span>
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onNewGitGraph()}>
               <HugeiconsIcon
@@ -300,8 +347,9 @@ export function TabBar({
           variant="ghost"
           size="icon"
           className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-          title={`New pi session (${fmtShortcut(MOD_KEY, SHIFT_KEY, "P")})`}
-          data-uat="new-pi-session"
+          title={`New pi session in a folder (${fmtShortcut(MOD_KEY, SHIFT_KEY, "P")})`}
+          aria-label={`New pi session in a folder (${fmtShortcut(MOD_KEY, SHIFT_KEY, "P")})`}
+          data-uat="new-pi-session-picker"
           onClick={onNewPiSession}
         >
           <HugeiconsIcon icon={AiChat02Icon} size={14} strokeWidth={2} />
