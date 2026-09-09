@@ -4,6 +4,7 @@ const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 import {
+  loadLastSession,
   loadSessionFile,
   parseSessionFile,
   pathMatchesSessionId,
@@ -190,5 +191,37 @@ describe("resolveSessionPath", () => {
     await expect(resolveSessionPath(CWD, FULL_ID)).resolves.toBeNull();
     invokeMock.mockResolvedValue({ kind: "binary", size: 1 });
     await expect(resolveSessionPath(CWD, FULL_ID)).resolves.toBeNull();
+  });
+});
+
+
+describe("last session locator recovery", () => {
+  const locator = { v: 1, lastSessionId: FULL_ID, sessions: [
+    { id: FULL_ID, path: PATH.slice(CWD.length + 1) },
+    { id: "alternative", path: ".pi/sessions/exact/alternative.jsonl" },
+  ] };
+  it("loads the exact locator path without inferring cwd encoding", async () => {
+    invokeMock.mockImplementation(async (_cmd, args) => ({ kind: "text", content: args.path.endsWith("session-manifest.json") ? JSON.stringify(locator) : sessionFileText() }));
+    const recovered = await loadLastSession(CWD);
+    expect(recovered?.sessionId).toBe(FULL_ID);
+    expect(recovered?.path).toBe(PATH);
+    expect(recovered?.blocks).toHaveLength(3);
+  });
+  it.each(["No such file (os error 2)", "Permission denied", "corrupt"])("names the failed file and recoverable sessions for %s", async (reason) => {
+    invokeMock.mockImplementation(async (_cmd, args) => {
+      if (args.path.endsWith("session-manifest.json")) return { kind: "text", content: JSON.stringify(locator) };
+      if (reason === "corrupt") return { kind: "text", content: "not a session" };
+      throw new Error(reason);
+    });
+    await expect(loadLastSession(CWD)).rejects.toThrow(`Session recovery failed: ${PATH}`);
+    await expect(loadLastSession(CWD)).rejects.toThrow("alternative (.pi/sessions/exact/alternative.jsonl)");
+  });
+  it("allows a missing manifest but rejects an unreadable or invalid one", async () => {
+    invokeMock.mockRejectedValue(new Error("No such file (os error 2)"));
+    expect(await loadLastSession(CWD)).toBeNull();
+    invokeMock.mockRejectedValue(new Error("Permission denied"));
+    await expect(loadLastSession(CWD)).rejects.toThrow("Session recovery failed");
+    invokeMock.mockResolvedValue({ kind: "text", content: "" });
+    await expect(loadLastSession(CWD)).rejects.toThrow("Session recovery failed");
   });
 });

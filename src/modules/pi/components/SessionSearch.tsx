@@ -52,9 +52,12 @@ export function scrollToSnippet(snippet: string, tabId: number): boolean {
   const probe = snippetProbe(snippet);
   if (!probe) return false;
   const chat = document.querySelector(`[data-pi-chat="${tabId}"]`);
-  const target = findTextElement(chat ?? document, probe.toLowerCase());
+  if (!chat) return false;
+  const target = findTextElement(chat, probe.toLowerCase());
   if (!target) return false;
   target.scrollIntoView({ block: "center" });
+  target.setAttribute("tabindex", "-1");
+  (target as HTMLElement).focus({ preventScroll: true });
   const prev = target.getAttribute("style") ?? "";
   target.setAttribute(
     "style",
@@ -102,6 +105,18 @@ export function SessionSearch({
   const [hits, setHits] = useState<PiSessionHit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
+  const [activating, setActivating] = useState<PiSessionHit | null>(null);
+  const entry = usePiStore((state) => state.tabs[tabId]);
+  useEffect(() => {
+    if (!activating || entry?.pendingSwitch || entry?.locatorPending) return;
+    if (entry?.switchError) {
+      setError(entry.switchError);
+      setActivating(null);
+    } else if (entry?.sessionPath === activating.path) {
+      onActivate?.(activating);
+      setActivating(null);
+    }
+  }, [activating, entry, onActivate]);
 
   // The runtime agent dir comes from pi_paths once per cwd.
   useEffect(() => {
@@ -157,14 +172,16 @@ export function SessionSearch({
   }, [cwd, agentDir, query]);
 
   const openHit = (hit: PiSessionHit) => {
+    setError(null);
     const entry = usePiStore.getState().tabs[tabId];
+    if (entry?.pendingSwitch || entry?.locatorPending) return;
     const sessionId = entry?.state.sessionId ?? null;
     // A hit in the session already open here only scrolls. pi names session
     // files <timestamp>_<first-8-id-chars>.jsonl (the full id never appears
     // in the name), so the match is by short id.
-    if (sessionId !== null && pathMatchesSessionId(hit.path, sessionId)) {
+    if (sessionId !== null && !entry?.switchError && (entry?.sessionPath ? entry.sessionPath === hit.path : pathMatchesSessionId(hit.path, sessionId))) {
       if (scrollToSnippet(hit.snippet, tabId)) onActivate?.(hit);
-      else setError("Matching turn is not rendered in this session.");
+      else setError(`${hit.path}: matching turn is not rendered in this session.`);
       return;
     }
     // A past hit loads and parses the session file BEFORE anything is sent
@@ -183,7 +200,7 @@ export function SessionSearch({
         });
         // The wire command was accepted: arm the tab's pending hit so the
         // popover closes when pi's ack swaps the restored transcript in.
-        if (mounted.current) onActivate?.(hit);
+        if (mounted.current) setActivating(hit);
       } catch (e) {
         if (mounted.current) setError(errorMessage(e));
       }

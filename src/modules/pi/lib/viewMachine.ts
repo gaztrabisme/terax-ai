@@ -17,7 +17,7 @@ export const CLOSED_VIEW: ViewState = {
 
 export type ViewEvent =
   | {
-      type: "reset" | "close" | "tab-switch" | "fullscreen" | "dismiss-popover";
+      type: "reset" | "close" | "tab-switch" | "fullscreen" | "dismiss-popover" | "hit-activated";
     }
   | { type: "toggle" | "open"; view: ChatView; narrow: boolean }
   | { type: "expand" | "back" | "escape" | "resize"; narrow: boolean };
@@ -67,6 +67,8 @@ export function viewReducer(state: ViewState, event: ViewEvent): ViewState {
       }
       return { ...state, mode: state.returnMode, returnMode: null };
     }
+    case "hit-activated":
+      return state.view === "sessions" && state.mode === "popover" ? CLOSED_VIEW : state;
     case "dismiss-popover":
       return state.view && state.mode === "popover" ? CLOSED_VIEW : state;
     case "resize":

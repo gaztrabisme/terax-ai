@@ -33,7 +33,6 @@ import {
 import { RunGraph } from "./components/RunGraph";
 import { SessionSearch, scrollToSnippet } from "./components/SessionSearch";
 import { viewButtonClass } from "./components/ModeStrip";
-import type { PiSessionHit } from "./lib/sessions";
 import { useChildStore, watchChildTranscripts } from "./lib/childStore";
 import { ledgerPath } from "./lib/ledgerStore";
 import { activatePiTab, CHILD_NAVIGATION_EVENT, SHOW_USAGE_EVENT, type ChildNavigation } from "./lib/childNavigation";
@@ -187,7 +186,6 @@ export function PiTab({
     turn: number;
     n: number;
   } | null>(null);
-  const [pendingHit, setPendingHit] = useState<PiSessionHit | null>(null);
   const [childTicketId, setChildTicketId] = useState<string | null>(null);
 
   const transition = (event: ViewEvent) => {
@@ -371,19 +369,7 @@ export function PiTab({
   }, [cwd, tabId]);
 
   const blocks = entry?.state.blocks ?? [];
-  useEffect(() => {
-    const id = entry?.state.sessionId;
-    if (
-      active &&
-      pendingHit &&
-      id &&
-      pendingHit.path.endsWith(`_${id}.jsonl`) &&
-      scrollToSnippet(pendingHit.snippet, tabId)
-    ) {
-      transition({ type: "dismiss-popover" });
-      setPendingHit(null);
-    }
-  }, [active, pendingHit, entry?.state, tabId, viewState]);
+
 
   // Artifact documents over the finished answers, in session order; the
   // pane shows the latest by default, the transcript's chip picks an older
@@ -694,14 +680,8 @@ export function PiTab({
                 onQueryChange={(sessionsQuery) => update({ sessionsQuery })}
                 inputRef={searchRef}
                 onActivate={(hit) => {
-                  if (
-                    !entry?.state.sessionId ||
-                    !hit.path.endsWith(`_${entry.state.sessionId}.jsonl`)
-                  ) {
-                    setPendingHit(hit);
-                  } else {
-                    transition({ type: "dismiss-popover" });
-                  }
+                  transition({ type: "hit-activated" });
+                  requestAnimationFrame(() => scrollToSnippet(hit.snippet, tabId));
                 }}
               />
             )}

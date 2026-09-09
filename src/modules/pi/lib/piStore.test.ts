@@ -207,7 +207,7 @@ describe("piStore", () => {
 
   it("sends the prompt and records the write error when the attachment fails", async () => {
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "fs_read_file") return { kind: "text", content: "" };
+      if (command === "fs_read_file") return { kind: "text", content: '{"v":1,"lastSessionId":null,"sessions":[]}' };
       throw new Error("disk full");
     });
     await openIdle(10, { cwd: "/tmp/p" });
@@ -384,7 +384,7 @@ describe("piStore", () => {
           },
         ];
       }
-      if (command === "fs_read_file") return { kind: "text", content: "" };
+      if (command === "fs_read_file") return { kind: "text", content: '{"v":1,"lastSessionId":null,"sessions":[]}' };
       if (command === "fs_read_dir") return [];
       return undefined;
     });
@@ -448,7 +448,7 @@ describe("piStore", () => {
             sha256: "f00d",
           },
         ];
-      if (command === "fs_read_file") return { kind: "text", content: "" };
+      if (command === "fs_read_file") return { kind: "text", content: '{"v":1,"lastSessionId":null,"sessions":[]}' };
       return undefined;
     });
     await openIdle(21, { cwd: "/tmp/p" });
@@ -511,7 +511,7 @@ describe("piStore", () => {
           },
         ];
       }
-      if (command === "fs_read_file") return { kind: "text", content: "" };
+      if (command === "fs_read_file") return { kind: "text", content: '{"v":1,"lastSessionId":null,"sessions":[]}' };
       return undefined;
     });
     await openIdle(22, { cwd: "/tmp/p" });
@@ -567,7 +567,7 @@ describe("piStore", () => {
         return [
           { path: ".pi/attachments/sub-x-att-1.png", sha256: "f00d" },
         ] as never;
-      if (command === "fs_read_file") return { kind: "text", content: "" };
+      if (command === "fs_read_file") return { kind: "text", content: '{"v":1,"lastSessionId":null,"sessions":[]}' };
       return undefined;
     });
     await openIdle(23, { cwd: "/tmp/p" });
@@ -613,7 +613,7 @@ describe("piStore", () => {
             sha256: "f00d",
           },
         ];
-      if (command === "fs_read_file") return { kind: "text", content: "" };
+      if (command === "fs_read_file") return { kind: "text", content: '{"v":1,"lastSessionId":null,"sessions":[]}' };
       return undefined;
     });
     openPiSessionMock.mockImplementationOnce(
@@ -724,7 +724,7 @@ describe("piStore", () => {
           },
         ];
       }
-      if (command === "fs_read_file") return { kind: "text", content: "" };
+      if (command === "fs_read_file") return { kind: "text", content: '{"v":1,"lastSessionId":null,"sessions":[]}' };
       return undefined;
     });
     openPiSessionMock.mockImplementationOnce(
@@ -1190,5 +1190,67 @@ describe("piStore session switch (F1b)", () => {
     expect(usePiStore.getState().tabs[47]!.scrollRequest?.seq).toBe(seq);
     usePiStore.getState().clearScrollRequest(47, seq);
     expect(usePiStore.getState().tabs[47]!.scrollRequest).toBeNull();
+  });
+});
+
+
+describe("G2 launch and locator commit", () => {
+  beforeEach(() => {
+    usePiStore.setState({ tabs: {} });
+    sent.length = 0;
+    invokeMock.mockReset();
+  });
+  it("paints saved history and identity before pi opens, then switches and records the locator", async () => {
+    const file = [JSON.stringify({ type: "session", id: RESTORED_ID }), JSON.stringify({ type: "message", message: { role: "user", content: "saved prompt" } })].join("\n");
+    const queued = { id: "saved-queue", text: "pending prompt", attachmentIds: [], submittedAt: "2026-09-09T00:00:00Z" };
+    invokeMock.mockImplementation(async (cmd, args) => {
+      if (cmd !== "fs_read_file") return;
+      if (args.path.endsWith("/71.md")) throw new Error("no such file");
+      if (args.path.endsWith("/71.json")) return { kind: "text", content: JSON.stringify({ v: 1, submissionId: null, sources: [], attachments: [], queue: [queued] }) };
+      return { kind: "text", content: args.path.endsWith("session-manifest.json") ? JSON.stringify({ v: 1, lastSessionId: RESTORED_ID, sessions: [{ id: RESTORED_ID, path: RESTORED_PATH.slice("/tmp/p/".length) }] }) : file };
+    });
+    let release!: (handle: { id: number; send: (line: string) => Promise<void>; kill: () => Promise<void> }) => void;
+    openPiSessionMock.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const opening = usePiStore.getState().openSession(71, { cwd: "/tmp/p" });
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    expect(usePiStore.getState().tabs[71]!.session).toBeNull();
+    expect(usePiStore.getState().tabs[71]!.state.sessionId).toBe(RESTORED_ID);
+    expect(usePiStore.getState().tabs[71]!.state.blocks).toHaveLength(1);
+    expect(usePiStore.getState().tabs[71]!.queued).toMatchObject([{ ...queued, state: "not-sent" }]);
+    expect(usePiStore.getState().tabs[71]!.queued![0].autoSend).toBeFalsy();
+    lastOnEvent()('{"type":"agent_start","sessionId":"new-unwanted-id"}');
+    expect(usePiStore.getState().tabs[71]!.state.sessionId).toBe(RESTORED_ID);
+    release({ id: 71, send: async (line) => { sent.push(line); }, kill: async () => {} });
+    await opening;
+    expect(JSON.parse(sent[0]!)).toEqual({ type: "switch_session", sessionPath: RESTORED_PATH });
+    lastOnEvent()(SWITCH_ACK);
+    await vi.waitFor(() => expect(usePiStore.getState().tabs[71]!.locatorPending).toBe(false));
+    expect(invokeMock).toHaveBeenCalledWith("pi_record_session_switch", expect.objectContaining({ cwd: "/tmp/p", sessionId: RESTORED_ID, path: RESTORED_PATH }));
+    expect(usePiStore.getState().tabs[71]!.queued).toMatchObject([{ ...queued, state: "not-sent" }]);
+    expect(usePiStore.getState().tabs[71]!.queued![0].autoSend).toBeFalsy();
+    expect(sent).toHaveLength(1);
+  });
+  it("keeps a named recovery error and session list instead of opening an empty pi session", async () => {
+    const previousCalls = openPiSessionMock.mock.calls.length;
+    invokeMock.mockImplementation(async (_cmd, args) => {
+      if (args.path.endsWith("session-manifest.json")) return { kind: "text", content: JSON.stringify({ v: 1, lastSessionId: "lost", sessions: [{ id: "lost", path: ".pi/sessions/missing.jsonl" }, { id: "saved", path: ".pi/sessions/other.jsonl" }] }) };
+      throw new Error("Permission denied");
+    });
+    await usePiStore.getState().openSession(72, { cwd: "/tmp/p" });
+    expect(usePiStore.getState().tabs[72]!.error).toContain("Session recovery failed: /tmp/p/.pi/sessions/missing.jsonl");
+    expect(usePiStore.getState().tabs[72]!.error).toContain("saved (.pi/sessions/other.jsonl)");
+    expect(openPiSessionMock.mock.calls.length).toBe(previousCalls);
+  });
+  it("reports a failed locator write after pi accepts the switch", async () => {
+    invokeMock.mockImplementation(async (cmd) => {
+      if (cmd === "fs_read_file") return { kind: "text", content: '{"v":1,"lastSessionId":null,"sessions":[]}' };
+      if (cmd === "pi_record_session_switch") throw new Error("read-only file system");
+    });
+    await usePiStore.getState().openSession(73, { cwd: "/tmp/p" });
+    await usePiStore.getState().switchToSession(73, stagedSwitch());
+    expect(invokeMock.mock.calls.some((call) => call[0] === "pi_record_session_switch")).toBe(false);
+    lastOnEvent()(SWITCH_ACK);
+    await vi.waitFor(() => expect(usePiStore.getState().tabs[73]!.switchError).toContain("/tmp/p/.pi/session-manifest.json"));
+    expect(usePiStore.getState().tabs[73]!.state.sessionId).toBe(RESTORED_ID);
   });
 });

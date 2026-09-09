@@ -362,6 +362,7 @@ pub fn run() {
             pi::pi_watch_transcripts,
             pi::pi_unwatch,
             pi::prompts::pi_prompts_list,
+            pi::manifest::pi_record_session_switch,
             pi::sessions::pi_sessions_list,
             pi::sessions::pi_sessions_search,
             pi::secrets::pi_secret_set,

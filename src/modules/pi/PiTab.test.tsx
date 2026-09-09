@@ -51,6 +51,7 @@ vi.mock("./components/Transcript", async () => {
   const { KeystoneCard } = await import("./components/blocks/KeystoneCard");
   return {
     formatCost: (n: number) => String(n),
+    ErrorCard: ({ block }: { block: { text: string } }) => <div>{block.text}</div>,
     Transcript: ({
       blocks,
       onDismiss,
@@ -449,18 +450,51 @@ describe("PiTab mode strip", () => {
               blocks: [message("Recovered prompt")],
             },
             sessionPath: "/sessions/date_other.jsonl",
+            pendingSwitch: null,
+            locatorPending: true,
             scrollRequest: { seq: 3, snippet: "...Recovered prompt..." },
           },
         },
       })),
     );
+    expect(uat("sessions-popover")).toBeTruthy();
+    act(() => usePiStore.setState((s) => ({ tabs: { ...s.tabs, 1: { ...s.tabs[1]!, locatorPending: false } } })));
     await waitFor(() => expect(uat("sessions-popover")).toBeNull());
-    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith({
+    await waitFor(() => expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith({
       block: "center",
-    });
+    }));
+    await waitFor(() => expect(document.activeElement?.textContent).toBe("Recovered prompt"));
     await waitFor(() =>
       expect(usePiStore.getState().tabs[1]!.scrollRequest).toBeNull(),
     );
+  });
+
+  it("closes on a current short-id hit, focuses its turn and retains the query", async () => {
+    mount();
+    setSession(1, { sessionId: "12345678-full-id", blocks: [message("matching prompt")] });
+    sessionSearchHits[0]!.path = "/sessions/date_12345678.jsonl";
+    click("Sessions");
+    fireEvent.change(uat("sessions-search")!, { target: { value: "matching" } });
+    fireEvent.click(await screen.findByText("matching prompt", { selector: "button span" }));
+    await waitFor(() => expect(uat("sessions-popover")).toBeNull());
+    await waitFor(() => expect(document.activeElement?.textContent).toBe("matching prompt"));
+    expect(send).not.toHaveBeenCalled();
+    click("Sessions");
+    expect((uat("sessions-search") as HTMLInputElement).value).toBe("matching");
+  });
+
+  it("keeps the popover and saved query when the locator commit fails", async () => {
+    mount();
+    click("Sessions");
+    fireEvent.click(await screen.findByText("Recovered prompt"));
+    await waitFor(() => expect(send).toHaveBeenCalled());
+    act(() => usePiStore.setState((s) => ({ tabs: { ...s.tabs, 1: {
+      ...s.tabs[1]!, pendingSwitch: null, locatorPending: false,
+      sessionPath: "/sessions/date_other.jsonl",
+      switchError: "/sessions/date_other.jsonl: cannot write /proj-1/.pi/session-manifest.json",
+    } } })));
+    await waitFor(() => expect(within(uat("sessions-popover")!).getByText(/cannot write/)).toBeTruthy());
+    expect(uat("sessions-popover")).toBeTruthy();
   });
 
   it("keeps the popover, the query and the transcript when the session file read fails", async () => {

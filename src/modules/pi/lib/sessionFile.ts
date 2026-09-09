@@ -202,3 +202,36 @@ export async function resolveSessionPath(
     return null;
   }
 }
+
+export type SessionLocator = { id: string; path: string };
+
+export async function loadLastSession(cwd: string): Promise<(ParsedSessionFile & { path: string }) | null> {
+  const root = cwd.replace(/[\\/]+$/, "");
+  const manifestPath = `${root}/.pi/session-manifest.json`;
+  let sessions: SessionLocator[] = [];
+  let selectedPath = manifestPath;
+  try {
+    let text: string;
+    try {
+      text = await readSessionFileText(manifestPath);
+    } catch (error) {
+      if (/no such file|not found|os error 2\b/i.test(String(error))) return null;
+      throw error;
+    }
+    const manifest = JSON.parse(text) as { v: number; lastSessionId: unknown; sessions: SessionLocator[] };
+    if (manifest.v !== 1 || !Array.isArray(manifest.sessions)) throw new Error("invalid session manifest");
+    sessions = manifest.sessions.filter((row) => typeof row?.id === "string" && typeof row.path === "string");
+    if (manifest.lastSessionId == null) return null;
+    const selected = sessions.find((row) => row.id === manifest.lastSessionId);
+    if (!selected) throw new Error(`session ${String(manifest.lastSessionId)} has no locator`);
+    selectedPath = `${root}/${selected.path}`;
+    if (/^[\\/]|^[a-z]:/i.test(selected.path) || selected.path.split(/[\\/]/).includes("..")) {
+      throw new Error("session path must be project-relative");
+    }
+    const parsed = await loadSessionFile(selectedPath);
+    if (parsed.sessionId !== selected.id) throw new Error(`session header does not identify ${selected.id}`);
+    return { ...parsed, path: selectedPath };
+  } catch (error) {
+    throw new Error(`Session recovery failed: ${selectedPath}: ${error instanceof Error ? error.message : String(error)}. Recoverable sessions from ${manifestPath}: ${sessions.map((row) => `${row.id} (${row.path})`).join(", ") || "none"}. Open Sessions to choose a saved session.`);
+  }
+}

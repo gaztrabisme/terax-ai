@@ -22,6 +22,7 @@ use crate::modules::fs::file::write_atomic;
 
 /// Schema version of the locator file.
 const MANIFEST_VERSION: u32 = 1;
+static MANIFEST_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// One recorded session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -204,6 +205,7 @@ pub fn record_session(
     id: &str,
     path: &Path,
 ) -> Result<(), String> {
+    let _guard = MANIFEST_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let relative = path.strip_prefix(project_root).map_err(|_| {
         format!(
             "session file {} is not under project {}",
@@ -218,19 +220,31 @@ pub fn record_session(
         created_at: header_timestamp(path).unwrap_or_else(now_rfc3339),
         last_turn_id: None,
     };
-    let mut manifest =
-        read_manifest(project_root).unwrap_or_else(|| SessionManifest {
-            v: MANIFEST_VERSION,
-            last_session_id: None,
-            sessions: Vec::new(),
-        });
+    let mut manifest = match fs::read_to_string(manifest_path(project_root)) {
+        Ok(text) => {
+            let value: SessionManifest = serde_json::from_str(&text)
+                .map_err(|e| format!("{}: {e}", manifest_path(project_root).display()))?;
+            if value.v != MANIFEST_VERSION {
+                return Err(format!("{}: unsupported manifest version", manifest_path(project_root).display()));
+            }
+            value
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SessionManifest {
+            v: MANIFEST_VERSION, last_session_id: None, sessions: Vec::new(),
+        },
+        Err(e) => return Err(format!("{}: {e}", manifest_path(project_root).display())),
+    };
     let mut changed = true;
     match manifest.sessions.iter_mut().find(|s| s.id == entry.id) {
         Some(existing) => {
             let was_last =
                 manifest.last_session_id.as_deref() == Some(entry.id.as_str());
-            changed = *existing != entry || !was_last;
+            let mut updated = entry.clone();
+            updated.last_turn_id = existing.last_turn_id.clone();
+            changed = *existing != updated || !was_last;
+            let last_turn_id = existing.last_turn_id.clone();
             *existing = entry;
+            existing.last_turn_id = last_turn_id;
         }
         None => manifest.sessions.push(entry),
     }
@@ -242,6 +256,39 @@ pub fn record_session(
         .map_err(|e| format!("cannot serialize session manifest: {e}"))?;
     write_atomic(&manifest_path(project_root), text.as_bytes())
         .map_err(|e| format!("cannot write {}: {e}", manifest_path(project_root).display()))
+}
+
+fn record_session_switch(project: &Path, id: &str, path: &Path) -> Result<(), String> {
+    let project = fs::canonicalize(project).map_err(|e| e.to_string())?;
+    let exact = fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !exact.starts_with(&project) {
+        return Err(format!("{}: session file is outside project {}", path.display(), project.display()));
+    }
+    let file = fs::File::open(&exact).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut header = String::new();
+    BufReader::new(file).read_line(&mut header).map_err(|e| format!("{}: {e}", path.display()))?;
+    let header: serde_json::Value = serde_json::from_str(&header).map_err(|e| format!("{}: {e}", path.display()))?;
+    if id.is_empty() || header.get("type").and_then(|v| v.as_str()) != Some("session")
+        || header.get("id").and_then(|v| v.as_str()) != Some(id)
+    {
+        return Err(format!("{}: session header does not identify {id}", path.display()));
+    }
+    record_session(&project, &project.to_string_lossy(), id, &exact)
+}
+
+#[tauri::command]
+pub fn pi_record_session_switch(
+    registry: tauri::State<'_, crate::modules::workspace::WorkspaceRegistry>,
+    workspace: Option<crate::modules::workspace::WorkspaceEnv>,
+    cwd: String,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    use crate::modules::workspace::{authorize_user_spawn_cwd, WorkspaceEnv};
+    let workspace = WorkspaceEnv::from_option(workspace);
+    let project = authorize_user_spawn_cwd(&registry, Some(&cwd), &workspace)?
+        .ok_or_else(|| "pi_record_session_switch needs a cwd".to_string())?;
+    record_session_switch(&project, &session_id, Path::new(&path))
 }
 
 /// Event-pump hook: parses one pi stdout line, and when a turn-bearing
@@ -307,6 +354,39 @@ mod tests {
         )
         .expect("write session");
         path
+    }
+
+    #[test]
+    fn switch_ack_needs_explicit_locator_and_keeps_exact_path() {
+        let project = tempfile::tempdir().expect("project");
+        let first = write_session_file(project.path(), "old", ID);
+        let other = "aaaaaaaa-bbbb-4144-8d5e-87dc14d04ad6";
+        let second = write_session_file(project.path(), "exact-non-inferred-dir", other);
+        record_session_switch(project.path(), ID, &first).expect("first");
+        note_session_event(project.path(), r#"{"type":"response","command":"switch_session","success":true}"#, &Mutex::new(HashSet::new()));
+        assert_eq!(read_manifest(project.path()).unwrap().last_session_id.as_deref(), Some(ID));
+        record_session_switch(project.path(), other, &second).expect("switch");
+        let saved = read_manifest(project.path()).unwrap();
+        assert_eq!(saved.last_session_id.as_deref(), Some(other));
+        assert_eq!(saved.sessions.len(), 2);
+        assert_eq!(saved.sessions[1].path, format!(".pi/sessions/exact-non-inferred-dir/{FILE_STEM}.jsonl"));
+        let before = fs::read(manifest_path(project.path())).unwrap();
+        assert!(record_session_switch(project.path(), ID, &second).is_err());
+        assert_eq!(fs::read(manifest_path(project.path())).unwrap(), before);
+    }
+
+    #[test]
+    fn switch_rejects_symlink_escape_and_preserves_corrupt_manifest() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let file = write_session_file(outside.path(), "outside", ID);
+        let link = project.path().join("linked.jsonl");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(record_session_switch(project.path(), ID, &link).unwrap_err().contains("outside project"));
+        let local = write_session_file(project.path(), "local", ID);
+        fs::write(manifest_path(project.path()), "broken").unwrap();
+        assert!(record_session_switch(project.path(), ID, &local).is_err());
+        assert_eq!(fs::read_to_string(manifest_path(project.path())).unwrap(), "broken");
     }
 
     #[test]

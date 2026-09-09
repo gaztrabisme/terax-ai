@@ -31,7 +31,7 @@ import {
   type PiModelRow,
   type PiRuntimePrefs,
 } from "./providers";
-import { restoredUsageTotals, type ParsedSessionFile } from "./sessionFile";
+import { loadLastSession, restoredUsageTotals, type ParsedSessionFile } from "./sessionFile";
 import { openPiSession, type PiSessionHandle } from "./rpc-client";
 import { PI_MODULE_PREFS_DEFAULTS } from "./settingsSchema";
 import { groupTurns } from "./turns";
@@ -48,6 +48,7 @@ export type ComposerImage = PiImageAttachment & {
 };
 
 export type PiOpenOptions = {
+  recoverLast?: boolean;
   cwd?: string;
   launcherDir?: string;
   program?: string;
@@ -178,6 +179,8 @@ type PiTabEntry = {
   /** A failed or refused switch, naming the session file; the previous
    *  conversation stays untouched (design.md 3.5: an error names its path). */
   switchError?: string | null;
+  locatorPending?: boolean;
+  recovering?: boolean;
   /** The session file pi has loaded, known once a switch committed. */
   sessionPath?: string | null;
   /** A turn to scroll to after the restored transcript has rendered. */
@@ -960,6 +963,7 @@ export const usePiStore = create<PiStore>()((set, get) => ({
       pendingSwitch: null,
       switchError: null,
       sessionPath: null,
+      recovering: true,
       scrollRequest: null,
     };
     set((s) => ({ tabs: { ...s.tabs, [tabId]: entry } }));
@@ -971,6 +975,15 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         } catch (error) {
           set((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, queueError: String(error) })));
         }
+      }
+      const recovered = opts.cwd && opts.recoverLast !== false ? await loadLastSession(opts.cwd) : null;
+      if (get().tabs[tabId]?.gen !== gen) return;
+      if (recovered) {
+        set((s) => patchEntry(s.tabs, tabId, (e) => ({
+          ...e,
+          sessionPath: recovered.path,
+          state: { ...initialPiSessionState(), sessionId: recovered.sessionId, blocks: recovered.blocks, ...restoredUsageTotals(recovered.blocks) },
+        })));
       }
       const session = await openPiSession({
         ...opts,
@@ -992,6 +1005,12 @@ export const usePiStore = create<PiStore>()((set, get) => ({
           // The holder object survives the closure: TypeScript cannot track
           // the assignment through set(), and a bind job must run after the
           // reduction published it.
+          if (get().tabs[tabId]?.gen !== gen) return;
+          const before = get().tabs[tabId]!;
+          const ack = switchAck(line);
+          const committed = ack?.ok ? before.pendingSwitch : null;
+          const recoveryRefused = before.recovering && ack && !ack.ok;
+          if (recoveryRefused) void before.session?.kill();
           const job: { bind: BindJob | null; removed: string[]; drain: boolean } = { bind: null, removed: [], drain: false };
           set((s) =>
             patchEntry(s.tabs, tabId, (e) => {
@@ -1017,11 +1036,29 @@ export const usePiStore = create<PiStore>()((set, get) => ({
                   queueEpoch += 1;
                 }
               }
-              return { ...e, ...next, queueEpoch };
+              return {
+                ...e, ...next, queueEpoch,
+                ...(committed ? { locatorPending: true } : ack ? { recovering: false } : {}),
+                ...(recoveryRefused ? { session: null, error: `Session recovery failed: ${next.switchError}` } : {}),
+                ...(e.recovering && recovered && !ack ? { state: e.state } : {}),
+              };
             }),
           );
           if (job.removed.length && opts.cwd) {
             void removeQueueRecords(opts.cwd, draftKeyOf(tabId), job.removed).catch((error) => queueFailure(tabId, error));
+          }
+          if (committed) {
+            void invoke("pi_record_session_switch", {
+              cwd: before.cwd, sessionId: committed.sessionId, path: committed.path,
+              workspace: currentWorkspaceEnv(),
+            }).then(() => {
+              set((s) => patchEntry(s.tabs, tabId, (e) => e.gen !== gen ? e : ({ ...e, locatorPending: false, recovering: false })));
+            }).catch((error: unknown) => {
+              set((s) => patchEntry(s.tabs, tabId, (e) => e.gen !== gen ? e : ({
+                ...e, locatorPending: false, recovering: false,
+                switchError: `${committed.path}: could not record ${before.cwd}/.pi/session-manifest.json: ${attachmentError(error)}`,
+              })));
+            });
           }
           if (job.bind) void runBindJob(tabId, job.bind);
           if (job.drain) void drainQueue(tabId);
@@ -1045,6 +1082,9 @@ export const usePiStore = create<PiStore>()((set, get) => ({
                     queueEpoch: (e.queueEpoch ?? 0) + 1,
                     pendingPrompts: [],
                     pendingAttachments: [],
+                    recovering: false,
+                    pendingSwitch: null,
+                    switchError: e.pendingSwitch ? `${e.pendingSwitch.path}: pi exited before the switch committed` : e.switchError,
                   },
             ),
           ),
@@ -1055,11 +1095,16 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         void session.kill();
         return;
       }
-      set((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, session })));
+      set((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, session, recovering: !!recovered })));
+      if (recovered) await get().switchToSession(tabId, { ...recovered, snippet: "" });
     } catch (e) {
+      const failed = get().tabs[tabId];
+      if (failed?.gen === gen && failed.recovering) void failed.session?.kill();
       set((s) =>
-        patchEntry(s.tabs, tabId, (err) => ({
+        patchEntry(s.tabs, tabId, (err) => err.gen !== gen ? err : ({
           ...err,
+          session: err.recovering ? null : err.session,
+          recovering: false,
           error: e instanceof Error ? e.message : String(e),
         })),
       );
@@ -1306,9 +1351,9 @@ export const usePiStore = create<PiStore>()((set, get) => ({
     if (!entry || !session) {
       throw new Error(`${request.path}: no live pi session to switch into`);
     }
-    if (entry.pendingSwitch) {
+    if (entry.pendingSwitch || entry.locatorPending) {
       throw new Error(
-        `switch_session already in progress (${entry.pendingSwitch.path})`,
+        `switch_session already in progress (${entry.pendingSwitch?.path ?? entry.sessionPath})`,
       );
     }
     // Stage the parsed transcript before the wire command: the ack can then

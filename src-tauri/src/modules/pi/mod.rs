@@ -4,7 +4,7 @@ pub mod attachments;
 pub mod artifacts;
 mod launch;
 mod launcher;
-mod manifest;
+pub mod manifest;
 pub mod prompts;
 pub mod runtime;
 pub mod secrets;

@@ -101,13 +101,13 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
   // tick later the matching turn exists in this tab's chat column.
   const scrollRequest = entry?.scrollRequest ?? null;
   useEffect(() => {
-    if (!scrollRequest) return;
+    if (!scrollRequest || entry?.locatorPending || entry?.switchError) return;
     const timer = window.setTimeout(() => {
       scrollToSnippet(scrollRequest.snippet, tabId);
       usePiStore.getState().clearScrollRequest(tabId, scrollRequest.seq);
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [scrollRequest, tabId]);
+  }, [scrollRequest, tabId, entry?.locatorPending, entry?.switchError]);
 
   // Sent thumbnails are local turn state: pi's session file may not echo the
   // image bytes back, so each queued set binds FIFO to the next user message
@@ -239,7 +239,7 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
     setDiscardDecision(false);
     setSendError(null);
     close(tabId);
-    void openSession(tabId, { cwd });
+    void openSession(tabId, { cwd, recoverLast: false });
   };
   const newSession = () => {
     if (usePiStore.getState().tabs[tabId]?.queued?.length) setDiscardDecision(true);
@@ -295,17 +295,20 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
         />
         <span className="font-medium text-foreground">pi</span>
         <span data-uat="session-status">
-          {!exited && retry
-            ? retryPendingLabel(retry)
-            : statusLabel(status, exited, entry?.exitCode ?? null)}
+          {!entry || entry.recovering
+            ? "Recovering session"
+            : entry.error ? "error"
+            : !exited && retry
+              ? retryPendingLabel(retry)
+              : statusLabel(status, exited, entry?.exitCode ?? null)}
         </span>
         {/* Always present: "no turns yet" at idle, the sums after turns, and
             "cost unknown" when the provider priced nothing (UX-14). */}
         <span data-uat="turn-tokens">
-          {stripTurnTokensLabel(state?.turnTokens ?? 0, hasTurnUsage)}
+          {(!entry || (entry.recovering && !sessionId) || (entry.error && !sessionId)) ? "" : stripTurnTokensLabel(state?.turnTokens ?? 0, hasTurnUsage)}
         </span>
         <span data-uat="session-cost">
-          {stripSessionCostLabel(state?.sessionCost ?? 0, hasTurnUsage)}
+          {(!entry || (entry.recovering && !sessionId) || (entry.error && !sessionId)) ? "" : stripSessionCostLabel(state?.sessionCost ?? 0, hasTurnUsage)}
         </span>
         {sessionId ? (
           <span
@@ -400,7 +403,9 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
         </div>
       ) : null}
 
-      <Transcript
+      {(!entry || (entry.recovering && !blocks.length)) ? (
+        <div role="status" className="p-4 text-xs text-muted-foreground">Recovering session...</div>
+      ) : entry.error && !blocks.length ? null : <Transcript
         blocks={blocks}
         turnImages={turnImages}
         queued={entry?.queued ?? []}
@@ -420,13 +425,13 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
         failedSubmission={entry?.failedSubmission ?? null}
         onRetrySubmission={retryFailed}
         onOpenChild={onOpenChild}
-      />
+      />}
 
       {cwd && onRecoverDraft && <RecoverableDrafts cwd={cwd} openDraftIds={openDraftIds} onRecoverDraft={onRecoverDraft} />}
       <Composer
         tabId={tabId}
         cwd={cwd}
-        disabled={!entry?.session || entry.exited}
+        disabled={!entry?.session || entry.exited || entry.recovering || !!entry.pendingSwitch || entry.locatorPending}
         placeholder={
           entry?.session
             ? "Message pi (markdown, Enter sends)"
