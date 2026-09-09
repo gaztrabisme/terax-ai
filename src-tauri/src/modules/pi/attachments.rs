@@ -306,6 +306,7 @@ pub(crate) fn write_durable(target: &Path, bytes: &[u8]) -> Result<(), String> {
 /// A written attachment file: project-relative path plus the SHA-256 of the
 /// exact bytes on disk.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SavedAttachmentFile {
     pub path: String,
     pub sha256: String,
@@ -376,8 +377,12 @@ pub struct StageRequest {
     pub path: String,
 }
 
-/// One staged submission copy under `.pi/attachments/`.
+/// One staged submission copy under `.pi/attachments/`. The reply rides the
+/// invoke bridge to the store's `StagedReply`, whose fields are camelCase:
+/// a snake_case `attachment_id` here made every lookup miss and failed a
+/// healthy send with "attachment copy failed" (UAT k13-03, UX-05).
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StagedAttachment {
     pub attachment_id: String,
     pub path: String,
@@ -918,6 +923,60 @@ mod tests {
         )
         .expect_err("missing source must be rejected");
         assert!(error.contains("cannot read attachment source"), "{error}");
+    }
+
+    #[test]
+    fn staged_reply_serializes_camel_case_ids_for_the_store() {
+        // F3 regression (UAT k13-03, review UX-05): the real transaction over
+        // real files. A draft JPEG under .pi/drafts/<sid>-<id>.jpg is staged
+        // to .pi/attachments, and the reply must serialize with the camelCase
+        // keys the store's StagedReply parses. The pre-fix wire carried
+        // attachment_id, so the store matched nothing and refused a healthy
+        // send with "attachment copy failed" while the staged file existed.
+        let project = tempfile::tempdir().expect("tempdir");
+        let registry = WorkspaceRegistry::default();
+        registry.authorize(project.path()).expect("authorize project");
+        let draft = seed_draft(project.path(), "k7x2m9-att-1.jpg", b"jpeg-bytes");
+
+        let staged = stage_submission(
+            &registry,
+            &path_string(project.path()),
+            "sub-1",
+            vec![StageRequest {
+                attachment_id: "att-1".to_string(),
+                path: draft,
+            }],
+            &WorkspaceEnv::Local,
+        )
+        .expect("staged");
+
+        assert_eq!(staged.len(), 1);
+        let wire = serde_json::to_value(&staged[0]).expect("serialize stage reply");
+        let object = wire.as_object().expect("reply is an object");
+        assert!(
+            object.contains_key("attachmentId"),
+            "wire keys {object:?} must carry attachmentId for the store"
+        );
+        assert!(
+            !object.contains_key("attachment_id"),
+            "wire keys {object:?} must not carry the snake_case id"
+        );
+        assert_eq!(
+            object.get("attachmentId").and_then(|v| v.as_str()),
+            Some("att-1")
+        );
+        assert_eq!(
+            object.get("path").and_then(|v| v.as_str()),
+            Some(".pi/attachments/sub-1-att-1.jpg")
+        );
+        assert_eq!(
+            object.get("sha256").and_then(|v| v.as_str()),
+            Some(sha256_hex(b"jpeg-bytes").as_str())
+        );
+        // The staged copy holds the exact source bytes on disk.
+        let copy = fs::read(project.path().join(".pi/attachments/sub-1-att-1.jpg"))
+            .expect("staged copy");
+        assert_eq!(copy, b"jpeg-bytes");
     }
 
     #[test]

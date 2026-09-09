@@ -1087,7 +1087,11 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         submissionId,
         attachments: failed.records.map((r) => ({
           attachmentId: r.attachmentId,
-          path: r.draftPath ?? "",
+          // The failed card owns its own copy of the source bytes: restaging
+          // reads the staged file, so removing the composer chips (which
+          // deletes the draft files) cannot orphan the retry. Only a
+          // submission that never staged falls back to its draft file.
+          path: r.stagedPath ?? r.draftPath ?? "",
         })),
         workspace: currentWorkspaceEnv(),
       });

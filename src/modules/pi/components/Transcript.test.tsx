@@ -347,3 +347,53 @@ describe("attachment chip", () => {
     expect(html).toContain("failed: disk full");
   });
 });
+
+describe("failed submission card (K13)", () => {
+  it("shows the exact error and the Retry submission control at once, keyboard reachable", () => {
+    const blocks: PiFeedItem[] = [
+      {
+        kind: "message",
+        id: "u-failed",
+        role: "user",
+        parts: [{ type: "text", text: "earlier turn" }],
+        model: null,
+        usage: null,
+        streaming: false,
+        at: 1000,
+      },
+    ];
+    const html = renderToStaticMarkup(
+      <Transcript
+        blocks={blocks}
+        onAnswer={() => {}}
+        onDismiss={() => {}}
+        failedSubmission={{
+          submissionId: "sub-9",
+          text: "describe the attached image in five words",
+          images: [],
+          records: [],
+          error: "attachment copy failed: .pi/drafts/2p5ta54a14-att-1.jpg",
+          state: "failed",
+        }}
+        onRetrySubmission={() => {}}
+      />,
+    );
+    // One render carries both the exact error text and the retry control:
+    // no hover step, no second interaction to discover the action.
+    expect(html).toContain(
+      "submission sub-9 failed: attachment copy failed: .pi/drafts/2p5ta54a14-att-1.jpg",
+    );
+    expect(html).toContain('data-uat="submission-retry"');
+    expect(html).toContain('data-uat-key="sub-9"');
+    expect(html).toContain("Retry submission");
+    const button = html.match(
+      /<button[^>]*data-uat="submission-retry"[^>]*>/,
+    )?.[0];
+    expect(button).toBeTruthy();
+    expect(button).toContain('aria-label="Retry submission"');
+    // A native button: focusable from the keyboard, never hidden or
+    // hover-gated through its own class list.
+    expect(button).not.toContain('tabindex="-1"');
+    expect(button).not.toMatch(/class="[^"]*(hidden|invisible)/);
+  });
+});

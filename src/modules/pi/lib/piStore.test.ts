@@ -505,6 +505,250 @@ describe("piStore", () => {
     );
     expect(usePiStore.getState().tabs[22]?.failedSubmission).toBeNull();
   });
+
+  // F3 regression (UAT k13-03, review UX-05): the pre-fix backend replied
+  // with a snake_case attachment_id the store cannot read, so every staged
+  // reply looked unstaged and the send died with "attachment copy failed"
+  // although the staged file existed. The mocked invokes run in the order
+  // the app uses: stage, then the send that must never happen.
+  it("a staged reply with no matching id refuses the send with the exact copy failed error", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "pi_stage_submission")
+        // Same shape the real wire carried pre-fix: no attachmentId key.
+        return [
+          { path: ".pi/attachments/sub-x-att-1.png", sha256: "f00d" },
+        ] as never;
+      if (command === "fs_read_file") return { kind: "text", content: "" };
+      return undefined;
+    });
+    await usePiStore.getState().openSession(23, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await expect(
+      usePiStore.getState().sendPrompt(23, "look", [
+        {
+          mediaType: "image/jpeg",
+          data: "AAAA",
+          attachmentId: "att-1",
+          draftPath: ".pi/drafts/2p5ta54a14-att-1.jpg",
+          sha256: "cafe",
+        } as never,
+      ]),
+    ).rejects.toThrow("attachment copy failed: .pi/drafts/2p5ta54a14-att-1.jpg");
+    // The refusal happens before the wire: pi never sees the prompt.
+    expect(sent).toHaveLength(0);
+    const entry = usePiStore.getState().tabs[23];
+    expect(entry?.failedSubmission).toMatchObject({
+      state: "failed",
+      error: "attachment copy failed: .pi/drafts/2p5ta54a14-att-1.jpg",
+      records: [
+        {
+          attachmentId: "att-1",
+          draftPath: ".pi/drafts/2p5ta54a14-att-1.jpg",
+          stagedPath: null,
+        },
+      ],
+    });
+    expect(entry?.rejectedDraft).toMatchObject({
+      text: "look",
+      error: "attachment copy failed: .pi/drafts/2p5ta54a14-att-1.jpg",
+    });
+  });
+
+  it("a send that throws after staging retries from the staged copy and binds on its acknowledged turn", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "pi_stage_submission")
+        return [
+          {
+            attachmentId: "att-1",
+            path: ".pi/attachments/sub-t-att-1.png",
+            sha256: "f00d",
+          },
+        ];
+      if (command === "fs_read_file") return { kind: "text", content: "" };
+      return undefined;
+    });
+    openPiSessionMock.mockImplementationOnce(
+      async (opts: { onEvent: (l: string) => void }) => {
+        queueMicrotask(() =>
+          opts.onEvent(
+            JSON.stringify({ type: "agent_start", sessionId: "abcd1234-test" }),
+          ),
+        );
+        let sendCalls = 0;
+        return {
+          id: 9,
+          // The first write fails (the transport died); the retry's write
+          // goes through so the acknowledged turn can bind.
+          send: async (line: string) => {
+            sendCalls += 1;
+            if (sendCalls === 1) throw new Error("stdin closed");
+            sent.push(line);
+          },
+          abort: async () => {},
+          kill: async () => {},
+        };
+      },
+    );
+    await usePiStore.getState().openSession(24, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await expect(
+      usePiStore.getState().sendPrompt(24, "hold", [
+        {
+          mediaType: "image/png",
+          data: "AAAA",
+          attachmentId: "att-1",
+          draftPath: ".pi/drafts/tab-att-1.png",
+        } as never,
+      ]),
+    ).rejects.toThrow("stdin closed");
+    const failed = usePiStore.getState().tabs[24]?.failedSubmission;
+    const submissionId = failed?.submissionId as string;
+    expect(failed).toMatchObject({ state: "failed" });
+    expect(submissionId).toMatch(/^sub-\d+$/);
+    expect(failed?.records[0]?.stagedPath).toBe(
+      ".pi/attachments/sub-t-att-1.png",
+    );
+
+    sent.length = 0;
+    await usePiStore.getState().retrySubmission(24, submissionId);
+    // The retry restages the same submission id from the staged copy.
+    const stageCalls = invokeMock.mock.calls.filter(
+      ([cmd]) => cmd === "pi_stage_submission",
+    );
+    expect(stageCalls).toHaveLength(2);
+    expect(
+      (stageCalls[1]![1] as { attachments: { path: string }[] }).attachments[0]
+        ?.path,
+    ).toBe(".pi/attachments/sub-t-att-1.png");
+    expect(JSON.parse(sent[0]!)).toMatchObject({ message: "hold" });
+
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent('{"type":"response","command":"prompt","success":true}');
+    onEvent(
+      '{"type":"message_start","message":{"role":"user","content":"hold"}}',
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(invokeMock).toHaveBeenCalledWith(
+      "pi_record_attachment_binding",
+      expect.objectContaining({
+        submissionId,
+        bindings: [
+          {
+            attachmentId: "att-1",
+            path: ".pi/attachments/sub-t-att-1.png",
+            sha256: "f00d",
+          },
+        ],
+      }),
+    );
+    expect(usePiStore.getState().tabs[24]?.failedSubmission).toBeNull();
+  });
+
+  it("removing the composer chips after a failure leaves the card retryable from the staged bytes", async () => {
+    // After the failure the user removes the chips: the draft files are
+    // deleted on disk while the store's failed card keeps its staged copy.
+    // Staging the deleted draft path must fail; only the staged copy reads.
+    let stageCount = 0;
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "pi_stage_submission") {
+        const requests = (args as {
+          attachments: { attachmentId: string; path: string }[];
+        }).attachments;
+        // The draft exists for the first staging; the chip removal that
+        // follows the failure deletes it, so later reads of the drafts
+        // path (what a retry sourced from pre-fix) find nothing.
+        if (
+          stageCount > 0 &&
+          requests.some((r) => r.path.startsWith(".pi/drafts/"))
+        ) {
+          throw new Error(
+            "cannot read attachment source /tmp/p/.pi/drafts/tab-att-1.png",
+          );
+        }
+        stageCount += 1;
+        return [
+          {
+            attachmentId: requests[0]!.attachmentId,
+            path: ".pi/attachments/sub-r-att-1.png",
+            sha256: "f00d",
+          },
+        ];
+      }
+      if (command === "fs_read_file") return { kind: "text", content: "" };
+      return undefined;
+    });
+    openPiSessionMock.mockImplementationOnce(
+      async (opts: { onEvent: (l: string) => void }) => {
+        queueMicrotask(() =>
+          opts.onEvent(
+            JSON.stringify({ type: "agent_start", sessionId: "abcd1234-test" }),
+          ),
+        );
+        let sendCalls = 0;
+        return {
+          id: 9,
+          // The first write fails; the retry's write goes through.
+          send: async (line: string) => {
+            sendCalls += 1;
+            if (sendCalls === 1) throw new Error("stdin closed");
+            sent.push(line);
+          },
+          abort: async () => {},
+          kill: async () => {},
+        };
+      },
+    );
+    await usePiStore.getState().openSession(25, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await expect(
+      usePiStore.getState().sendPrompt(25, "hold", [
+        {
+          mediaType: "image/png",
+          data: "AAAA",
+          attachmentId: "att-1",
+          draftPath: ".pi/drafts/tab-att-1.png",
+        } as never,
+      ]),
+    ).rejects.toThrow("stdin closed");
+    const submissionId = usePiStore.getState().tabs[25]?.failedSubmission
+      ?.submissionId as string;
+    expect(submissionId).toMatch(/^sub-\d+$/);
+    expect(
+      usePiStore.getState().tabs[25]?.failedSubmission?.records[0]?.stagedPath,
+    ).toBe(".pi/attachments/sub-r-att-1.png");
+
+    sent.length = 0;
+    // The chips are gone; the draft file no longer exists. The retry must
+    // still send: it reads the staged bytes, never the deleted draft.
+    await usePiStore.getState().retrySubmission(25, submissionId);
+    const retryStage = invokeMock.mock.calls.filter(
+      ([cmd]) => cmd === "pi_stage_submission",
+    )[1]!;
+    expect(
+      (retryStage[1] as { attachments: { path: string }[] }).attachments[0]
+        ?.path,
+    ).toBe(".pi/attachments/sub-r-att-1.png");
+    expect(JSON.parse(sent[0]!)).toMatchObject({ message: "hold" });
+    // The card stays scoped to the submission while the retry is in flight,
+    // then its own acknowledged turn binds and the card clears.
+    expect(usePiStore.getState().tabs[25]?.failedSubmission).toMatchObject({
+      state: "retrying",
+      submissionId,
+    });
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    const onEvent = calls[calls.length - 1]![0].onEvent;
+    onEvent('{"type":"response","command":"prompt","success":true}');
+    onEvent(
+      '{"type":"message_start","message":{"role":"user","content":"hold"}}',
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(invokeMock).toHaveBeenCalledWith(
+      "pi_record_attachment_binding",
+      expect.objectContaining({ submissionId }),
+    );
+    expect(usePiStore.getState().tabs[25]?.failedSubmission).toBeNull();
+  });
 });
 
 describe("piStore cancellation and queue acknowledgement", () => {

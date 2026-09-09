@@ -641,6 +641,47 @@ describe("composer rejected draft restore", () => {
       "second look",
     );
   });
+
+  // F3 (UAT k13-07, review UX-05): after a failed submission the composer
+  // offers its chips again. Removing one deletes only the chip's own draft
+  // file; the failed card's staged copy under .pi/attachments/ is never a
+  // composer resource and must stay on disk for the retry.
+  it("removing a restored failed chip deletes only its draft file, never the staged copy", async () => {
+    const failedDraft = {
+      text: "describe the attached image in five words",
+      images: [{ mediaType: "image/jpeg", data: btoa("chip") }],
+      error: "attachment copy failed: .pi/drafts/2p5ta54a14-att-1.jpg",
+      records: [
+        {
+          attachmentId: "att-1",
+          draftPath: ".pi/drafts/2p5ta54a14-att-1.jpg",
+          stagedPath: ".pi/attachments/sub-1-att-1.jpg",
+          sha256: "cafe",
+        },
+      ],
+    };
+    const { container } = renderComposer(undefined, { cwd: "/tmp/proj" });
+    usePiStore.setState({
+      tabs: { 7: { rejectedDraft: failedDraft } } as never,
+    });
+    await waitFor(() => {
+      expect(container.querySelectorAll("img")).toHaveLength(1);
+    });
+    fireEvent.click(
+      container.querySelector(
+        "button[aria-label='Remove 2p5ta54a14-att-1.jpg']",
+      )!,
+    );
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.some(([cmd]) => cmd === "fs_delete"),
+      ).toBe(true);
+    });
+    const deletes = invokeMock.mock.calls
+      .filter(([cmd]) => cmd === "fs_delete")
+      .map(([, args]) => (args as { path: string }).path);
+    expect(deletes).toEqual(["/tmp/proj/.pi/drafts/2p5ta54a14-att-1.jpg"]);
+  });
 });
 
 /// ---------------------------------------------------------------------------
