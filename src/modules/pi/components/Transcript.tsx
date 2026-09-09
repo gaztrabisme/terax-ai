@@ -23,7 +23,7 @@ import {
   MessageResponse,
   Shimmer,
 } from "@/components/chat";
-import { Fragment, useCallback, useMemo, useState } from "react";
+import { Fragment, useCallback, useId, useMemo, useState } from "react";
 import {
   messageBlocks,
   retryPendingLabel,
@@ -86,9 +86,11 @@ type Props = {
   /** Follow-up prompts sent while a turn was streaming; rendered after the
    *  turns until pi runs them. */
   queued?: PiQueued[];
-  /** Returns a queued prompt's text to the composer. Only called pre-ack:
-   *  it cannot cancel pi's queue (pi 0.3.0 has no command for that). */
-  onRemoveQueued?: (id: string) => void;
+  onRetryQueued?: (id: string) => void;
+  onEditQueued?: (id: string) => void;
+  onCancelQueued?: (id: string) => void;
+  queueRetryDisabled?: boolean;
+  queueBusy?: boolean;
   inFlight?: boolean;
 };
 
@@ -151,11 +153,13 @@ function projectPath(cwd: string, relative: string): string {
 }
 
 function AttachmentActions({
+  turnKey,
   cwd,
   attachments,
 }: {
   cwd?: string;
   attachments: Turn["savedAttachments"];
+  turnKey: string;
 }) {
   const button =
     "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground";
@@ -168,7 +172,7 @@ function AttachmentActions({
           <div
             key={`${attachment.path ?? "failed"}-${i}`}
             data-uat="attachment-chip"
-            data-uat-key={attachment.path ?? `failed-${i}`}
+            data-uat-key={`${turnKey}/${attachment.path ?? "failed"}/${i}`}
             data-uat-index={i}
             className={cn(
               "flex max-w-full flex-wrap items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 text-xs",
@@ -295,8 +299,10 @@ export function usageLabel(usage: PiUsage): string {
 export function ErrorCard({
   block,
   retry,
+  recordKey,
 }: {
   block: PiErrorBlock;
+  recordKey?: string;
   /** K13: the Retry submission control scoped to the failed submission id. */
   retry?: {
     submissionId: string;
@@ -304,10 +310,11 @@ export function ErrorCard({
     onRetry: () => void;
   };
 }) {
+  const fallback = useId();
   return (
     <div
       data-uat="error-card"
-      data-uat-key={retry?.submissionId}
+      data-uat-key={recordKey ?? retry?.submissionId ?? block.id ?? fallback}
       className="flex max-w-[72ch] items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[13px] text-destructive"
     >
       <HugeiconsIcon
@@ -337,35 +344,42 @@ export function ErrorCard({
   );
 }
 
-function RetryCard({ block }: { block: PiRetryBlock }) {
-  const text =
-    block.phase === "start"
-      ? retryPendingLabel({
-          attempt: block.attempt,
-          max: block.max ?? block.attempt,
-          delayMs: block.delayMs ?? 0,
-        })
-      : block.success === true
-        ? `retry ${block.attempt} succeeded`
-        : block.success === false
-          ? `retry ${block.attempt} failed`
-          : `retry ${block.attempt}`;
-  return (
-    <div
-      data-uat="retry-card"
-      className="flex max-w-[72ch] items-start gap-2 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-[13px] text-muted-foreground"
-    >
-      <HugeiconsIcon
-        icon={Refresh01Icon}
-        size={14}
-        strokeWidth={1.75}
-        className="mt-0.5 shrink-0"
-      />
-      <span className="select-text whitespace-pre-wrap wrap-break-word">
-        {text}
-      </span>
-    </div>
-  );
+function retryLabel(block: PiRetryBlock, current = false): string {
+  if (current && block.running && block.phase === "start") return `Attempt ${block.attempt}/${block.max ?? block.attempt} running`;
+  if (block.outcome === "cancelled") return `Cancelled after ${block.attempt} retries`;
+  if (block.outcome === "exited") return `Session exited after ${block.attempt} retries`;
+  if (block.phase === "start") return retryPendingLabel({ attempt: block.attempt, max: block.max ?? block.attempt, delayMs: block.delayMs ?? 0 });
+  return block.success ? `retry ${block.attempt} succeeded` : `Final failure after ${block.attempt} retries`;
+}
+
+function TurnCards({ cards, turnKey }: { cards: (PiErrorBlock | PiRetryBlock)[]; turnKey: string }) {
+  const provider = cards.filter((b) => b.kind === "retry" || !b.text.startsWith("prompt rejected:"));
+  const rejected = cards.filter((b): b is PiErrorBlock => b.kind === "error" && b.text.startsWith("prompt rejected:"));
+  const latest = provider[provider.length - 1];
+  const retry = [...provider].reverse().find((b): b is PiRetryBlock => b.kind === "retry");
+  const lastError = [...provider].reverse().flatMap((b) => (b.kind === "error" ? [b.text] : b.errorText ? [b.errorText] : []))[0];
+  const text = latest?.kind === "retry" ? retryLabel(latest, true) : retry ? `Final failure after ${retry.attempt} retries` : latest?.text;
+  return <>
+    {latest ? <div data-uat={retry ? "retry-card" : "error-card"} data-uat-key={`${turnKey}/status`}
+      className="max-w-[72ch] rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-[13px] text-muted-foreground">
+      <div className="flex items-start gap-2" aria-live="polite">
+        <HugeiconsIcon icon={retry ? Refresh01Icon : AlertCircleIcon} size={14} strokeWidth={1.75} className="mt-0.5 shrink-0" />
+        <div className="select-text whitespace-pre-wrap wrap-break-word">
+          <span>{text}</span>
+          {retry && lastError ? <div>Last error: {lastError}</div> : null}
+        </div>
+      </div>
+      {provider.length > 1 ? <details className="mt-2" data-uat="retry-history" data-uat-key={`${turnKey}/history`}>
+        <summary role="button" data-uat="retry-history-toggle" data-uat-key={`${turnKey}/history`} className="cursor-pointer text-xs">Attempt history</summary>
+        <ol className="mt-2 space-y-2">
+          {provider.map((b, i) => <li key={b.id ?? i} data-uat="retry-attempt" data-uat-key={`${turnKey}/${b.id ?? `record-${i}`}`}>
+            {b.kind === "retry" ? `${retryLabel(b)}${b.errorText ? `: ${b.errorText}` : ""}` : b.text}
+          </li>)}
+        </ol>
+      </details> : null}
+    </div> : null}
+    {rejected.map((block, i) => <ErrorCard key={block.id ?? i} recordKey={`${turnKey}/${block.id ?? `rejection-${i}`}`} block={block} />)}
+  </>;
 }
 
 export function workedLabel(turn: Turn, usage: PiUsage | null): string {
@@ -455,6 +469,7 @@ function ChildCard({
         <button
           type="button"
           data-uat="open-transcript"
+          data-uat-key={block.toolCallId}
           aria-label="Open transcript"
           onClick={() => onOpenChild(path)}
           className="shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-xs hover:bg-accent hover:text-foreground"
@@ -472,10 +487,11 @@ function ChildCard({
  * text on its own line under the footer (UX-14), never only a glyph or an
  * aria-label; text-xs stays and the padding gives the line a 24 px target.
  */
-function CacheQualifier() {
+function CacheQualifier({ turnKey }: { turnKey: string }) {
   return (
     <span
       data-uat="cache-qualifier"
+      data-uat-key={turnKey}
       className="block py-1 text-xs leading-4 text-muted-foreground"
     >
       {CACHE_QUALIFIER_TEXT}
@@ -531,7 +547,7 @@ function ActivityFold({
                 the computed share, or "cache unknown" when the prompt size
                 is 0. UAT never asserts this text. */}
             {usage ? (
-              <span data-uat="cache-share" data-uat-unstable="1">
+              <span data-uat="cache-share" data-uat-key={turn.key} data-uat-unstable="1">
                 {cacheShareLabel(usage)}
               </span>
             ) : null}
@@ -546,7 +562,7 @@ function ActivityFold({
       </button>
       {/* Under the footer, outside the toggle: the qualifier must be
           readable on its own and clicking it must not fold the turn. */}
-      {turn.status !== "streaming" && !usageError ? <CacheQualifier /> : null}
+      {turn.status !== "streaming" && !usageError ? <CacheQualifier turnKey={turn.key} /> : null}
       {open ? (
         <div className="mt-1.5 ml-1 space-y-2 border-l border-border/60 pl-3">
           {turn.activity.map((entry, i) => (
@@ -648,6 +664,7 @@ function AnswerActions({
       <button
         type="button"
         data-uat="copy"
+        data-uat-key={turn.key}
         onClick={copyRendered}
         className={btn}
       >
@@ -661,6 +678,7 @@ function AnswerActions({
       <button
         type="button"
         data-uat="copy-markdown"
+        data-uat-key={turn.key}
         onClick={copyMarkdown}
         className={btn}
       >
@@ -675,6 +693,7 @@ function AnswerActions({
         <button
           type="button"
           data-uat="open-in-editor"
+        data-uat-key={turn.key}
           onClick={openInEditor}
           className={btn}
         >
@@ -765,6 +784,7 @@ function TurnView({
         <div className="flex justify-end">
           <div
             data-uat="turn-user"
+        data-uat-key={turn.key}
             className="max-w-[65%] rounded-md bg-muted/70 px-3.5 py-2 text-[14px] leading-relaxed whitespace-pre-wrap text-foreground"
           >
             {images && images.length > 0 ? (
@@ -782,6 +802,7 @@ function TurnView({
             {turn.user}
             {turn.savedAttachments.length > 0 ? (
               <AttachmentActions
+                turnKey={turn.key}
                 cwd={cwd}
                 attachments={turn.savedAttachments}
               />
@@ -803,7 +824,7 @@ function TurnView({
           usageError={usageError}
         />
       ) : null}
-      {usageError ? <div id={usageFooterId(sessionId, turn.key)} tabIndex={-1}><ErrorCard block={{ kind: "error", text: usageError, at: 0 }} /></div> : null}
+      {usageError ? <div id={usageFooterId(sessionId, turn.key)} tabIndex={-1}><ErrorCard recordKey={`${turn.key}/usage`} block={{ kind: "error", text: usageError, at: 0 }} /></div> : null}
       {turn.asks.map((ask) => (
         <KeystoneCard
           key={ask.requestId}
@@ -813,7 +834,7 @@ function TurnView({
         />
       ))}
       {turn.answer ? (
-        <div data-uat="answer-body" className="max-w-[72ch]">
+        <div data-uat="answer-body" data-uat-key={turn.key} className="max-w-[72ch]">
           <MessageResponse
             streaming={turn.status === "streaming"}
             className="text-[14px] leading-relaxed text-foreground"
@@ -853,7 +874,11 @@ export function Transcript({
   failedSubmission,
   onRetrySubmission,
   queued,
-  onRemoveQueued,
+  onRetryQueued,
+  onEditQueued,
+  onCancelQueued,
+  queueRetryDisabled,
+  queueBusy,
   inFlight,
 }: Props) {
   // Error and retry blocks render as their own cards attached to the turn
@@ -893,8 +918,8 @@ export function Transcript({
     >
       <Conversation className="min-h-0 flex-1">
         <ConversationContent className="gap-6 p-4">
-          {ledger.error ? <ErrorCard block={{ kind: "error", text: ledger.error, at: 0 }} /> : null}
-          {discrepancies.map((text) => <ErrorCard key={text} block={{ kind: "error", text, at: 0 }} />)}
+          {ledger.error ? <ErrorCard recordKey="ledger-error" block={{ kind: "error", text: ledger.error, at: 0 }} /> : null}
+          {discrepancies.map((text) => <ErrorCard key={text} recordKey={`ledger/${text}`} block={{ kind: "error", text, at: 0 }} />)}
           {turns.map((turn, i) => (
             <Fragment key={turn.key}>
               <TurnView
@@ -919,23 +944,11 @@ export function Transcript({
                     ? "empty completion: no usage reported" : undefined
                 )}
               />
-              {(cards.get(i) ?? []).filter((block) => block.kind !== "error" || block.text !== "empty completion: no usage reported").map((block, j) =>
-                block.kind === "error" ? (
-                  <ErrorCard key={`card-${i}-${j}`} block={block} />
-                ) : (
-                  <RetryCard key={`card-${i}-${j}`} block={block} />
-                ),
-              )}
+              <TurnCards turnKey={turn.key} cards={(cards.get(i) ?? []).filter((b) => b.kind !== "error" || b.text !== "empty completion: no usage reported")} />
             </Fragment>
           ))}
           {/* Cards with no turn under them (failed before any message). */}
-          {(cards.get(turns.length) ?? []).map((block, j) =>
-            block.kind === "error" ? (
-              <ErrorCard key={`card-bare-${j}`} block={block} />
-            ) : (
-              <RetryCard key={`card-bare-${j}`} block={block} />
-            ),
-          )}
+          {turns.length === 0 ? <TurnCards turnKey="before-turn" cards={cards.get(0) ?? []} /> : null}
           {/* A failed submission stands as its own error card carrying the
               Retry submission control scoped to the submission id (K13).
               Retrying sends the same text and images under the same id;
@@ -957,12 +970,6 @@ export function Transcript({
               }}
             />
           ) : null}
-          {/* Queued follow-ups: pi accepted each one (the prompt command's
-              success response) and runs it when the current turn ends; the
-              block then leaves the queue and renders as a normal user turn.
-              Remove exists only before that ack: it hands the text back to
-              the composer but cannot cancel pi's queue, which pi 0.3.0
-              gives no command for, so an acked follow-up always runs. */}
           {(queued ?? []).map((q) => (
             <div
               key={q.id}
@@ -972,22 +979,19 @@ export function Transcript({
             >
               <div className="max-w-[65%] rounded-md border border-border/60 bg-muted/40 px-3.5 py-2 text-[14px] leading-relaxed">
                 <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-                  <span>Queued</span>
-                  {!q.acked && onRemoveQueued ? (
-                    <button
-                      type="button"
-                      data-uat="queued-remove"
-                      aria-label="Remove queued prompt"
-                      title="Returns the text to the composer; the queued follow-up cannot be cancelled"
-                      onClick={() => onRemoveQueued(q.id)}
-                      className="rounded-md border border-border/60 px-1.5 py-0.5 hover:bg-accent hover:text-foreground"
-                    >
-                      Remove
-                    </button>
-                  ) : null}
+                  <span>{q.state === "queued" ? "Queued" : q.state === "sending" ? "Sending" : "Queued, not sent"}</span>
+                  {([
+                    ["Retry", "queued-retry", onRetryQueued, queueRetryDisabled || q.state === "sending"],
+                    ["Edit", "queued-edit", onEditQueued, q.state === "sending"],
+                    ["Cancel", "queued-cancel", onCancelQueued, q.state === "sending"],
+                  ] as const).map(([label, uat, action, disabled]) => <button key={uat} type="button" data-uat={uat} data-uat-key={q.id}
+                    disabled={!!disabled || queueBusy || !action} onClick={() => action?.(q.id)}
+                    className="rounded-md border border-border/60 px-1.5 py-0.5 hover:bg-accent hover:text-foreground disabled:opacity-50">{label}</button>)}
                 </div>
                 <div className="whitespace-pre-wrap wrap-break-word text-foreground">
                   {q.text}
+                  {q.images.map((image, i) => <div key={q.attachmentIds[i]} data-uat="attachment-chip" data-uat-key={`${q.id}/${q.attachmentIds[i]}`}
+                    className="mt-1 text-xs text-muted-foreground">{image.draftPath?.split(/[\\/]/).pop() ?? q.attachmentIds[i]}</div>)}
                 </div>
               </div>
             </div>

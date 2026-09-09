@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -381,5 +381,61 @@ describe("ChatPane session identity (F1b)", () => {
     await waitFor(() => {
       expect(usePiStore.getState().tabs[34]!.scrollRequest).toBeNull();
     });
+  });
+});
+
+
+describe("G1 New session queue decision", () => {
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); usePiStore.setState({ tabs: {} }); });
+
+  function setup() {
+    seedTab(91, initialPiSessionState());
+    usePiStore.setState((s) => ({ tabs: { ...s.tabs, 91: { ...s.tabs[91], cwd: "/project", queued: ["q1", "q2"].map((id) => ({
+      id, text: id, images: [], attachmentIds: [], submittedAt: "2026-09-09T00:00:00Z", state: "not-sent" as const,
+    })) } } }));
+    const close = vi.spyOn(usePiStore.getState(), "close").mockImplementation(() => {});
+    const open = vi.spyOn(usePiStore.getState(), "openSession").mockResolvedValue(undefined);
+    const discard = vi.spyOn(usePiStore.getState(), "discardQueued").mockImplementation(async () => {
+      usePiStore.setState((s) => ({ tabs: { ...s.tabs, 91: { ...s.tabs[91], queued: [] } } }));
+    });
+    return { ...render(<ChatPane tabId={91} onOpenChild={() => {}} />), close, open, discard };
+  }
+
+  it("Keep leaves both prompts and the current session untouched", () => {
+    const view = setup();
+    fireEvent.click(view.getByText("New session"));
+    expect(view.getByRole("alertdialog").textContent).toContain("Discard 2 queued prompts?");
+    expect(view.close).not.toHaveBeenCalled();
+    fireEvent.click(view.getByText("Keep"));
+    expect(view.queryByRole("alertdialog")).toBeNull();
+    expect(view.close).not.toHaveBeenCalled();
+    expect(view.discard).not.toHaveBeenCalled();
+    expect(usePiStore.getState().tabs[91].queued).toHaveLength(2);
+  });
+
+  it("Discard waits for the queue record to be cleared before opening New session", async () => {
+    const view = setup();
+    let finish!: () => void;
+    view.discard.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = () => {
+      usePiStore.setState((s) => ({ tabs: { ...s.tabs, 91: { ...s.tabs[91], queued: [] } } }));
+      resolve();
+    }; }));
+    fireEvent.click(view.getByText("New session"));
+    fireEvent.click(view.getByText("Discard"));
+    expect(view.close).not.toHaveBeenCalled();
+    finish();
+    await waitFor(() => expect(view.open).toHaveBeenCalledTimes(1));
+    expect(view.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed Discard retains the decision and never opens a new session", async () => {
+    const view = setup();
+    view.discard.mockRejectedValueOnce(new Error("/project/.pi/drafts/tab.json: disk full"));
+    fireEvent.click(view.getByText("New session"));
+    fireEvent.click(view.getByText("Discard"));
+    await waitFor(() => expect(view.getByText(/disk full/)).toBeTruthy());
+    expect(view.getByRole("alertdialog")).toBeTruthy();
+    expect(view.close).not.toHaveBeenCalled();
+    expect(view.open).not.toHaveBeenCalled();
   });
 });

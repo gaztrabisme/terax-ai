@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const sent: string[] = [];
 const aborts: number[] = [];
 const exits: Array<(code: number) => void> = [];
+const files = new Map<string, string>();
 const { invokeMock, openPiSessionMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   openPiSessionMock: vi.fn(),
@@ -41,6 +42,13 @@ import { usePreferencesStore } from "@/modules/settings/preferences";
 import { initialPiSessionState, type PiFeedItem } from "./parse";
 import { usePiStore, type PendingSwitch } from "./piStore";
 
+async function openIdle(tabId: number, opts: { cwd: string }) {
+  await usePiStore.getState().openSession(tabId, opts);
+  usePiStore.setState((s) => ({ tabs: { ...s.tabs, [tabId]: { ...s.tabs[tabId]!, state: { ...s.tabs[tabId]!.state, status: "idle" } } } }));
+}
+function events() { return openPiSessionMock.mock.calls[openPiSessionMock.mock.calls.length - 1]![0].onEvent as (line: string) => void; }
+function startTurn() { events()('{"type":"agent_start","sessionId":"abcd1234-test"}'); }
+
 // Every patch goes through zustand's set(); a patch that returns the tabs map
 // instead of { tabs } silently updates nothing. Assert through the store.
 describe("piStore", () => {
@@ -50,14 +58,20 @@ describe("piStore", () => {
     aborts.length = 0;
     exits.length = 0;
     invokeMock.mockReset();
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "fs_read_file") return { kind: "text", content: "" };
+    files.clear();
+    invokeMock.mockImplementation(async (command: string, args?: { path?: string; content?: string }) => {
+      if (command === "fs_read_file") {
+        if (!files.has(args!.path!)) throw new Error("no such file");
+        return { kind: "text", content: files.get(args!.path!) };
+      }
+      if (command === "fs_write_file") files.set(args!.path!, args!.content!);
+      if (command === "fs_delete") files.delete(args!.path!);
       return ".pi/attachments/0-0.png";
     });
   });
 
   it("stores the session handle and applies events into tabs", async () => {
-    await usePiStore.getState().openSession(3, { cwd: "/tmp/p" });
+    await openIdle(3, { cwd: "/tmp/p" });
     await new Promise((r) => setTimeout(r, 0));
     const entry = usePiStore.getState().tabs[3];
     expect(entry?.session?.id).toBe(7);
@@ -68,7 +82,7 @@ describe("piStore", () => {
   });
 
   it("sends prompts through the live session and records exit", async () => {
-    await usePiStore.getState().openSession(4, { cwd: "/tmp/p" });
+    await openIdle(4, { cwd: "/tmp/p" });
     await usePiStore.getState().sendPrompt(4, "hello");
     expect(sent.length).toBe(1);
     expect(sent[0]).toContain("hello");
@@ -78,7 +92,7 @@ describe("piStore", () => {
   });
 
   it("sendPrompt carries images in pi's prompt shape", async () => {
-    await usePiStore.getState().openSession(5, { cwd: "/tmp/p" });
+    await openIdle(5, { cwd: "/tmp/p" });
     // The mocked session fires agent_start on open (status "thinking");
     // this test pins the plain idle-path wire shape.
     usePiStore.setState((s) => ({
@@ -109,7 +123,7 @@ describe("piStore", () => {
   });
 
   it("writes images before sending and records paths on the arriving user block", async () => {
-    await usePiStore.getState().openSession(9, { cwd: "/tmp/p" });
+    await openIdle(9, { cwd: "/tmp/p" });
     await usePiStore
       .getState()
       .sendPrompt(9, "look", [{ mediaType: "image/png", data: "AAAA" }]);
@@ -132,6 +146,7 @@ describe("piStore", () => {
       savedAttachments: [{ path: ".pi/attachments/0-0.png", error: null }],
     });
 
+    events()('{"type":"agent_end"}');
     await usePiStore
       .getState()
       .sendPrompt(9, "next", [{ mediaType: "image/png", data: "BBBB" }]);
@@ -150,7 +165,7 @@ describe("piStore", () => {
       if (command === "fs_read_file") return { kind: "text", content: "" };
       throw new Error("disk full");
     });
-    await usePiStore.getState().openSession(10, { cwd: "/tmp/p" });
+    await openIdle(10, { cwd: "/tmp/p" });
     await usePiStore
       .getState()
       .sendPrompt(10, "still send", [{ mediaType: "image/png", data: "AAAA" }]);
@@ -170,7 +185,7 @@ describe("piStore", () => {
   });
 
   it("accumulates session totals per tab and resets them on New session", async () => {
-    await usePiStore.getState().openSession(6, { cwd: "/tmp/p" });
+    await openIdle(6, { cwd: "/tmp/p" });
     // The mocked session's onEvent is the store's reduction entry point.
     const calls = vi.mocked(openPiSessionMock).mock.calls;
     const onEvent = calls[calls.length - 1]![0].onEvent;
@@ -187,7 +202,7 @@ describe("piStore", () => {
 
     // New session: close then open. The fresh entry starts from zero.
     await usePiStore.getState().kill(6);
-    await usePiStore.getState().openSession(6, { cwd: "/tmp/p" });
+    await openIdle(6, { cwd: "/tmp/p" });
     entry = usePiStore.getState().tabs[6];
     expect(entry?.state.turnTokens).toBe(0);
     expect(entry?.state.sessionCost).toBe(0);
@@ -195,8 +210,8 @@ describe("piStore", () => {
   });
 
   it("keeps tabs isolated: totals stay per entry", async () => {
-    await usePiStore.getState().openSession(7, { cwd: "/tmp/p" });
-    await usePiStore.getState().openSession(8, { cwd: "/tmp/q" });
+    await openIdle(7, { cwd: "/tmp/p" });
+    await openIdle(8, { cwd: "/tmp/q" });
     const calls = vi.mocked(openPiSessionMock).mock.calls;
     const onEvent = calls[calls.length - 1]![0].onEvent;
     onEvent(
@@ -210,39 +225,26 @@ describe("piStore", () => {
     );
   });
 
-  it("sends streamingBehavior follow-up while busy and queues the prompt", async () => {
-    await usePiStore.getState().openSession(11, { cwd: "/tmp/p" });
-    // The mocked session fires agent_start on open: status turns thinking.
-    await new Promise((r) => setTimeout(r, 0));
-    expect(usePiStore.getState().tabs[11]?.state.status).toBe("thinking");
-
+  it("persists a busy prompt locally and sends it normally after success", async () => {
+    await openIdle(11, { cwd: "/tmp/p" });
+    startTurn();
     await usePiStore.getState().sendPrompt(11, "hold this");
-    expect(sent).toHaveLength(1);
-    expect(JSON.parse(sent[0])).toEqual({
-      type: "prompt",
-      message: "hold this",
-      streamingBehavior: "follow-up",
-    });
-    const entry = usePiStore.getState().tabs[11];
-    expect(entry?.queued).toEqual([
-      { id: expect.any(String), text: "hold this", images: [], acked: false },
-    ]);
-
-    const calls = vi.mocked(openPiSessionMock).mock.calls;
-    const onEvent = calls[calls.length - 1]![0].onEvent;
-    // pi's ack for a queued follow-up is the prompt response itself.
-    onEvent('{"type":"response","command":"prompt","success":true}');
-    expect(usePiStore.getState().tabs[11]?.queued?.[0]?.acked).toBe(true);
-
-    // The queued text leaves the queue when pi emits its user block.
-    onEvent(
-      '{"type":"message_start","message":{"role":"user","content":"hold this"}}',
-    );
-    expect(usePiStore.getState().tabs[11]?.queued).toEqual([]);
+    expect(sent).toHaveLength(0);
+    const queued = usePiStore.getState().tabs[11]!.queued![0];
+    expect(queued).toMatchObject({ text: "hold this", state: "queued" });
+    expect(JSON.parse(files.get("/tmp/p/.pi/drafts/11.json")!).queue[0]).toMatchObject({ id: queued.id, text: "hold this", attachmentIds: [], submittedAt: expect.any(String) });
+    events()('{"type":"agent_end"}');
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(JSON.parse(sent[0])).toEqual({ type: "prompt", message: "hold this" });
+    events()('{"type":"response","command":"prompt","success":true}');
+    events()('{"type":"message_start","message":{"role":"user","content":"hold this"}}');
+    expect(usePiStore.getState().tabs[11]!.queued).toEqual([]);
+    await vi.waitFor(() => expect(JSON.parse(files.get("/tmp/p/.pi/drafts/11.json")!).queue).toEqual([]));
   });
 
   it("keeps a queued entry when another user block arrives first", async () => {
-    await usePiStore.getState().openSession(14, { cwd: "/tmp/p" });
+    await openIdle(14, { cwd: "/tmp/p" });
+    startTurn();
     await new Promise((r) => setTimeout(r, 0));
     await usePiStore.getState().sendPrompt(14, "hold this");
     const calls = vi.mocked(openPiSessionMock).mock.calls;
@@ -254,7 +256,7 @@ describe("piStore", () => {
   });
 
   it("hands the text back when pi answers success:false", async () => {
-    await usePiStore.getState().openSession(12, { cwd: "/tmp/p" });
+    await openIdle(12, { cwd: "/tmp/p" });
     await new Promise((r) => setTimeout(r, 0));
     await usePiStore.getState().sendPrompt(12, "queue me");
     const calls = vi.mocked(openPiSessionMock).mock.calls;
@@ -297,7 +299,7 @@ describe("piStore", () => {
         },
       }),
     );
-    await usePiStore.getState().openSession(13, { cwd: "/tmp/p" });
+    await openIdle(13, { cwd: "/tmp/p" });
     await expect(
       usePiStore.getState().sendPrompt(13, "lost text"),
     ).rejects.toThrow("stdin closed");
@@ -308,16 +310,17 @@ describe("piStore", () => {
     });
   });
 
-  it("removeQueued recalls the text to the composer path", async () => {
-    await usePiStore.getState().openSession(15, { cwd: "/tmp/p" });
+  it("Edit recalls the text to the composer path", async () => {
+    await openIdle(15, { cwd: "/tmp/p" });
+    startTurn();
     await new Promise((r) => setTimeout(r, 0));
     await usePiStore.getState().sendPrompt(15, "take me back");
     const id = usePiStore.getState().tabs[15]?.queued?.[0]?.id;
     expect(id).toBeTruthy();
-    usePiStore.getState().removeQueued(15, id!);
+    await usePiStore.getState().editQueued(15, id!);
     const entry = usePiStore.getState().tabs[15];
     expect(entry?.queued).toEqual([]);
-    expect(entry?.rejectedDraft).toEqual({
+    expect(entry?.rejectedDraft).toMatchObject({
       text: "take me back",
       images: [],
       error: null,
@@ -340,7 +343,7 @@ describe("piStore", () => {
       if (command === "fs_read_dir") return [];
       return undefined;
     });
-    await usePiStore.getState().openSession(20, { cwd: "/tmp/p" });
+    await openIdle(20, { cwd: "/tmp/p" });
     await usePiStore.getState().sendPrompt(20, "look", [
       {
         mediaType: "image/png",
@@ -353,7 +356,7 @@ describe("piStore", () => {
     expect(sent).toHaveLength(1);
     expect(invokeMock).toHaveBeenCalledWith("pi_stage_submission", {
       cwd: "/tmp/p",
-      submissionId: expect.stringMatching(/^sub-\d+$/),
+      submissionId: expect.stringMatching(/^sub-[a-f0-9-]+$/),
       attachments: [{ attachmentId: "att-1", path: ".pi/drafts/tab-att-1.png" }],
       workspace: { kind: "local" },
     });
@@ -403,7 +406,7 @@ describe("piStore", () => {
       if (command === "fs_read_file") return { kind: "text", content: "" };
       return undefined;
     });
-    await usePiStore.getState().openSession(21, { cwd: "/tmp/p" });
+    await openIdle(21, { cwd: "/tmp/p" });
     await new Promise((r) => setTimeout(r, 0));
     await usePiStore.getState().sendPrompt(21, "hold", [
       {
@@ -466,7 +469,7 @@ describe("piStore", () => {
       if (command === "fs_read_file") return { kind: "text", content: "" };
       return undefined;
     });
-    await usePiStore.getState().openSession(22, { cwd: "/tmp/p" });
+    await openIdle(22, { cwd: "/tmp/p" });
     await new Promise((r) => setTimeout(r, 0));
     await usePiStore.getState().sendPrompt(22, "hold", [
       {
@@ -522,7 +525,7 @@ describe("piStore", () => {
       if (command === "fs_read_file") return { kind: "text", content: "" };
       return undefined;
     });
-    await usePiStore.getState().openSession(23, { cwd: "/tmp/p" });
+    await openIdle(23, { cwd: "/tmp/p" });
     await new Promise((r) => setTimeout(r, 0));
     await expect(
       usePiStore.getState().sendPrompt(23, "look", [
@@ -590,7 +593,7 @@ describe("piStore", () => {
         };
       },
     );
-    await usePiStore.getState().openSession(24, { cwd: "/tmp/p" });
+    await openIdle(24, { cwd: "/tmp/p" });
     await new Promise((r) => setTimeout(r, 0));
     await expect(
       usePiStore.getState().sendPrompt(24, "hold", [
@@ -605,7 +608,7 @@ describe("piStore", () => {
     const failed = usePiStore.getState().tabs[24]?.failedSubmission;
     const submissionId = failed?.submissionId as string;
     expect(failed).toMatchObject({ state: "failed" });
-    expect(submissionId).toMatch(/^sub-\d+$/);
+    expect(submissionId).toMatch(/^sub-[a-f0-9-]+$/);
     expect(failed?.records[0]?.stagedPath).toBe(
       ".pi/attachments/sub-t-att-1.png",
     );
@@ -700,7 +703,7 @@ describe("piStore", () => {
         };
       },
     );
-    await usePiStore.getState().openSession(25, { cwd: "/tmp/p" });
+    await openIdle(25, { cwd: "/tmp/p" });
     await new Promise((r) => setTimeout(r, 0));
     await expect(
       usePiStore.getState().sendPrompt(25, "hold", [
@@ -714,7 +717,7 @@ describe("piStore", () => {
     ).rejects.toThrow("stdin closed");
     const submissionId = usePiStore.getState().tabs[25]?.failedSubmission
       ?.submissionId as string;
-    expect(submissionId).toMatch(/^sub-\d+$/);
+    expect(submissionId).toMatch(/^sub-[a-f0-9-]+$/);
     expect(
       usePiStore.getState().tabs[25]?.failedSubmission?.records[0]?.stagedPath,
     ).toBe(".pi/attachments/sub-r-att-1.png");
@@ -759,8 +762,14 @@ describe("piStore cancellation and queue acknowledgement", () => {
     aborts.length = 0;
     exits.length = 0;
     invokeMock.mockReset();
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "fs_read_file") return { kind: "text", content: "" };
+    files.clear();
+    invokeMock.mockImplementation(async (command: string, args?: { path?: string; content?: string }) => {
+      if (command === "fs_read_file") {
+        if (!files.has(args!.path!)) throw new Error("no such file");
+        return { kind: "text", content: files.get(args!.path!) };
+      }
+      if (command === "fs_write_file") files.set(args!.path!, args!.content!);
+      if (command === "fs_delete") files.delete(args!.path!);
       return ".pi/attachments/0-0.png";
     });
   });
@@ -861,51 +870,34 @@ describe("piStore cancellation and queue acknowledgement", () => {
     expect(entry.state.cancelRequested).toBe(false);
   });
 
-  it("a second send while one is queued joins the queue and both acks land", async () => {
+  it("fast sends queue distinct records and dispatch in order", async () => {
     await usePiStore.getState().openSession(35, { cwd: "/tmp/p" });
-    await new Promise((r) => setTimeout(r, 0));
-    await usePiStore.getState().sendPrompt(35, "Reply FAST_A.");
-    await usePiStore.getState().sendPrompt(35, "Reply FAST_B.");
-    const entry = usePiStore.getState().tabs[35]!;
-    expect(entry.queued?.map((q) => q.text)).toEqual([
-      "Reply FAST_A.",
-      "Reply FAST_B.",
+    await Promise.all([
+      usePiStore.getState().sendPrompt(35, "Reply FAST_A."),
+      usePiStore.getState().sendPrompt(35, "Reply FAST_B."),
     ]);
-    expect(entry.pendingPrompts).toHaveLength(2);
-    expect(JSON.parse(sent[1]!)).toMatchObject({
-      streamingBehavior: "follow-up",
-    });
-
-    // Both responses arrive after both sends: acks land FIFO, once each.
+    expect(sent).toHaveLength(0);
+    expect(usePiStore.getState().tabs[35]!.queued?.map((q) => q.text)).toEqual(["Reply FAST_A.", "Reply FAST_B."]);
+    lastEvents()('{"type":"agent_end"}');
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
     lastEvents()('{"type":"response","command":"prompt","success":true}');
-    lastEvents()('{"type":"response","command":"prompt","success":true}');
-    const after = usePiStore.getState().tabs[35]!;
-    expect(after.queued?.every((q) => q.acked)).toBe(true);
-    expect(after.pendingPrompts).toHaveLength(0);
+    lastEvents()('{"type":"message_start","message":{"role":"user","content":"Reply FAST_A."}}');
+    lastEvents()('{"type":"agent_end"}');
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(JSON.parse(sent[1])).toEqual({ type: "prompt", message: "Reply FAST_B." });
   });
 
-  it("a refusal of the second send removes its queue entry and keeps its text", async () => {
+  it("a refused queued retry stays recoverable and leaves the prompt FIFO", async () => {
     await usePiStore.getState().openSession(36, { cwd: "/tmp/p" });
-    await new Promise((r) => setTimeout(r, 0));
     await usePiStore.getState().sendPrompt(36, "Reply FAST_A.");
-    lastEvents()('{"type":"response","command":"prompt","success":true}');
-    await usePiStore.getState().sendPrompt(36, "Reply FAST_B.");
-    lastEvents()(
-      '{"type":"response","command":"prompt","success":false,"error":"Follow-up queue is full"}',
-    );
+    lastEvents()('{"type":"agent_end"}');
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    lastEvents()('{"type":"response","command":"prompt","success":false,"error":"refused"}');
     const entry = usePiStore.getState().tabs[36]!;
-    expect(entry.queued?.map((q) => q.text)).toEqual(["Reply FAST_A."]);
-    expect(entry.pendingPrompts).toHaveLength(0);
-    expect(entry.rejectedDraft).toMatchObject({
-      text: "Reply FAST_B.",
-      error: "Follow-up queue is full",
-    });
-    expect(
-      entry.state.blocks.some(
-        (block) =>
-          block.kind === "error" && block.text.startsWith("prompt rejected"),
-      ),
-    ).toBe(true);
+    expect(entry.queued?.[0]).toMatchObject({ text: "Reply FAST_A.", state: "not-sent" });
+    expect(entry.pendingPrompts).toEqual([]);
+    expect(entry.rejectedDraft).toBeNull();
+    expect(JSON.parse(files.get("/tmp/p/.pi/drafts/36.json")!).queue).toHaveLength(1);
   });
 
   it("a send during a cancel is refused visibly with the text kept", async () => {
@@ -988,8 +980,14 @@ describe("piStore session switch (F1b)", () => {
     aborts.length = 0;
     exits.length = 0;
     invokeMock.mockReset();
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "fs_read_file") return { kind: "text", content: "" };
+    files.clear();
+    invokeMock.mockImplementation(async (command: string, args?: { path?: string; content?: string }) => {
+      if (command === "fs_read_file") {
+        if (!files.has(args!.path!)) throw new Error("no such file");
+        return { kind: "text", content: files.get(args!.path!) };
+      }
+      if (command === "fs_write_file") files.set(args!.path!, args!.content!);
+      if (command === "fs_delete") files.delete(args!.path!);
       return ".pi/attachments/0-0.png";
     });
   });

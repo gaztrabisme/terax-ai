@@ -63,7 +63,11 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
   const entry = usePiStore((s) => s.tabs[tabId]);
   const sendPrompt = usePiStore((s) => s.sendPrompt);
   const retrySubmission = usePiStore((s) => s.retrySubmission);
-  const removeQueued = usePiStore((s) => s.removeQueued);
+  const retryQueued = usePiStore((s) => s.retryQueued);
+  const editQueued = usePiStore((s) => s.editQueued);
+  const cancelQueued = usePiStore((s) => s.cancelQueued);
+  const discardQueued = usePiStore((s) => s.discardQueued);
+  const [discardDecision, setDiscardDecision] = useState(false);
   const answerAsk = usePiStore((s) => s.answerAsk);
   const dismissAsk = usePiStore((s) => s.dismissAsk);
   const cancelTurn = usePiStore((s) => s.cancelTurn);
@@ -204,18 +208,20 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
     [modelRows, roles?.provider, chipModel],
   );
 
-  const submit = (markdown: string, images: ComposerImage[]) => {
-    if (!entry?.session || entry.exited) return;
+  const submit = async (markdown: string, images: ComposerImage[]) => {
+    const current = usePiStore.getState().tabs[tabId];
+    if (!current?.session || current.exited) throw new Error("Session exited");
     setSendError(null);
-    if (images.length > 0) pendingImagesRef.current.push(images);
-    sendPrompt(tabId, markdown, images).catch((e) => {
+    if (images.length > 0 && !turnInFlight(current.state.status) && !current.state.retry) pendingImagesRef.current.push(images);
+    try { await sendPrompt(tabId, markdown, images); } catch (e) {
       // The send failed, so unbind: the queued set must not attach to a
       // later user message. The store's failedSubmission carries the same
       // array and the failed-submission effect splices it as well.
       const idx = pendingImagesRef.current.indexOf(images);
       if (idx !== -1) pendingImagesRef.current.splice(idx, 1);
       setSendError(e instanceof Error ? e.message : String(e));
-    });
+      throw e;
+    }
   };
 
   // K13 retry: the same submission id resends the same text and images.
@@ -229,11 +235,17 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
     void retrySubmission(tabId, submissionId);
   };
 
-  const newSession = () => {
+  const startNewSession = () => {
+    setDiscardDecision(false);
     setSendError(null);
     close(tabId);
     void openSession(tabId, { cwd });
   };
+  const newSession = () => {
+    if (usePiStore.getState().tabs[tabId]?.queued?.length) setDiscardDecision(true);
+    else startNewSession();
+  };
+  const queueAction = (action: Promise<void>) => { void action.catch((error) => setSendError(String(error))); };
   // Stop and composer Escape share this one action: rpc abort, never a kill
   // (the process exit path only serves real exits and teardown).
   const stop = () => void cancelTurn(tabId);
@@ -328,6 +340,18 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
         ) : null}
       </div>
 
+      {discardDecision && (entry?.queued?.length ?? 0) > 0 ? (
+        <div role="alertdialog" aria-label={`Discard ${entry!.queued!.length} queued prompt${entry!.queued!.length === 1 ? "" : "s"}?`}
+          data-uat="queued-discard-decision" className="mx-3 mt-3 flex items-center gap-2 rounded-md border border-border p-3 text-sm">
+          <span className="flex-1">Discard {entry!.queued!.length} queued prompt{entry!.queued!.length === 1 ? "" : "s"}?</span>
+          <button type="button" data-uat="queued-keep" className={headerBtn} onClick={() => setDiscardDecision(false)}>Keep</button>
+          <button type="button" data-uat="queued-discard" className={headerBtn} disabled={!!entry?.queueBusy}
+            onClick={() => queueAction(discardQueued(tabId).then(() => {
+              if (!usePiStore.getState().tabs[tabId]?.queued?.length) startNewSession();
+            }))}>Discard</button>
+        </div>
+      ) : null}
+      {entry?.queueError ? <div role="alert" className="mx-3 mt-3 text-xs text-destructive">{entry.queueError}</div> : null}
       {launchFailed ? (
         <div
           data-uat="launch-error"
@@ -380,7 +404,11 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
         blocks={blocks}
         turnImages={turnImages}
         queued={entry?.queued ?? []}
-        onRemoveQueued={(id) => removeQueued(tabId, id)}
+        onRetryQueued={(id) => queueAction(retryQueued(tabId, id))}
+        onEditQueued={(id) => queueAction(editQueued(tabId, id))}
+        onCancelQueued={(id) => queueAction(cancelQueued(tabId, id))}
+        queueBusy={!!entry?.queueBusy}
+        queueRetryDisabled={!entry?.session || exited || showStop || !!retry || !!state?.cancelRequested}
         onAnswer={(requestId, answers) =>
           void answerAsk(tabId, requestId, answers)
         }

@@ -236,10 +236,16 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
     state: "a chat entry with a queued follow-up prompt",
   },
   {
-    id: "queued-remove",
+    id: "queued-edit",
     file: "src/modules/pi/components/Transcript.tsx",
     state: "a chat entry with a queued follow-up prompt",
   },
+  ...["queued-retry", "queued-cancel", "retry-history", "retry-history-toggle", "retry-attempt"].map((id) => ({
+    id, file: "src/modules/pi/components/Transcript.tsx", state: "queued recovery or retry history is visible",
+  })),
+  ...["queued-discard-decision", "queued-keep", "queued-discard"].map((id) => ({
+    id, file: "src/modules/pi/components/ChatPane.tsx", state: "New session has queued prompts to discard",
+  })),
   {
     id: "submission-retry",
     file: "src/modules/pi/components/Transcript.tsx",

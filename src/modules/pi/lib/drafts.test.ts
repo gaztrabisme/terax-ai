@@ -16,6 +16,8 @@ import {
   listRecoverableDrafts,
   loadDraft,
   loadDraftMeta,
+  loadDraftRecord,
+  updateDraftMeta,
   loadEditorDraft,
   migrateNumericDraft,
   numericDraftPath,
@@ -498,4 +500,56 @@ describe("sha256Hex", () => {
     );
     expect(await sha256Hex("")).toHaveLength(64);
   });
+});
+
+
+describe("G1 queued draft recovery", () => {
+  const queued = { id: "q1", text: "recover me", attachmentIds: [], submittedAt: "2026-09-09T00:00:00Z" };
+
+  it("offers a queue-only record and does not delete it as an empty draft", async () => {
+    const files = memoryFs();
+    await saveDraftMeta("/w", "queued-tab", { ...emptyChatMeta(), queue: [queued] });
+    expect(await listRecoverableDrafts("/w", [])).toEqual([{ sid: "queued-tab", firstLine: "1 queued prompt: recover me" }]);
+    expect(files.has("/w/.pi/drafts/queued-tab.json")).toBe(true);
+    expect((await loadDraftRecord("/w", "queued-tab"))?.meta).toMatchObject({ queue: [queued] });
+  });
+
+  it("serializes concurrent queue changes without losing either record", async () => {
+    memoryFs();
+    await Promise.all(["q1", "q2"].map((id) => updateDraftMeta("/w", "tab", (meta) => ({
+      ...meta, queue: [...(meta.queue ?? []), { ...queued, id }],
+    }))));
+    expect((await loadDraftMeta("/w", "tab"))?.queue?.map((q) => q.id)).toEqual(["q1", "q2"]);
+  });
+
+  it.each([
+    [{ ...queued }, { ...queued }],
+    [{ ...queued, attachmentIds: ["missing"] }],
+    [{ ...queued, submittedAt: "bad date" }],
+    [{ ...queued, text: 7 }],
+  ])("reports malformed queues instead of dropping their entries", async (...queue) => {
+    const files = memoryFs();
+    files.set("/w/.pi/drafts/bad.json", JSON.stringify({ ...emptyChatMeta(), queue }));
+    await expect(loadDraftRecord("/w", "bad")).rejects.toThrow("/w/.pi/drafts/bad.json");
+    expect(files.has("/w/.pi/drafts/bad.json")).toBe(true);
+  });
+
+  it("refuses to clear an unreadable record instead of discarding an unseen queue", async () => {
+    const files = memoryFs();
+    files.set("/w/.pi/drafts/bad.json", "{broken queue");
+    await expect(clearDraft("/w", "bad")).rejects.toThrow("/w/.pi/drafts/bad.json");
+    expect(files.get("/w/.pi/drafts/bad.json")).toBe("{broken queue");
+  });
+
+  it("does not resurrect a cancelled queue's chips through an older metadata snapshot", async () => {
+    memoryFs();
+    const initial = { ...emptyChatMeta(), queue: [{ ...queued, attachmentIds: ["att-1"] }], attachments: [{
+      id: "att-1", path: ".pi/drafts/att-1.png", mime: "image/png", sha256: "abc", state: "queued",
+    }] };
+    await saveDraftMeta("/w", "tab", initial);
+    await updateDraftMeta("/w", "tab", (meta) => ({ ...meta, queue: [], attachments: [] }));
+    await saveDraftMeta("/w", "tab", initial);
+    expect(await loadDraftMeta("/w", "tab")).toMatchObject({ queue: [], attachments: [] });
+  });
+
 });

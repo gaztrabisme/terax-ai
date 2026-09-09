@@ -93,6 +93,14 @@ export type ChatDraftMeta = {
   submissionId: string | null;
   attachments: DraftAttachmentMeta[];
   sources: DraftSourceMeta[];
+  queue?: DraftQueuedPrompt[];
+};
+
+export type DraftQueuedPrompt = {
+  id: string;
+  text: string;
+  attachmentIds: string[];
+  submittedAt: string;
 };
 
 export type EditorDraftMeta = {
@@ -145,6 +153,17 @@ function parseChatMeta(raw: string): ChatDraftMeta | null {
         typeof s.sha256 === "string" &&
         typeof s.insertedAt === "string",
     );
+  }
+  if (data.queue !== undefined) {
+    if (!Array.isArray(data.queue) || data.queue.some((q) =>
+      !isRecord(q) || typeof q.id !== "string" || !q.id ||
+      typeof q.text !== "string" || typeof q.submittedAt !== "string" ||
+      !Number.isFinite(Date.parse(q.submittedAt)) || !Array.isArray(q.attachmentIds) ||
+      q.attachmentIds.some((id: unknown) => typeof id !== "string" || !id) ||
+      new Set(q.attachmentIds).size !== q.attachmentIds.length)) return null;
+    meta.queue = data.queue as DraftQueuedPrompt[];
+    if (new Set(meta.queue.map((q) => q.id)).size !== meta.queue.length ||
+        meta.queue.some((q) => q.attachmentIds.some((id) => !meta.attachments.some((a) => a.id === id)))) return null;
   }
   return meta;
 }
@@ -228,6 +247,7 @@ async function attachmentFileExists(cwd: string, path: string): Promise<boolean>
 async function draftIsWorthOffering(cwd: string, record: DraftRecord): Promise<boolean> {
   if (record.markdown.trim() !== "") return true;
   if (record.kind !== "chat") return false;
+  if (record.meta.queue?.length) return true;
   if (record.meta.sources.length > 0) return true;
   const existing = await Promise.all(
     record.meta.attachments.map((attachment) => attachmentFileExists(cwd, attachment.path)),
@@ -265,6 +285,7 @@ function queuedImagesLabel(meta: ChatDraftMeta): string {
 function chatDraftLabel(markdown: string, meta: ChatDraftMeta): string {
   const first = draftFirstLine(markdown);
   if (first.trim() !== "" && !isFenceLine(first)) return first;
+  if (meta.queue?.length) return `${meta.queue.length} queued prompt${meta.queue.length === 1 ? "" : "s"}: ${meta.queue[0].text}`;
   if (meta.sources.length > 0) {
     const quoted = quotationFirstLine(markdown);
     if (quoted !== "") return quoted;
@@ -377,9 +398,48 @@ export async function loadDraft(
 }
 
 export async function clearDraft(cwd: string, tabId: string): Promise<void> {
-  for (const path of [draftPath(cwd, tabId), draftMetaPath(cwd, tabId)]) {
-    await deleteOrNull(path);
-  }
+  await serializeDraftMeta(cwd, tabId, async () => {
+    const raw = await readRecoveryText(draftMetaPath(cwd, tabId));
+    const meta = raw === null ? null : parseChatMeta(raw);
+    if (raw !== null && !meta && !parseEditorMeta(raw)) throw new Error(`${draftMetaPath(cwd, tabId)}: Invalid draft record`);
+    if (meta?.queue?.length) {
+      const ids = new Set(meta.queue.flatMap((q) => q.attachmentIds));
+      await writeDraftMeta(cwd, tabId, { ...emptyChatMeta(), queue: meta.queue,
+        attachments: meta.attachments.filter((a) => ids.has(a.id)) });
+      await deleteOrNull(draftPath(cwd, tabId));
+    } else {
+      for (const path of [draftPath(cwd, tabId), draftMetaPath(cwd, tabId)]) await deleteOrNull(path);
+    }
+  });
+}
+
+const metaWrites = new Map<string, Promise<unknown>>();
+
+function serializeDraftMeta<T>(cwd: string, tabId: string, work: () => Promise<T>): Promise<T> {
+  const path = draftMetaPath(cwd, tabId);
+  const next = (metaWrites.get(path) ?? Promise.resolve()).catch(() => {}).then(work);
+  metaWrites.set(path, next);
+  void next.finally(() => { if (metaWrites.get(path) === next) metaWrites.delete(path); }).catch(() => {});
+  return next;
+}
+
+async function writeDraftMeta(cwd: string, tabId: string, meta: ChatDraftMeta): Promise<void> {
+  await ensureDraftDir(cwd);
+  await invoke("fs_write_file", { path: draftMetaPath(cwd, tabId), content: JSON.stringify(meta), workspace: currentWorkspaceEnv() });
+}
+
+export function updateDraftMeta(
+  cwd: string, tabId: string, update: (meta: ChatDraftMeta) => ChatDraftMeta | Promise<ChatDraftMeta>,
+): Promise<ChatDraftMeta> {
+  return serializeDraftMeta(cwd, tabId, async () => {
+    const raw = await readRecoveryText(draftMetaPath(cwd, tabId));
+    const meta = raw === null ? emptyChatMeta() : parseChatMeta(raw);
+    if (!meta) throw new Error(`${draftMetaPath(cwd, tabId)}: Invalid draft record`);
+    const next = await update(meta);
+    try { await writeDraftMeta(cwd, tabId, next); }
+    catch (error) { throw new Error(`${draftMetaPath(cwd, tabId)}: ${String(error)}`); }
+    return next;
+  });
 }
 
 export async function saveDraftMeta(
@@ -387,11 +447,14 @@ export async function saveDraftMeta(
   tabId: string,
   meta: ChatDraftMeta,
 ): Promise<void> {
-  await ensureDraftDir(cwd);
-  await invoke("fs_write_file", {
-    path: draftMetaPath(cwd, tabId),
-    content: JSON.stringify(meta),
-    workspace: currentWorkspaceEnv(),
+  await updateDraftMeta(cwd, tabId, (current) => {
+    const queue = current.queue ?? meta.queue;
+    const ids = new Set(queue?.flatMap((q) => q.attachmentIds));
+    const snapshotIds = new Set(meta.queue?.flatMap((q) => q.attachmentIds));
+    return { ...meta, ...(queue && { queue }), attachments: [
+      ...meta.attachments.filter((a) => !ids.has(a.id) && (!snapshotIds.has(a.id) || current.attachments.some((saved) => saved.id === a.id))),
+      ...(current.queue ? current : meta).attachments.filter((a) => ids.has(a.id)),
+    ] };
   });
 }
 

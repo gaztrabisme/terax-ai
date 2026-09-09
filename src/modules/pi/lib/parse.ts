@@ -88,6 +88,7 @@ export type PiAskBlock = {
 };
 
 export type PiErrorBlock = {
+  id?: string;
   kind: "error";
   /** The error text pi reported on the wire. */
   text: string;
@@ -96,6 +97,9 @@ export type PiErrorBlock = {
 };
 
 export type PiRetryBlock = {
+  id?: string;
+  outcome?: "cancelled" | "exited";
+  running?: boolean;
   kind: "retry";
   /** start = auto_retry_start; end = auto_retry_end. */
   phase: "start" | "end";
@@ -240,6 +244,7 @@ export function requestCancel(state: PiSessionState): PiSessionState {
     // A pending auto-retry label would sit on top of Cancelling; the abort
     // (and abort_retry) withdraws the retry.
     retry: null,
+    blocks: finishRetry(state, "cancelled"),
   };
 }
 
@@ -253,12 +258,19 @@ export function sessionExited(state: PiSessionState): PiSessionState {
     cancelRequested: false,
     retry: null,
     openMessageId: null,
-    blocks: state.blocks.map((block) =>
+    blocks: finishRetry(state, "exited").map((block) =>
       block.kind === "message" && block.streaming
         ? { ...block, streaming: false }
         : block,
     ),
   };
+}
+
+function finishRetry(state: PiSessionState, outcome: "cancelled" | "exited"): PiFeedItem[] {
+  if (!state.retry) return state.blocks;
+  const previous = [...state.blocks].reverse().find((b) => b.kind === "retry");
+  if (!previous || previous.kind !== "retry") return state.blocks;
+  return [...state.blocks, { ...previous, id: `${previous.id ?? state.seq}-${outcome}`, phase: "end", success: null, outcome }];
 }
 
 /** True when the event names a session the reducer is not on. The switch ack
@@ -466,6 +478,8 @@ export function applyEvent(
       return {
         ...base,
         switching: false,
+        blocks: base.retry ? base.blocks.map((block) => block.kind === "retry" && block.phase === "start" && block.attempt === base.retry!.attempt
+          ? { ...block, running: true } : block) : base.blocks,
         status: base.status === "awaiting-ask" ? base.status : "thinking",
         // A run starting after a cancel is a new run: Stop applies to it
         // again, and the old cancel may not swallow its outcome.
@@ -536,11 +550,12 @@ export function applyEvent(
         return {
           ...state,
           status: "done",
+          seq: state.seq + (empty && !currentBlocks.some((b) => b.kind === "error" && b.text === text) ? 1 : 0),
           lastErrorText: null,
           retry: null,
           cancelRequested: false,
           blocks: empty && !currentBlocks.some((b) => b.kind === "error" && b.text === text)
-            ? [...state.blocks, { kind: "error", text, at: now }]
+            ? [...state.blocks, { kind: "error", id: `error-${state.seq}`, text, at: now }]
             : state.blocks,
         };
       }
@@ -567,7 +582,7 @@ export function applyEvent(
         lastErrorText: error,
         blocks: deduped
           ? state.blocks
-          : [...state.blocks, { kind: "error", text: error, at: now }],
+          : [...state.blocks, { kind: "error", id: `error-${state.seq}`, text: error, at: now }],
         seq: deduped ? state.seq : state.seq + 1,
       };
     }
@@ -657,6 +672,7 @@ function applyRetryStart(
   if (attempt === null || max === null || delayMs === null) return state;
   const block: PiRetryBlock = {
     kind: "retry",
+    id: `retry-${state.seq}`,
     phase: "start",
     attempt,
     max,
@@ -675,6 +691,7 @@ function applyRetryStart(
     cancelRequested: false,
     retry: { attempt, max, delayMs },
     blocks: [...state.blocks, block],
+    seq: state.seq + 1,
   };
 }
 
@@ -688,6 +705,7 @@ function applyRetryEnd(
   if (attempt === null) return state;
   const block: PiRetryBlock = {
     kind: "retry",
+    id: `retry-${state.seq}`,
     phase: "end",
     attempt,
     max: null,
@@ -700,6 +718,7 @@ function applyRetryEnd(
     ...state,
     retry: null,
     blocks: [...state.blocks, block],
+    seq: state.seq + 1,
   };
 }
 
@@ -959,7 +978,7 @@ function applyPromptRejection(
   return {
     ...state,
     lastErrorText: text,
-    blocks: [...state.blocks, { kind: "error", text, at: now }],
+    blocks: [...state.blocks, { kind: "error", id: `error-${state.seq}`, text, at: now }],
     seq: state.seq + 1,
   };
 }

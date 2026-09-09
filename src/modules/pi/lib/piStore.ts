@@ -22,7 +22,6 @@ import {
   type PiImageAttachment,
   type PiSavedAttachment,
   type PiSessionState,
-  type PiStreamingBehavior,
 } from "./parse";
 import {
   modelRowsForProvider,
@@ -35,8 +34,8 @@ import {
 import { restoredUsageTotals, type ParsedSessionFile } from "./sessionFile";
 import { openPiSession, type PiSessionHandle } from "./rpc-client";
 import { PI_MODULE_PREFS_DEFAULTS } from "./settingsSchema";
-import { groupTurns, messageText } from "./turns";
-import { clearDraft, loadDraft, loadDraftMeta, saveDraftMeta } from "./drafts";
+import { groupTurns } from "./turns";
+import { loadDraft, loadDraftRecord, saveDraft, updateDraftMeta, draftMetaPath, type DraftQueuedPrompt } from "@/modules/pi/lib/drafts";
 import { stableIdOf } from "@/modules/tabs/lib/sid";
 
 /** An image handed to sendPrompt: the wire shape plus the K13 transaction
@@ -60,19 +59,13 @@ export type PiOpenOptions = {
  *  data-pi-model / data-pi-smol root attributes. */
 export type PiRoles = { provider: string; model: string; smol: string };
 
-/** A prompt sent while a turn was streaming: queued locally in the order it
- *  was sent, with pi's acknowledgement state for the prompt command. */
-export type PiQueued = {
-  id: string;
-  text: string;
-  images: PiImageAttachment[];
-  /** pi answered success for the prompt command: the follow-up is in its
-   *  queue and Remove (a local-only recall) is no longer offered. */
-  acked: boolean;
+export type PiQueued = DraftQueuedPrompt & {
+  images: ComposerImage[];
+  state: "queued" | "not-sent" | "sending";
+  autoSend?: boolean;
 };
 
-/** Text handed back to the composer after a refused send or a queued Remove:
- *  restored into the empty editor once, then cleared. */
+/** A refused send restores into the empty editor; queue Edit appends once. */
 export type PiRejectedDraft = {
   text: string;
   images: PiImageAttachment[];
@@ -81,6 +74,7 @@ export type PiRejectedDraft = {
   /** K13: the failed submission's attachment records, adopted by the
    *  composer's restored chips so ids and draft files survive the refusal. */
   records?: PiSentRecord[];
+  queueReturn?: boolean;
 };
 
 /** K13 transaction record for one attachment: the draft file it came from,
@@ -117,13 +111,13 @@ type PendingSet = {
   saved: PiSavedAttachment[];
   records: PiSentRecord[];
   text: string | null;
+  queueId?: string;
 };
 
-/** A send awaiting pi's prompt-command acknowledgement. pi 0.3.0 accepts
- *  several follow-ups (rpc.rs MAX_RPC_PENDING_MESSAGES = 128) and echoes no
- *  id for our id-less commands, but answers them in stdin order, so the
- *  oldest entry is the correlation for the next response frame. */
+/** Unanswered prompt commands, correlated in stdin order for pi 0.3.0. */
 export type PiPendingPrompt = {
+  id?: string;
+  queueId?: string;
   text: string;
   images: PiImageAttachment[];
   submissionId: string | null;
@@ -166,8 +160,11 @@ type PiTabEntry = {
   roles: PiRoles;
   cwd?: string;
   pendingAttachments?: PendingSet[];
-  /** Follow-ups sent while a turn was streaming, in send order. */
+  /** Durable prompts waiting for a successful turn or an explicit Retry. */
   queued?: PiQueued[];
+  queueError?: string | null;
+  queueBusy?: string | null;
+  queueEpoch?: number;
   /** Sends whose prompt response has not landed yet, in send order; pi
    *  answers them in stdin order, so the head is the correlation. */
   pendingPrompts?: PiPendingPrompt[];
@@ -209,9 +206,10 @@ type PiStore = {
    *  copies are rewritten, the prompt is sent again, and only its own
    *  acknowledgement can bind the attachments to a turn. */
   retrySubmission: (tabId: number, submissionId: string) => Promise<void>;
-  /** Drops a queued prompt that pi has not acknowledged yet and hands its
-   *  text back to the composer. pi's own queue cannot be cancelled. */
-  removeQueued: (tabId: number, id: string) => void;
+  retryQueued: (tabId: number, id: string) => Promise<void>;
+  editQueued: (tabId: number, id: string) => Promise<void>;
+  cancelQueued: (tabId: number, id: string) => Promise<void>;
+  discardQueued: (tabId: number) => Promise<void>;
   /** The one cancellation action behind Stop and composer Escape (design.md
    *  3.3): sends pi's rpc abort command, never kills the process, flips the
    *  strip to Cancelling at once and lets the abort response or the run's
@@ -256,12 +254,6 @@ function patchEntry(
 
 let openGen = 0;
 
-/** Session-wide counter giving each queued prompt a stable data-uat-key. */
-let queuedSeq = 0;
-
-/** Session-wide counter minting submission ids for the K13 transaction. */
-let submissionSeq = 0;
-
 /** Session-wide counter pairing scroll requests with their consumers. */
 let scrollSeq = 0;
 
@@ -276,65 +268,24 @@ function draftKeyOf(tabId: number): string {
 /** Rust stage reply for one attachment. */
 type StagedReply = { attachmentId: string; path: string; sha256: string };
 
-/** Records the transaction start on the draft file: the submission id and
- *  the queued attachments' state "draft". Fire-and-forget. */
-function markDraftRecordPending(
-  tabId: number,
-  cwd: string | undefined,
-  submissionId: string,
-  records: PiSentRecord[],
-): void {
-  if (!cwd) return;
-  const key = draftKeyOf(tabId);
-  void loadDraftMeta(cwd, key)
-    .then(async (meta) => {
-      const base = meta ?? {
-        v: 1 as const,
-        submissionId: null,
-        attachments: [],
-        sources: [],
-      };
-      const ids = new Set(records.map((r) => r.attachmentId));
-      await saveDraftMeta(cwd, key, {
-        ...base,
-        submissionId,
-        attachments: base.attachments.map((a) =>
-          ids.has(a.id) ? { ...a, state: "draft" } : a,
-        ),
-      });
-    })
-    .catch(() => {
-      // The in-memory state stands; the record keeps its previous shape.
-    });
+function markDraftRecordPending(tabId: number, cwd: string | undefined, submissionId: string, records: PiSentRecord[]): void {
+  markDraftAttachments(tabId, cwd, submissionId, records, "draft");
 }
 
-/** Records the failed send on the draft file: state "failed", submission id
- *  kept. Fire-and-forget; the in-memory failedSubmission is the UI truth,
- *  the record is what a restart recovers. */
-function markDraftRecordFailed(
-  tabId: number,
-  cwd: string | undefined,
-  submissionId: string,
-  records: PiSentRecord[],
+function markDraftRecordFailed(tabId: number, cwd: string | undefined, submissionId: string, records: PiSentRecord[]): void {
+  markDraftAttachments(tabId, cwd, submissionId, records, "failed");
+}
+
+function markDraftAttachments(
+  tabId: number, cwd: string | undefined, submissionId: string, records: PiSentRecord[], state: string,
 ): void {
   if (!cwd) return;
-  const key = draftKeyOf(tabId);
-  void loadDraftMeta(cwd, key)
-    .then(async (meta) => {
-      const base = meta ?? { v: 1 as const, submissionId: null, attachments: [], sources: [] };
-      const failedIds = new Set(records.map((r) => r.attachmentId));
-      const attachments = base.attachments.map((a) =>
-        failedIds.has(a.id) ? { ...a, state: "failed" } : a,
-      );
-      await saveDraftMeta(cwd, key, {
-        ...base,
-        submissionId,
-        attachments,
-      });
-    })
-    .catch(() => {
-      // The in-memory state stands; the record keeps its previous shape.
-    });
+  const ids = new Set(records.map((r) => r.attachmentId));
+  void updateDraftMeta(cwd, draftKeyOf(tabId), (meta) => ({
+    ...meta,
+    submissionId,
+    attachments: meta.attachments.map((a) => ids.has(a.id) ? { ...a, state } : a),
+  })).catch((error) => queueFailure(tabId, error));
 }
 
 /** Closes the draft record after a bound submission: the .json loses its
@@ -347,29 +298,22 @@ async function closeDraftRecord(
   text: string,
 ): Promise<void> {
   const key = draftKeyOf(tabId);
-  for (const record of records) {
-    if (!record.draftPath) continue;
-    try {
-      await invoke("fs_delete", {
-        path: `${cwd.replace(/[\\/]+$/, "")}/${record.draftPath}`,
-        workspace: currentWorkspaceEnv(),
-      });
-    } catch {
-      // The draft file may already be gone; the staged copy is indexed.
+  await updateDraftMeta(cwd, key, async (meta) => {
+    const boundIds = new Set(records.map((r) => r.attachmentId));
+    const queuedIds = new Set(meta.queue?.flatMap((q) => q.attachmentIds));
+    for (const record of records) {
+      if (!record.draftPath || queuedIds.has(record.attachmentId)) continue;
+      try {
+        await invoke("fs_delete", {
+          path: `${cwd.replace(/[\\/]+$/, "")}/${record.draftPath}`,
+          workspace: currentWorkspaceEnv(),
+        });
+      } catch { /* The staged copy is already indexed. */ }
     }
-  }
-  const draftText = await loadDraft(cwd, key);
-  if (draftText !== null && draftText === text) {
-    await clearDraft(cwd, key);
-    return;
-  }
-  const meta = await loadDraftMeta(cwd, key);
-  await saveDraftMeta(cwd, key, {
-    v: 1,
-    submissionId: null,
-    attachments: [],
-    sources: meta?.sources ?? [],
+    return { ...meta, submissionId: null, attachments: meta.attachments.filter((a) => !boundIds.has(a.id) || queuedIds.has(a.id)) };
   });
+  const draftText = await loadDraft(cwd, key);
+  if (draftText !== null && draftText === text) await saveDraft(cwd, key, "");
 }
 
 /** Runs the bind job created by an acknowledged user block: append the
@@ -559,8 +503,8 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
         turnUsage: totals.turnUsage,
       },
       pendingAttachments: [],
-      queued: [],
-      pendingPrompts,
+      queued: queued.map((q) => ({ ...q, state: "not-sent", autoSend: false })),
+      pendingPrompts: [],
       rejectedDraft,
       failedSubmission,
       pendingSwitch: null,
@@ -583,14 +527,6 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
     const sentPrompt = pendingPrompts[0]!;
     pendingPrompts = pendingPrompts.slice(1);
     if (response.ok) {
-      // Accepted: the oldest matching entry still unacked is now in pi's
-      // queue and Remove is no longer offered for it.
-      let acked = false;
-      queued = queued.map((q) => {
-        if (acked || q.acked || q.text !== sentPrompt.text) return q;
-        acked = true;
-        return { ...q, acked: true };
-      });
       // A retried submission's ack clears the standing failure card; only
       // its acknowledged turn can own the attachments.
       if (
@@ -601,16 +537,10 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
         failedSubmission = null;
       }
     } else {
-      // Refused: pi put the "prompt rejected" card on the feed; hand the
-      // text back to the composer instead of leaving it lost, and do not
-      // keep a queued entry pi never accepted. The refused send's own
-      // pending set (matched by submission id, text for the legacy path)
-      // leaves the queue too: a failed submission never binds to a later
-      // turn.
-      const index = queued.findIndex(
-        (q) => !q.acked && q.text === sentPrompt.text,
-      );
-      if (index !== -1) queued = queued.filter((_, i) => i !== index);
+      state = { ...state, status: "idle" };
+      // A refused queue Retry keeps its durable record. Only this send's
+      // attachments leave the binding FIFO.
+      if (sentPrompt.queueId) queued = queued.map((q) => q.id === sentPrompt.queueId ? { ...q, state: "not-sent" } : q);
       const pendingIndex = pending.findIndex(
         (p) =>
           p.submissionId !== null
@@ -630,7 +560,7 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
           error: response.error,
           state: "failed",
         };
-      } else if (sentPrompt.submissionId !== null) {
+      } else if (sentPrompt.submissionId !== null && !sentPrompt.queueId) {
         failedSubmission = {
           submissionId: sentPrompt.submissionId,
           text: sentPrompt.text,
@@ -640,7 +570,7 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
           state: "failed",
         };
       }
-      rejectedDraft = {
+      if (!sentPrompt.queueId) rejectedDraft = {
         text: sentPrompt.text,
         images: sentPrompt.images,
         error: response.error,
@@ -650,14 +580,12 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
   }
 
   if (state.switching || state.blocks.length < previous.blocks.length) {
-    // The session that held the follow-up queue is gone: queued prompts can
-    // never run, so they must not read as pending. The composer restore and
-    // the sends awaiting their acks are not tied to this session and stay.
+    // Queued work belongs to the tab and requires an explicit Retry after a switch.
     return {
       state,
       pendingAttachments: [],
-      queued: [],
-      pendingPrompts,
+      queued: queued.map((q) => ({ ...q, state: "not-sent", autoSend: false })),
+      pendingPrompts: [],
       rejectedDraft,
       failedSubmission,
       ...switchPassthrough(entry),
@@ -707,6 +635,7 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
 
   if (pending.length > 0) {
     const head = pending[0]!;
+    if (head.queueId) queued = queued.filter((q) => q.id !== head.queueId);
     state = recordSavedAttachments(state, user.id, head.saved);
     pending = pending.slice(1);
     // pi's acknowledgement for the submission is this user block: append
@@ -727,13 +656,6 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
       }
     }
   }
-  // A queued follow-up leaves the local queue once pi emits the user block
-  // carrying its text (the first matching block after the queue push).
-  if (queued.length > 0) {
-    const text = messageText(user);
-    const index = queued.findIndex((q) => q.text === text);
-    if (index !== -1) queued = queued.filter((_, i) => i !== index);
-  }
   return {
     state,
     pendingAttachments: pending,
@@ -744,6 +666,192 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
     ...switchPassthrough(entry),
     bind,
   };
+}
+
+function queueFailure(tabId: number, error: unknown): void {
+  usePiStore.setState((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, queueError: attachmentError(error) })));
+}
+
+async function recoverQueue(cwd: string, key: string): Promise<PiQueued[]> {
+  const record = await loadDraftRecord(cwd, key);
+  if (!record || record.kind !== "chat") return [];
+  return Promise.all((record.meta.queue ?? []).map(async (q) => ({
+    ...q,
+    state: "not-sent" as const,
+    images: await Promise.all(q.attachmentIds.map(async (id): Promise<ComposerImage> => {
+      const att = record.meta.attachments.find((a) => a.id === id)!;
+      let data = "";
+      try {
+        const bytes = await invoke<{ base64: string }>("fs_read_file_bytes", {
+          path: `${cwd.replace(/[\\/]+$/, "")}/${att.path}`, workspace: currentWorkspaceEnv(),
+        });
+        data = bytes.base64;
+      } catch { /* Keep missing chips available to Edit. */ }
+      return { attachmentId: id, draftPath: att.path, sha256: att.sha256, mediaType: att.mime, data };
+    })),
+  })));
+}
+
+const queueWrites = new Map<number, Promise<void>>();
+
+function enqueuePrompt(tabId: number, text: string, images: ComposerImage[]): Promise<void> {
+  const entry = usePiStore.getState().tabs[tabId]!;
+  const previous = queueWrites.get(tabId) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(() => persistQueuedPrompt(tabId, entry, text, images));
+  queueWrites.set(tabId, next);
+  void next.finally(() => { if (queueWrites.get(tabId) === next) queueWrites.delete(tabId); }).catch(() => {});
+  return next;
+}
+
+async function persistQueuedPrompt(tabId: number, entry: PiTabEntry, text: string, images: ComposerImage[]): Promise<void> {
+  if (!entry.cwd) throw new Error("Open a project to save queued prompts (.pi/drafts)");
+  const key = draftKeyOf(tabId);
+  const id = `queued-${crypto.randomUUID()}`;
+  try {
+    const backed: ComposerImage[] = [];
+    for (const image of images) {
+      const attachmentId = image.attachmentId ?? `att-${crypto.randomUUID()}`;
+      const saved = image.draftPath && image.sha256 ? { path: image.draftPath, sha256: image.sha256 }
+        : await invoke<{ path: string; sha256: string }>("pi_save_draft_attachment", {
+            cwd: entry.cwd, tabId: key, attachmentId, mediaType: image.mediaType, data: image.data, workspace: currentWorkspaceEnv(),
+          });
+      backed.push({ ...image, attachmentId, draftPath: saved.path, sha256: saved.sha256 });
+    }
+    const queued: PiQueued = { id, text, images: backed, attachmentIds: backed.map((a) => a.attachmentId!),
+      submittedAt: new Date().toISOString(), state: "queued", autoSend: true };
+    await updateDraftMeta(entry.cwd, key, (meta) => ({ ...meta,
+      queue: [...(meta.queue ?? []), { id, text, attachmentIds: queued.attachmentIds, submittedAt: queued.submittedAt }],
+      attachments: [...meta.attachments.filter((a) => !queued.attachmentIds.includes(a.id)), ...backed.map((a) => ({
+        id: a.attachmentId!, path: a.draftPath!, sha256: a.sha256!, mime: a.mediaType, state: "queued",
+      }))],
+    }));
+    usePiStore.setState((s) => patchEntry(s.tabs, tabId, (e) => {
+      if (e.cwd !== entry.cwd) return e;
+      const interrupted = e.gen !== entry.gen || e.exited || e.state.cancelRequested ||
+        (e.queueEpoch ?? 0) !== (entry.queueEpoch ?? 0);
+      const state = interrupted || e.state.status === "error" || e.state.status === "idle" || e.state.status === "cancelling"
+        ? "not-sent" : "queued";
+      return { ...e, queueError: null, queued: [
+        ...(e.queued ?? []).filter((q) => q.id !== id), { ...queued, state, autoSend: !interrupted },
+      ] };
+    }));
+    if (usePiStore.getState().tabs[tabId]?.state.status === "done") void drainQueue(tabId);
+  } catch (error) {
+    const message = `${draftMetaPath(entry.cwd, key)}: ${attachmentError(error)}`;
+    queueFailure(tabId, message);
+    throw new Error(message);
+  }
+}
+
+async function removeQueueRecords(cwd: string, key: string, ids: string[], edit = false): Promise<void> {
+  await updateDraftMeta(cwd, key, (meta) => {
+    const removed = new Set((meta.queue ?? []).filter((q) => ids.includes(q.id)).flatMap((q) => q.attachmentIds));
+    const queue = (meta.queue ?? []).filter((q) => !ids.includes(q.id));
+    const retained = new Set(queue.flatMap((q) => q.attachmentIds));
+    return { ...meta, queue, attachments: meta.attachments.flatMap((a) =>
+      !removed.has(a.id) || retained.has(a.id) ? [a] : edit ? [{ ...a, state: "draft" }] : []) };
+  });
+}
+
+async function changeQueue(tabId: number, id: string | null, edit: boolean): Promise<void> {
+  const entry = usePiStore.getState().tabs[tabId];
+  if (!entry || entry.queueBusy) return;
+  const items = (entry.queued ?? []).filter((q) => id === null || q.id === id);
+  if (!items.length || items.some((q) => q.state === "sending")) return;
+  if (edit && entry.rejectedDraft) throw new Error("Return the pending draft to the composer first");
+  usePiStore.setState((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, queueBusy: id ?? "discard" })));
+  try {
+    if (!entry.cwd) throw new Error("Open a project to update queued prompts (.pi/drafts)");
+    const key = draftKeyOf(tabId);
+    if (edit) {
+      const existing = await loadDraft(entry.cwd, key);
+      await saveDraft(entry.cwd, key, [existing, items[0].text].filter(Boolean).join("\n\n"));
+    }
+    await removeQueueRecords(entry.cwd, key, items.map((q) => q.id), edit);
+    usePiStore.setState((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, queueError: null,
+      queued: e.queued?.filter((q) => !items.some((item) => item.id === q.id)),
+      ...(edit && { rejectedDraft: { text: items[0].text, images: items[0].images, error: null, queueReturn: true,
+        records: items[0].images.map((a) => ({ attachmentId: a.attachmentId!, draftPath: a.draftPath ?? null, stagedPath: null, sha256: a.sha256 ?? null })) } }),
+    })));
+  } catch (error) {
+    queueFailure(tabId, error);
+    throw error;
+  } finally {
+    usePiStore.setState((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, queueBusy: null })));
+  }
+}
+
+async function drainQueue(tabId: number): Promise<void> {
+  const entry = usePiStore.getState().tabs[tabId];
+  if (!entry || entry.state.status !== "done" || entry.queueBusy || entry.exited) return;
+  const next = entry.queued?.find((q) => q.state !== "sending" && q.autoSend);
+  if (next) await usePiStore.getState().retryQueued(tabId, next.id).catch((error) => queueFailure(tabId, error));
+}
+
+async function sendNow(tabId: number, text: string, images: ComposerImage[], queueId?: string): Promise<void> {
+  const get = usePiStore.getState;
+  const set = usePiStore.setState;
+  const entry = get().tabs[tabId];
+  const session = entry?.session;
+  if (!session || entry.exited) throw new Error("Session exited");
+  const missing = images.find((a) => !a.data);
+  if (missing) throw new Error(`Attachment file is missing: ${missing.draftPath ?? missing.attachmentId}`);
+  const id = `prompt-${crypto.randomUUID()}`;
+  const draftBacked = images.length > 0 && images.every((a) => !!a.attachmentId);
+  const submissionId = draftBacked ? `sub-${crypto.randomUUID()}` : null;
+  const records: PiSentRecord[] = draftBacked ? images.map((a) => ({ attachmentId: a.attachmentId!,
+    draftPath: a.draftPath ?? null, stagedPath: null, sha256: a.sha256 ?? null })) : [];
+  const pendingSet: PendingSet = { submissionId, saved: [], records, text, queueId };
+  set((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, state: { ...e.state, status: "thinking" },
+    queued: e.queued?.map((q) => q.id === queueId ? { ...q, state: "sending" } : queueId ? q : { ...q, autoSend: false }), queueError: null,
+  })));
+  try {
+    if (draftBacked) {
+      const staged = await invoke<StagedReply[]>("pi_stage_submission", { cwd: entry.cwd ?? "", submissionId,
+        attachments: records.map((r) => ({ attachmentId: r.attachmentId, path: r.draftPath ?? "" })), workspace: currentWorkspaceEnv() });
+      for (const record of records) {
+        const hit = staged.find((s) => s.attachmentId === record.attachmentId);
+        if (!hit?.path) throw new Error(`attachment copy failed: ${record.draftPath ?? record.attachmentId}`);
+        record.stagedPath = hit.path;
+        record.sha256 = hit.sha256;
+        pendingSet.saved.push({ path: hit.path, error: null });
+      }
+      markDraftRecordPending(tabId, entry.cwd, submissionId!, records);
+    } else {
+      const turn = groupTurns(messageBlocks(entry.state.blocks)).length;
+      for (const [n, image] of images.entries()) {
+        try {
+          const path = await invoke<string>("pi_save_attachment", { cwd: entry.cwd ?? "", turn, n,
+            mediaType: image.mediaType, data: image.data, workspace: currentWorkspaceEnv() });
+          if (!path) throw new Error("attachment writer returned no path");
+          pendingSet.saved.push({ path, error: null });
+        } catch (error) { pendingSet.saved.push({ path: null, error: attachmentError(error) }); }
+      }
+    }
+    if (get().tabs[tabId]?.session !== session) throw new Error("Session exited before the prompt was sent");
+    set((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e,
+      pendingAttachments: [...(e.pendingAttachments ?? []), pendingSet],
+      pendingPrompts: [...(e.pendingPrompts ?? []), { id, queueId, text, images, submissionId, records }],
+    })));
+    await session.send(promptLine(text, images));
+    const rejected = get().tabs[tabId]?.rejectedDraft;
+    if (!queueId && rejected?.images === images) throw new Error(rejected.error ?? "Prompt rejected");
+  } catch (error) {
+    const message = attachmentError(error);
+    set((s) => patchEntry(s.tabs, tabId, (e) => e.gen !== entry.gen ? e : ({ ...e,
+      state: { ...e.state, status: "idle" },
+      pendingAttachments: e.pendingAttachments?.filter((p) => p !== pendingSet),
+      pendingPrompts: e.pendingPrompts?.filter((p) => p.id !== id),
+      queued: e.queued?.map((q) => ({ ...q, state: "not-sent", autoSend: false })),
+      queueEpoch: (e.queueEpoch ?? 0) + 1,
+      ...(queueId ? { queueError: `${message} (.pi/logs/session.jsonl)` } : {
+        rejectedDraft: { text, images, error: message, ...(records.length && { records }) },
+        ...(submissionId && { failedSubmission: { submissionId, text, images, records, error: message, state: "failed" as const } }),
+      }),
+    })));
+    if (submissionId) markDraftRecordFailed(tabId, entry.cwd, submissionId, records);
+    throw error;
+  }
 }
 
 /** Global pi prefs from the LazyStore (defaults when not yet hydrated). */
@@ -855,6 +963,14 @@ export const usePiStore = create<PiStore>()((set, get) => ({
     };
     set((s) => ({ tabs: { ...s.tabs, [tabId]: entry } }));
     try {
+      if (opts.cwd) {
+        try {
+          const queued = await recoverQueue(opts.cwd, draftKeyOf(tabId));
+          set((s) => patchEntry(s.tabs, tabId, (e) => e.gen === gen ? { ...e, queued } : e));
+        } catch (error) {
+          set((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, queueError: String(error) })));
+        }
+      }
       const session = await openPiSession({
         ...opts,
         launcherDir,
@@ -875,15 +991,39 @@ export const usePiStore = create<PiStore>()((set, get) => ({
           // The holder object survives the closure: TypeScript cannot track
           // the assignment through set(), and a bind job must run after the
           // reduction published it.
-          const job: { bind: BindJob | null } = { bind: null };
+          const job: { bind: BindJob | null; removed: string[]; drain: boolean } = { bind: null, removed: [], drain: false };
           set((s) =>
             patchEntry(s.tabs, tabId, (e) => {
+              if (e.gen !== gen) return e;
               const next = applyPiEvent(e, line);
               job.bind = next.bind;
-              return { ...e, ...next };
+              let queueEpoch = e.queueEpoch ?? 0;
+              job.removed = (e.queued ?? []).filter((q) => !(next.queued ?? []).some((n) => n.id === q.id)).map((q) => q.id);
+              if (next.state.status === "error" || next.state.cancelRequested || next.state.switching) {
+                next.queued = next.queued?.map((q) => ({ ...q, state: "not-sent" }));
+              }
+              const newest = next.state.blocks[next.state.blocks.length - 1];
+              if (newest !== e.state.blocks[e.state.blocks.length - 1] && newest?.kind === "retry" && newest.phase === "end" && newest.success === false) {
+                next.queued = next.queued?.map((q) => ({ ...q, autoSend: false }));
+                queueEpoch += 1;
+              }
+              if (next.queued?.length && e.state.status !== "done" && next.state.status === "done" && !e.state.cancelRequested) {
+                const currentUser = next.state.blocks.map((b) => b.kind === "message" && b.role === "user").lastIndexOf(true);
+                const empty = next.state.blocks.slice(Math.max(0, currentUser)).some((b) => b.kind === "error" && b.text === "empty completion: no usage reported");
+                job.drain = !empty;
+                if (empty) {
+                  next.queued = next.queued.map((q) => ({ ...q, state: "not-sent", autoSend: false }));
+                  queueEpoch += 1;
+                }
+              }
+              return { ...e, ...next, queueEpoch };
             }),
           );
+          if (job.removed.length && opts.cwd) {
+            void removeQueueRecords(opts.cwd, draftKeyOf(tabId), job.removed).catch((error) => queueFailure(tabId, error));
+          }
           if (job.bind) void runBindJob(tabId, job.bind);
+          if (job.drain) void drainQueue(tabId);
         },
         onExit: (code) =>
           set((s) =>
@@ -900,6 +1040,10 @@ export const usePiStore = create<PiStore>()((set, get) => ({
                     // Whatever the status said, the process is gone: never a
                     // stale thinking or Cancelling (UX-08).
                     state: sessionExited(e.state),
+                    queued: e.queued?.map((q) => ({ ...q, state: "not-sent", autoSend: false })),
+                    queueEpoch: (e.queueEpoch ?? 0) + 1,
+                    pendingPrompts: [],
+                    pendingAttachments: [],
                   },
             ),
           ),
@@ -921,279 +1065,18 @@ export const usePiStore = create<PiStore>()((set, get) => ({
     }
   },
 
-  sendPrompt: async (tabId, text, images) => {
+  sendPrompt: async (tabId, text, images = []) => {
     const entry = get().tabs[tabId];
-    const session = entry?.session;
-    if (!session) return;
-    const attachments: ComposerImage[] = images ?? [];
-    // A Stop is winding the run down. pi would accept the follow-up but
-    // never executes input queued behind an aborted turn (rpc.rs preserves
-    // it unexecuted), so refusing here is the honest acknowledgement: the
-    // text returns to the composer with the reason, the click is never
-    // silently swallowed.
-    if (entry.state.status === "cancelling") {
-      const message = "cancellation in progress; send again once the strip is idle";
-      set((s) =>
-        patchEntry(s.tabs, tabId, (e) => ({
-          ...e,
-          rejectedDraft: { text, images: attachments, error: message },
-        })),
-      );
-      throw new Error(message);
+    if (!entry?.session || entry.exited) throw new Error("Session exited");
+    if (entry.state.status === "cancelling" || entry.state.cancelRequested) {
+      const error = "cancellation in progress; send again once the strip is idle";
+      set((s) => patchEntry(s.tabs, tabId, (e) => ({ ...e, rejectedDraft: { text, images, error } })));
+      throw new Error(error);
     }
-    // pi refuses a bare prompt while a turn is in flight ("Agent is currently
-    // streaming; specify streamingBehavior"), which used to drop the text.
-    // While thinking or running a tool the prompt rides streamingBehavior
-    // "follow-up": pi queues it and runs it when the turn ends. awaiting-ask
-    // stays on the plain path: a follow-up would sit behind the open question.
-    const status = entry.state.status;
-    const busy = status !== "idle" && status !== "awaiting-ask";
-    const behavior: PiStreamingBehavior | undefined = busy
-      ? "follow-up"
-      : undefined;
-    const queuedId = busy ? `queued-${(queuedSeq += 1)}` : null;
-
-    // K13 transaction: chips that carry a draft file run as one submission.
-    // The draft files are copied to .pi/attachments/<submission-id>-<...>
-    // before the prompt is sent; on pi's acknowledgement (the user message
-    // block for this text) the index entries are appended atomically and
-    // the chips bind to that turn. Any failure before the acknowledgement
-    // marks the draft record "failed" and offers the retry control.
-    const draftBacked =
-      attachments.length > 0 &&
-      attachments.every(
-        (a) => typeof a.attachmentId === "string" && a.attachmentId.length > 0,
-      );
-    if (draftBacked) {
-      const submissionId = `sub-${(submissionSeq += 1)}`;
-      const records: PiSentRecord[] = attachments.map((a) => ({
-        attachmentId: a.attachmentId!,
-        draftPath: a.draftPath ?? null,
-        stagedPath: null,
-        sha256: a.sha256 ?? null,
-      }));
-      const failTransaction = (message: string) => {
-        set((s) =>
-          patchEntry(s.tabs, tabId, (e) => ({
-            ...e,
-            queued: queuedId
-              ? (e.queued ?? []).filter((q) => q.id !== queuedId)
-              : e.queued,
-            failedSubmission: {
-              submissionId,
-              text,
-              images: attachments,
-              records,
-              error: message,
-              state: "failed",
-            },
-            // The write failed before pi accepted the text: give it back
-            // to the composer instead of dropping it on the floor.
-            rejectedDraft: {
-              text,
-              images: attachments,
-              error: message,
-              records,
-            },
-          })),
-        );
-        markDraftRecordFailed(tabId, entry.cwd, submissionId, records);
-      };
-
-      let staged: StagedReply[] | null = null;
-      try {
-        staged = await invoke<StagedReply[]>("pi_stage_submission", {
-          cwd: entry.cwd ?? "",
-          submissionId,
-          attachments: records.map((r) => ({
-            attachmentId: r.attachmentId,
-            path: r.draftPath ?? "",
-          })),
-          workspace: currentWorkspaceEnv(),
-        });
-      } catch (error) {
-        const message = attachmentError(error);
-        failTransaction(message);
-        throw new Error(message);
-      }
-      for (const record of records) {
-        const hit = staged.find((s) => s.attachmentId === record.attachmentId);
-        record.stagedPath = hit?.path ?? null;
-        record.sha256 = hit?.sha256 ?? record.sha256;
-      }
-      const unstaged = records.find((r) => r.stagedPath === null);
-      if (unstaged) {
-        const message = `attachment copy failed: ${unstaged.draftPath ?? unstaged.attachmentId}`;
-        failTransaction(message);
-        throw new Error(message);
-      }
-      if (get().tabs[tabId]?.session !== session) return;
-
-      const pendingSet: PendingSet = {
-        submissionId,
-        saved: records.map((r) => ({ path: r.stagedPath, error: null })),
-        records,
-        text,
-      };
-      // The queue entry lands before the send so pi's ack, which can only
-      // arrive after the line is sent, finds it; the catch rolls it back.
-      if (queuedId) {
-        set((s) =>
-          patchEntry(s.tabs, tabId, (e) => ({
-            ...e,
-            queued: [
-              ...(e.queued ?? []),
-              { id: queuedId, text, images: attachments, acked: false },
-            ],
-          })),
-        );
-      }
-      set((s) =>
-        patchEntry(s.tabs, tabId, (e) => ({
-          ...e,
-          pendingAttachments: [...(e.pendingAttachments ?? []), pendingSet],
-          pendingPrompts: [
-            ...(e.pendingPrompts ?? []),
-            { text, images: attachments, submissionId, records },
-          ],
-        })),
-      );
-      markDraftRecordPending(tabId, entry.cwd, submissionId, records);
-      try {
-        await session.send(promptLine(text, images, behavior));
-      } catch (error) {
-        set((s) =>
-          patchEntry(s.tabs, tabId, (e) => {
-            const pending = e.pendingAttachments ?? [];
-            const index = pending.indexOf(pendingSet);
-            return {
-              ...e,
-              pendingAttachments:
-                index === -1
-                  ? pending
-                  : [
-                      ...pending.slice(0, index),
-                      ...pending.slice(index + 1),
-                    ],
-              queued: queuedId
-                ? (e.queued ?? []).filter((q) => q.id !== queuedId)
-                : e.queued,
-              failedSubmission: {
-                submissionId,
-                text,
-                images: attachments,
-                records,
-                error: attachmentError(error),
-                state: "failed",
-              },
-              rejectedDraft: {
-                text,
-                images: attachments,
-                error: attachmentError(error),
-                records,
-              },
-            };
-          }),
-        );
-        markDraftRecordFailed(tabId, entry.cwd, submissionId, records);
-        throw error;
-      }
-      return;
-    }
-
-    // Legacy single-shot path: images without draft files (callers that
-    // bypass the composer) still land as project copies before the send.
-    const saved: PiSavedAttachment[] = [];
-    const pendingSet: PendingSet = { submissionId: null, saved, records: [], text };
-    if (attachments.length > 0) {
-      const turn = groupTurns(messageBlocks(entry.state.blocks)).length;
-      for (const [n, image] of attachments.entries()) {
-        try {
-          const path = await invoke<string>("pi_save_attachment", {
-            cwd: entry.cwd ?? "",
-            turn,
-            n,
-            mediaType: image.mediaType,
-            data: image.data,
-            workspace: currentWorkspaceEnv(),
-          });
-          if (typeof path !== "string" || path.length === 0) {
-            throw new Error("attachment writer returned no path");
-          }
-          saved.push({ path, error: null });
-        } catch (error) {
-          saved.push({ path: null, error: attachmentError(error) });
-        }
-      }
-      if (get().tabs[tabId]?.session !== session) return;
-      set((s) =>
-        patchEntry(s.tabs, tabId, (e) => ({
-          ...e,
-          pendingAttachments: [...(e.pendingAttachments ?? []), pendingSet],
-        })),
-      );
-    }
-    // The queue entry lands before the write so pi's ack, which can only
-    // arrive after the line is sent, finds it; the catch rolls it back.
-    if (queuedId) {
-      set((s) =>
-        patchEntry(s.tabs, tabId, (e) => ({
-          ...e,
-          queued: [
-            ...(e.queued ?? []),
-            { id: queuedId, text, images: attachments, acked: false },
-          ],
-        })),
-      );
-    }
-    // The response frame names no id for our id-less commands, so the store
-    // holds every send in flight until its ack or rejection arrives, in send
-    // order.
-    set((s) =>
-      patchEntry(s.tabs, tabId, (e) => ({
-        ...e,
-        pendingPrompts: [
-          ...(e.pendingPrompts ?? []),
-          { text, images: attachments, submissionId: null, records: [] },
-        ],
-      })),
-    );
-    try {
-      await session.send(promptLine(text, images, behavior));
-    } catch (error) {
-      if (saved.length > 0) {
-        set((s) =>
-          patchEntry(s.tabs, tabId, (e) => {
-            const pending = e.pendingAttachments ?? [];
-            const index = pending.indexOf(pendingSet);
-            return index === -1
-              ? e
-              : {
-                  ...e,
-                  pendingAttachments: [
-                    ...pending.slice(0, index),
-                    ...pending.slice(index + 1),
-                  ],
-                };
-          }),
-        );
-      }
-      set((s) =>
-        patchEntry(s.tabs, tabId, (e) => ({
-          ...e,
-          queued: queuedId
-            ? (e.queued ?? []).filter((q) => q.id !== queuedId)
-            : e.queued,
-          // The write failed before pi saw the text: give it back to the
-          // composer instead of dropping it on the floor.
-          rejectedDraft: {
-            text,
-            images: attachments,
-            error: attachmentError(error),
-          },
-        })),
-      );
-      throw error;
+    if (turnInFlight(entry.state.status) || entry.state.retry) {
+      await enqueuePrompt(tabId, text, images);
+    } else {
+      await sendNow(tabId, text, images);
     }
   },
 
@@ -1206,7 +1089,7 @@ export const usePiStore = create<PiStore>()((set, get) => ({
       !entry ||
       !failed ||
       failed.state === "retrying" ||
-      failed.submissionId !== submissionId
+      failed.submissionId !== submissionId || turnInFlight(entry.state.status) || entry.state.retry || entry.state.cancelRequested
     ) {
       return;
     }
@@ -1216,21 +1099,18 @@ export const usePiStore = create<PiStore>()((set, get) => ({
           ? {
               ...e,
               failedSubmission: { ...e.failedSubmission!, state: "retrying" },
+              state: { ...e.state, status: "thinking" },
             }
           : e,
       ),
     );
-    const status = entry.state.status;
-    const busy = status !== "idle" && status !== "awaiting-ask";
-    const behavior: PiStreamingBehavior | undefined = busy
-      ? "follow-up"
-      : undefined;
     const failRetry = (message: string) => {
       set((s) =>
         patchEntry(s.tabs, tabId, (e) =>
           e.failedSubmission?.submissionId === submissionId
             ? {
                 ...e,
+                state: { ...e.state, status: "idle" },
                 failedSubmission: {
                   ...e.failedSubmission!,
                   state: "failed",
@@ -1289,7 +1169,7 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         })),
       );
       try {
-        await session.send(promptLine(failed.text, failed.images, behavior));
+        await session.send(promptLine(failed.text, failed.images));
       } catch (error) {
         set((s) =>
           patchEntry(s.tabs, tabId, (e) => {
@@ -1302,6 +1182,8 @@ export const usePiStore = create<PiStore>()((set, get) => ({
                 index === -1
                   ? pending
                   : [...pending.slice(0, index), ...pending.slice(index + 1)],
+              state: { ...e.state, status: "idle" },
+              pendingPrompts: e.pendingPrompts?.filter((p) => p.submissionId !== submissionId),
               failedSubmission: {
                 ...e.failedSubmission,
                 state: "failed",
@@ -1317,28 +1199,17 @@ export const usePiStore = create<PiStore>()((set, get) => ({
     }
   },
 
-  removeQueued: (tabId, id) => {
-    set((s) =>
-      patchEntry(s.tabs, tabId, (e) => {
-        const queued = e.queued ?? [];
-        const removed = queued.find((q) => q.id === id);
-        if (!removed) return e;
-        // Remove only pulls the text back into the composer (through the
-        // same restore rejections use). pi 0.3.0 has no command that cancels
-        // an already-accepted follow-up, so an acked prompt would still run
-        // when the current turn ends; the button is only offered pre-ack.
-        return {
-          ...e,
-          queued: queued.filter((q) => q.id !== id),
-          rejectedDraft: {
-            text: removed.text,
-            images: removed.images,
-            error: null,
-          },
-        };
-      }),
-    );
+  retryQueued: async (tabId, id) => {
+    const entry = get().tabs[tabId];
+    const queued = entry?.queued?.find((q) => q.id === id);
+    if (!queued || queued.state === "sending" || entry.queueBusy || !entry.session || entry.exited ||
+        turnInFlight(entry.state.status) || entry.state.retry || entry.state.status === "cancelling" || entry.state.cancelRequested) return;
+    await sendNow(tabId, queued.text, queued.images, id);
   },
+
+  editQueued: (tabId, id) => changeQueue(tabId, id, true),
+  cancelQueued: (tabId, id) => changeQueue(tabId, id, false),
+  discardQueued: (tabId) => changeQueue(tabId, null, false),
 
   clearRejectedDraft: (tabId) => {
     set((s) =>
@@ -1357,7 +1228,7 @@ export const usePiStore = create<PiStore>()((set, get) => ({
     // click during the wind-down is a no-op.
     const retryPending = entry.state.retry !== null;
     set((s) =>
-      patchEntry(s.tabs, tabId, (e) => ({ ...e, state: requestCancel(e.state) })),
+      patchEntry(s.tabs, tabId, (e) => ({ ...e, state: requestCancel(e.state), queueEpoch: (e.queueEpoch ?? 0) + 1, queued: e.queued?.map((q) => ({ ...q, state: "not-sent", autoSend: false })) })),
     );
     try {
       // pi's rpc abort stops the run in flight and always answers

@@ -259,7 +259,7 @@ type Props = {
    *  false shows the one-line may-not-accept notice while attachments are
    *  queued. Sending never blocks: pi decides what to do with the images. */
   modelAcceptsImages?: boolean;
-  onSubmit: (markdown: string, images: ComposerImage[]) => void;
+  onSubmit: (markdown: string, images: ComposerImage[]) => void | Promise<void>;
   onStop?: () => void;
 };
 
@@ -323,6 +323,7 @@ export function Composer({
   const pendingInsertions = useRef<InsertDraftDetail[]>([]);
   const stopRef = useRef(onStop);
   stopRef.current = onStop;
+  const submittingRef = useRef(false);
   const submitRef = useRef(onSubmit);
   submitRef.current = onSubmit;
   const disabledRef = useRef(disabled);
@@ -681,7 +682,7 @@ export function Composer({
   // clearing here would drop the record a failed send must leave behind.
   // An empty message with attached images still sends (image-only prompt).
   const performSubmit = (): boolean => {
-    if (!editor || disabledRef.current) return false;
+    if (!editor || disabledRef.current || submittingRef.current) return false;
     const md = editor.getMarkdown().trim();
     const missing = imagesRef.current.filter((img) => !img.data);
     if (missing.length > 0) {
@@ -699,11 +700,25 @@ export function Composer({
       sha256: img.sha256,
     }));
     if (!md && attachments.length === 0) return true;
-    submitRef.current(md, attachments);
-    editor.commands.clearContent();
-    setChips([]);
-    setNotice(null);
-    if (cwd && attachments.length === 0) void clearDraft(cwd, draftKey);
+    const clearSubmitted = () => {
+      if (editor.getMarkdown().trim() === md) editor.commands.clearContent();
+      const submitted = new Set(attachments.map((a) => a.attachmentId));
+      setChips(imagesRef.current.filter((a) => !submitted.has(a.attachmentId)));
+      if (metaRef.current) metaRef.current = { ...metaRef.current, attachments: metaRef.current.attachments.filter((a) => !submitted.has(a.id)) };
+      setNotice(null);
+      if (cwd && attachments.length === 0 && editor.isEmpty) void clearDraft(cwd, draftKey).catch((error) => setNotice(String(error)));
+    };
+    try {
+      const pending = submitRef.current(md, attachments);
+      if (pending) {
+        submittingRef.current = true;
+        void pending.then(clearSubmitted).catch((error) => {
+          const rejected = usePiStore.getState().tabs[tabId]?.rejectedDraft;
+          if (editor.getMarkdown().trim() === md && rejected?.text === md) usePiStore.getState().clearRejectedDraft(tabId);
+          setNotice(String(error));
+        }).finally(() => { submittingRef.current = false; });
+      } else clearSubmitted();
+    } catch (error) { setNotice(String(error)); }
     return true;
   };
   performSubmitRef.current = performSubmit;
@@ -790,7 +805,12 @@ export function Composer({
       const meta = record?.meta ?? emptyChatMeta();
       const base = cwd.replace(/[\\/]+$/, "");
       const restored: PendingImage[] = [];
-      for (const att of meta.attachments) {
+      const queuedIds = new Set(meta.queue?.flatMap((q) => q.attachmentIds));
+      for (const id of queuedIds) {
+        const sequence = /^att-(\d+)$/.exec(id);
+        if (sequence) pendingImageSeq = Math.max(pendingImageSeq, Number(sequence[1]));
+      }
+      for (const att of meta.attachments.filter((a) => !queuedIds.has(a.id))) {
         let data = "";
         let error: string | null = null;
         try {
@@ -820,7 +840,7 @@ export function Composer({
       metaRef.current = {
         ...meta,
         submissionId: null,
-        attachments: meta.attachments.map((a) => ({ ...a, state: "draft" })),
+        attachments: meta.attachments.filter((a) => !queuedIds.has(a.id)).map((a) => ({ ...a, state: "draft" })),
       };
       if (record?.markdown) editor.commands.setContent(record.markdown, { contentType: "markdown" });
       setChips(restored);
@@ -919,7 +939,7 @@ export function Composer({
   }, [recovering]);
 
   // A send pi refused (success:false response, or the write threw) and a
-  // queued Remove hand their text back through the store: put it and its
+  // queue Edit hand their text back through the store: put it and its
   // image chips into the empty editor once, then clear the field so it
   // cannot rebind a later draft. The rejection reason itself stays on the
   // transcript's error card; while the editor holds typed text the restore
@@ -931,9 +951,11 @@ export function Composer({
   const clearRejectedDraft = usePiStore((s) => s.clearRejectedDraft);
   useEffect(() => {
     if (!editor || !rejectedDraft || recovering) return;
-    if (!editor.isEmpty) return;
+    if (!rejectedDraft.queueReturn && !editor.isEmpty) return;
     if (rejectedDraft.text) {
-      editor.commands.setContent(rejectedDraft.text, {
+      const text = rejectedDraft.queueReturn && !editor.isEmpty
+        ? `${editor.getMarkdown()}\n\n${rejectedDraft.text}` : rejectedDraft.text;
+      editor.commands.setContent(text, {
         contentType: "markdown",
       });
     }
@@ -957,7 +979,12 @@ export function Composer({
       };
     });
     pendingImageSeq = next;
-    setChips(restored);
+    setChips(rejectedDraft.queueReturn ? [...imagesRef.current, ...restored] : restored);
+    if (rejectedDraft.queueReturn) {
+      editor.commands.focus("end");
+      if (cwd) void saveDraft(cwd, draftKey, editor.getMarkdown()).catch((error) => setNotice(String(error)));
+      for (const chip of restored) recordAddAttachment(chip);
+    }
     clearRejectedDraft(tabId);
     for (const chip of restored) {
       if (!chip.draftPath) void writeChipDraft(chip).then(applyChipUpdate);

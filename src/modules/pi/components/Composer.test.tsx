@@ -41,6 +41,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialogOpenMock }));
 
+import { initialPiSessionState } from "@/modules/pi/lib/parse";
 import { usePiStore } from "@/modules/pi/lib/piStore";
 import type { InsertDraftDetail } from "@/modules/pi/lib/sendToChat";
 import { Composer } from "./Composer";
@@ -879,5 +880,96 @@ describe("composer Escape stop binding", () => {
     const composer = container.querySelector("[aria-label='pi composer']")!;
     fireEvent.keyDown(composer, { key: "Escape" });
     expect(onStop).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("G1 composer queue handoff", () => {
+  afterEach(() => usePiStore.setState({ tabs: {} }));
+
+  function seedBusy() {
+    usePiStore.setState({ tabs: { 7: {
+      gen: 1, cwd: "/tmp/proj", state: { ...initialPiSessionState(), status: "thinking" },
+      session: { id: 1, send: vi.fn(), kill: vi.fn() }, exited: false, exitCode: null, error: null,
+      roles: { provider: "local", model: "test", smol: "test" }, queued: [],
+    } } });
+  }
+
+  it("keeps visible text until the real queue write completes, then clears only the composer", async () => {
+    const files = useMemoryFs();
+    files.set("/tmp/proj/.pi/drafts/7.md", "second prompt");
+    seedBusy();
+    let release!: () => void;
+    let writing = false;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const fs = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: { path?: string }) => {
+      if (cmd === "fs_write_file" && args?.path?.endsWith("7.json")) { writing = true; await held; }
+      return fs(cmd, args);
+    });
+    const view = renderComposer(vi.fn((text, images) => usePiStore.getState().sendPrompt(7, text, images)), { cwd: "/tmp/proj" });
+    await waitFor(() => expect(view.pm.textContent).toBe("second prompt"));
+    fireEvent.click(view.getByText("Send"));
+    await waitFor(() => expect(writing).toBe(true));
+    expect(view.pm.textContent).toBe("second prompt");
+    expect(files.get("/tmp/proj/.pi/drafts/7.md")).toBe("second prompt");
+    release();
+    await waitFor(() => expect(view.pm.textContent).toBe(""));
+    const record = JSON.parse(files.get("/tmp/proj/.pi/drafts/7.json")!);
+    expect(record.queue[0].text).toBe("second prompt");
+    expect(usePiStore.getState().tabs[7].queued).toHaveLength(1);
+  });
+
+  it("preserves text and chips when the queue record cannot be written", async () => {
+    const files = useMemoryFs();
+    files.set("/tmp/proj/.pi/drafts/7.md", "with image");
+    files.set("/tmp/proj/.pi/drafts/7.json", JSON.stringify({ v: 1, submissionId: null, sources: [], attachments: [
+      { id: "att-99", path: ".pi/drafts/7-att-99.png", sha256: "abc", mime: "image/png", state: "draft" },
+    ] }));
+    const fs = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: { path?: string }) => {
+      if (cmd === "fs_read_file_bytes") return { base64: btoa("image") };
+      if (cmd === "fs_write_file" && args?.path?.endsWith("7.json")) throw new Error("disk full");
+      return fs(cmd, args);
+    });
+    seedBusy();
+    const view = renderComposer(vi.fn((text, images) => usePiStore.getState().sendPrompt(7, text, images)), { cwd: "/tmp/proj" });
+    await waitFor(() => expect(view.container.querySelectorAll("img")).toHaveLength(1));
+    fireEvent.click(view.getByText("Send"));
+    await waitFor(() => expect(view.getByText(/disk full/)).toBeTruthy());
+    expect(view.pm.textContent).toBe("with image");
+    expect(view.container.querySelectorAll("img")).toHaveLength(1);
+    expect(usePiStore.getState().tabs[7].queued).toEqual([]);
+  });
+
+  it("returns queued text and chips alongside an existing composer draft", async () => {
+    const files = useMemoryFs();
+    files.set("/tmp/proj/.pi/drafts/7.md", "already typed");
+    const view = renderComposer(undefined, { cwd: "/tmp/proj" });
+    await waitFor(() => expect(view.pm.textContent).toBe("already typed"));
+    usePiStore.setState({ tabs: { 7: { rejectedDraft: {
+      text: "queued text", images: [{ mediaType: "image/png", data: btoa("queue") }], error: null, queueReturn: true,
+      records: [{ attachmentId: "att-77", draftPath: ".pi/drafts/7-att-77.png", stagedPath: null, sha256: "abc" }],
+    } } } as never });
+    await waitFor(() => expect(view.pm.textContent).toContain("queued text"));
+    expect(view.pm.textContent).toContain("already typed");
+    expect(view.container.querySelectorAll("img")).toHaveLength(1);
+    await waitFor(() => expect(files.get("/tmp/proj/.pi/drafts/7.md")).toBe("already typed\n\nqueued text"));
+    expect(usePiStore.getState().tabs[7].rejectedDraft).toBeNull();
+  });
+
+  it("keeps recovered queue images out of the composer and reserves their attachment ids", async () => {
+    const files = useMemoryFs();
+    files.set("/tmp/proj/.pi/drafts/7.md", "independent draft");
+    files.set("/tmp/proj/.pi/drafts/7.json", JSON.stringify({ v: 1, submissionId: null, sources: [], attachments: [
+      { id: "att-9999", path: ".pi/drafts/7-att-9999.png", sha256: "abc", mime: "image/png", state: "queued" },
+    ], queue: [{ id: "queued-recovered", text: "queued text", attachmentIds: ["att-9999"], submittedAt: "2026-09-09T00:00:00Z" }] }));
+    const view = renderComposer(undefined, { cwd: "/tmp/proj" });
+    await waitFor(() => expect(view.pm.textContent).toBe("independent draft"));
+    expect(view.container.querySelectorAll("img")).toHaveLength(0);
+    pasteFiles(view.pm, [imageFile("new.png")]);
+    await waitFor(() => expect(view.container.querySelectorAll("img")).toHaveLength(1));
+    const write = invokeMock.mock.calls.find(([cmd]) => cmd === "pi_save_draft_attachment");
+    expect(write?.[1].attachmentId).not.toBe("att-9999");
   });
 });
