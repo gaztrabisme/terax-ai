@@ -13,6 +13,7 @@ import {
   draftsDir,
   emptyChatMeta,
   findEditorDraft,
+  listRecoverableDrafts,
   loadDraft,
   loadDraftMeta,
   loadEditorDraft,
@@ -49,6 +50,10 @@ function memoryFs() {
       if (cmd === "fs_read_file") {
         if (!files.has(path)) throw new Error(`no such file: ${path}`);
         return { kind: "text", content: files.get(path) };
+      }
+      if (cmd === "fs_stat") {
+        if (!files.has(path)) throw new Error(`no such file: ${path}`);
+        return { kind: "file", size: 1, mtime: 0 };
       }
       if (cmd === "fs_delete") {
         files.delete(path);
@@ -353,6 +358,136 @@ describe("editor draft (K11c)", () => {
       JSON.stringify(editorRecord).replace("a.ts", "b.ts"),
     );
     expect(await loadEditorDraft("/w", "half")).toBeNull();
+  });
+});
+
+describe("recoverable draft listing (U4)", () => {
+  const source = {
+    blockId: 3,
+    terminalId: 2,
+    sha256: "terminal-hash",
+    insertedAt: "2026-09-09T00:00:00.000Z",
+  };
+
+  function attachment(n: number): ChatDraftMeta["attachments"][number] {
+    return {
+      id: `att-${n}`,
+      path: `.pi/attachments/queued-${n}.png`,
+      sha256: "f00d",
+      mime: "image/png",
+      state: "draft",
+    };
+  }
+
+  it("drops empty drafts from the listing and deletes both files", async () => {
+    const files = memoryFs();
+    await saveDraft("/w", "empty1", "");
+    await saveDraftMeta("/w", "empty1", emptyChatMeta());
+    await saveDraft("/w", "blank2", "  \n\t\n");
+    await saveDraftMeta("/w", "blank2", emptyChatMeta());
+    await saveDraft("/w", "kept", "Real text\n");
+
+    expect(await listRecoverableDrafts("/w", [])).toEqual([
+      { sid: "kept", firstLine: "Real text" },
+    ]);
+    expect(files.has("/w/.pi/drafts/empty1.md")).toBe(false);
+    expect(files.has("/w/.pi/drafts/empty1.json")).toBe(false);
+    expect(files.has("/w/.pi/drafts/blank2.md")).toBe(false);
+    expect(files.has("/w/.pi/drafts/blank2.json")).toBe(false);
+    expect(files.has("/w/.pi/drafts/kept.md")).toBe(true);
+  });
+
+  it("never touches empty drafts bound to open tabs", async () => {
+    const files = memoryFs();
+    await saveDraft("/w", "openTab", "");
+    await saveDraftMeta("/w", "openTab", emptyChatMeta());
+
+    expect(await listRecoverableDrafts("/w", ["openTab"])).toEqual([]);
+    expect(files.has("/w/.pi/drafts/openTab.md")).toBe(true);
+    expect(files.has("/w/.pi/drafts/openTab.json")).toBe(true);
+  });
+
+  it("offers attachments-only drafts with the queued-image count label", async () => {
+    const files = memoryFs();
+    files.set("/w/.pi/attachments/queued-1.png", "a");
+    files.set("/w/.pi/attachments/queued-2.png", "b");
+    await saveDraftMeta("/w", "imgs", {
+      ...emptyChatMeta(),
+      attachments: [attachment(1), attachment(2)],
+    });
+    await saveDraftMeta("/w", "one-img", {
+      ...emptyChatMeta(),
+      attachments: [attachment(9)],
+    });
+    files.set("/w/.pi/attachments/queued-9.png", "c");
+
+    expect(await listRecoverableDrafts("/w", [])).toEqual([
+      { sid: "imgs", firstLine: "2 queued images" },
+      { sid: "one-img", firstLine: "1 queued image" },
+    ]);
+    expect(files.has("/w/.pi/drafts/imgs.json")).toBe(true);
+  });
+
+  it("drops an attachments-only draft once every queued file is gone", async () => {
+    const files = memoryFs();
+    await saveDraft("/w", "gone", "");
+    await saveDraftMeta("/w", "gone", {
+      ...emptyChatMeta(),
+      attachments: [attachment(1)],
+    });
+
+    expect(await listRecoverableDrafts("/w", [])).toEqual([]);
+    expect(files.has("/w/.pi/drafts/gone.md")).toBe(false);
+    expect(files.has("/w/.pi/drafts/gone.json")).toBe(false);
+  });
+
+  it("labels a K8 quotation draft with the first line of the quotation", async () => {
+    memoryFs();
+    await saveDraft("/w", "quoted", "```\n$ echo quartz\n\nquartz\n```\nFrom terminal block 3\n");
+    await saveDraftMeta("/w", "quoted", { ...emptyChatMeta(), sources: [source] });
+
+    expect(await listRecoverableDrafts("/w", [])).toEqual([
+      { sid: "quoted", firstLine: "$ echo quartz" },
+    ]);
+  });
+
+  it("keeps a K8 source draft whose quotation text was cleared", async () => {
+    memoryFs();
+    await saveDraft("/w", "cleared", "");
+    await saveDraftMeta("/w", "cleared", { ...emptyChatMeta(), sources: [source] });
+
+    expect(await listRecoverableDrafts("/w", [])).toEqual([
+      { sid: "cleared", firstLine: "Transferred terminal block" },
+    ]);
+  });
+
+  it("prefers the draft's own first line over the queued-image count", async () => {
+    const files = memoryFs();
+    files.set("/w/.pi/attachments/queued-1.png", "a");
+    await saveDraft("/w", "mixed", "Check this\n");
+    await saveDraftMeta("/w", "mixed", {
+      ...emptyChatMeta(),
+      attachments: [attachment(1)],
+    });
+
+    expect(await listRecoverableDrafts("/w", [])).toEqual([
+      { sid: "mixed", firstLine: "Check this" },
+    ]);
+    expect(files.has("/w/.pi/drafts/mixed.md")).toBe(true);
+  });
+
+  it("drops an all-whitespace editor buffer but keeps the editor path label", async () => {
+    const files = memoryFs();
+    const editorMeta = { v: 1 as const, kind: "editor" as const, path: "/w/src/a.ts", baseSha256: "cafe" };
+    await saveEditorDraft("/w", "ed1t0r5", editorMeta, "\n \n");
+    expect(await listRecoverableDrafts("/w", [])).toEqual([]);
+    expect(files.has("/w/.pi/drafts/ed1t0r5.md")).toBe(false);
+    expect(files.has("/w/.pi/drafts/ed1t0r5.json")).toBe(false);
+
+    await saveEditorDraft("/w", "ed1t0r5", editorMeta, "\nreal buffer");
+    expect(await listRecoverableDrafts("/w", [])).toEqual([
+      { sid: "ed1t0r5", firstLine: "/w/src/a.ts" },
+    ]);
   });
 });
 

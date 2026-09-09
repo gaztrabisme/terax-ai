@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { listRecoverableDrafts, type RecoverableDraft } from "@/modules/pi/lib/drafts";
 
+/** U4: the strip never grows past this many rows; the rest collapse into one line. */
+const MAX_VISIBLE_DRAFTS = 8;
+
 export type DraftRecoveryProps = {
   openDraftIds?: readonly string[];
   onRecoverDraft?: (cwd: string, sid: string) => Promise<void>;
@@ -41,7 +44,7 @@ export function RecoverableDrafts({ cwd, openDraftIds, onRecoverDraft }: DraftRe
   return (
     <div className="shrink-0 border-t border-border/60 px-3 py-1 text-xs">
       {drafts.length > 0 && <p className="text-muted-foreground">Recoverable drafts</p>}
-      {drafts.map((draft) => (
+      {drafts.slice(0, MAX_VISIBLE_DRAFTS).map((draft) => (
         <div key={draft.sid} className="flex items-center gap-2 py-0.5" title={`${cwd}/.pi/drafts/${draft.sid}.md`}>
           <span className="min-w-0 flex-1 truncate">{draft.firstLine}</span>
           <button type="button" data-uat="draft-recover" data-uat-key={draft.sid}
@@ -52,6 +55,9 @@ export function RecoverableDrafts({ cwd, openDraftIds, onRecoverDraft }: DraftRe
           {draft.error && <span role="alert" className="text-destructive">Draft recovery failed: {draft.error}</span>}
         </div>
       ))}
+      {drafts.length > MAX_VISIBLE_DRAFTS && (
+        <p className="text-muted-foreground">and {drafts.length - MAX_VISIBLE_DRAFTS} more</p>
+      )}
       {error && <p role="alert" className="text-destructive">Draft recovery failed: {error}</p>}
     </div>
   );

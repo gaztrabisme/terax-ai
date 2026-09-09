@@ -82,6 +82,10 @@ beforeEach(() => {
       if (!files.has(path)) throw new Error(`no such file: ${path}`);
       return cmd === "fs_read_file" ? { kind: "text", content: files.get(path), size: files.get(path)!.length } : { base64: files.get(path) };
     }
+    if (cmd === "fs_stat") {
+      if (!files.has(path)) throw new Error(`no such file: ${path}`);
+      return { kind: "file", size: 1, mtime: 0 };
+    }
     if (cmd === "fs_write_file") { files.set(path, args?.content ?? ""); return; }
     if (cmd === "fs_delete") { files.delete(path); return; }
     if (cmd === "fs_read_dir") return [...files.keys()]
@@ -167,13 +171,43 @@ it("offers image-only and editor orphan records under their own sids", async () 
   files.set(`${cwd}/.pi/drafts/orphan-editor.md`, "Recovered editor line");
   files.set(`${cwd}/.pi/drafts/orphan-editor.json`, JSON.stringify({ v: 1, kind: "editor", path: `${cwd}/orphan.md`, baseSha256: await sha256Hex("saved") }));
   const view = render(<Project />);
-  await view.findByText("Queued images");
+  await view.findByText("1 queued image");
   fireEvent.click(view.container.querySelector('[data-uat-key="orphan-image"]')!);
   await view.findByRole("img");
   const active = view.container.querySelector('[data-sid="orphan-image"]')!;
   fireEvent.click(active.querySelector('[data-uat-key="orphan-editor"]')!);
   await waitFor(() => expect((view.container.querySelector("textarea") as HTMLTextAreaElement)?.value).toBe("Recovered editor line"));
   expect(view.getByText("Unsaved, recovered")).toBeTruthy();
+});
+
+it("drops empty orphan drafts and deletes both of their files at listing time", async () => {
+  seedWindow();
+  files.set(`${cwd}/.pi/drafts/orphan-empty.md`, "");
+  files.set(`${cwd}/.pi/drafts/orphan-empty.json`, JSON.stringify(emptyChatMeta()));
+  files.set(`${cwd}/.pi/drafts/orphan-blank.md`, "\n  \n");
+  files.set(`${cwd}/.pi/drafts/orphan-blank.json`, JSON.stringify(emptyChatMeta()));
+  const view = render(<Project />);
+  await waitFor(() => expect(files.has(`${cwd}/.pi/drafts/orphan-empty.md`)).toBe(false));
+  expect(files.has(`${cwd}/.pi/drafts/orphan-empty.json`)).toBe(false);
+  expect(files.has(`${cwd}/.pi/drafts/orphan-blank.md`)).toBe(false);
+  expect(files.has(`${cwd}/.pi/drafts/orphan-blank.json`)).toBe(false);
+  expect(view.queryByText("Recoverable drafts")).toBeNull();
+});
+
+it("caps the strip at eight rows with an and-N-more line", async () => {
+  seedWindow();
+  for (let i = 1; i <= 10; i += 1) {
+    const sid = `orphan-${String(i).padStart(2, "0")}`;
+    files.set(`${cwd}/.pi/drafts/${sid}.md`, `Orphan row ${i}\n`);
+    files.set(`${cwd}/.pi/drafts/${sid}.json`, JSON.stringify(emptyChatMeta()));
+  }
+  const view = render(<Project />);
+  await view.findByText("Recoverable drafts");
+  expect(view.container.querySelectorAll('[data-uat="draft-recover"]')).toHaveLength(8);
+  expect(view.getByText("and 2 more")).toBeTruthy();
+  expect(view.getByText("Orphan row 1")).toBeTruthy();
+  expect(view.container.querySelector('[data-uat-key="orphan-09"]')).toBeNull();
+  expect(view.container.querySelector('[data-uat-key="orphan-10"]')).toBeNull();
 });
 
 it("keeps an orphan row and names the file when Recover cannot bind it", async () => {

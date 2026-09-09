@@ -203,6 +203,82 @@ export type DraftRecord = {
   | { kind: "editor"; meta: EditorDraftMeta }
 );
 
+// ---------------------------------------------------------------------------
+// Recoverable listing (U4)
+// ---------------------------------------------------------------------------
+
+/** A queued attachment counts toward the offer only while its file exists. */
+async function attachmentFileExists(cwd: string, path: string): Promise<boolean> {
+  try {
+    await invoke("fs_stat", {
+      path: `${cwd.replace(/[\\/]+$/, "")}/${path}`,
+      workspace: currentWorkspaceEnv(),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * U4 offer gate: the text must say something, or the record must still hold a
+ * queued image whose file exists, or a K8 source. Anything else recovers
+ * nothing and is deleted quietly by listRecoverableDrafts.
+ */
+async function draftIsWorthOffering(cwd: string, record: DraftRecord): Promise<boolean> {
+  if (record.markdown.trim() !== "") return true;
+  if (record.kind !== "chat") return false;
+  if (record.meta.sources.length > 0) return true;
+  const existing = await Promise.all(
+    record.meta.attachments.map((attachment) => attachmentFileExists(cwd, attachment.path)),
+  );
+  return existing.some(Boolean);
+}
+
+function draftFirstLine(markdown: string): string {
+  return markdown.split(/\r?\n/, 1)[0] ?? "";
+}
+
+function isFenceLine(line: string): boolean {
+  return /^\s*`{3,}/.test(line);
+}
+
+/**
+ * The first content line of the first fenced block: the command line of a K8
+ * transfer quotation (buildQuotation puts it right under the opening fence).
+ */
+function quotationFirstLine(markdown: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const open = lines.findIndex((line) => isFenceLine(line));
+  for (let i = open + 1; open !== -1 && i < lines.length; i += 1) {
+    if (isFenceLine(lines[i])) break;
+    if (lines[i].trim() !== "") return lines[i];
+  }
+  return "";
+}
+
+function queuedImagesLabel(meta: ChatDraftMeta): string {
+  const n = meta.attachments.length;
+  return `${n} queued image${n === 1 ? "" : "s"}`;
+}
+
+function chatDraftLabel(markdown: string, meta: ChatDraftMeta): string {
+  const first = draftFirstLine(markdown);
+  if (first.trim() !== "" && !isFenceLine(first)) return first;
+  if (meta.sources.length > 0) {
+    const quoted = quotationFirstLine(markdown);
+    if (quoted !== "") return quoted;
+  }
+  if (meta.attachments.length > 0) return queuedImagesLabel(meta);
+  if (meta.sources.length > 0) return "Transferred terminal block";
+  return first;
+}
+
+function editorDraftLabel(markdown: string, meta: EditorDraftMeta): string {
+  const first = draftFirstLine(markdown);
+  return first.trim() !== "" ? first : meta.path;
+}
+
 export async function loadDraftRecord(cwd: string, sid: string): Promise<DraftRecord | null> {
   if (!/^[a-zA-Z0-9_-]+$/.test(sid)) throw new Error(`Invalid draft id: ${sid}`);
   const [markdown, rawMeta] = await Promise.all([
@@ -251,9 +327,18 @@ export async function listRecoverableDrafts(cwd: string, openSids: readonly stri
     try {
       const record = await loadDraftRecord(cwd, sid);
       if (!record) return null;
-      const fallback = record.kind === "editor" ? record.meta.path
-        : record.meta.attachments.length ? "Queued images" : "Empty draft";
-      return { sid, firstLine: record.markdown.split(/\r?\n/, 1)[0] || fallback };
+      // U4: an empty, attachment-free draft offers nothing to recover; clear
+      // both files quietly so the row never comes back. Drafts bound to open
+      // tabs never reach this loop.
+      if (!(await draftIsWorthOffering(cwd, record))) {
+        await deleteOrNull(draftPath(cwd, sid));
+        await deleteOrNull(draftMetaPath(cwd, sid));
+        return null;
+      }
+      const firstLine = record.kind === "editor"
+        ? editorDraftLabel(record.markdown, record.meta)
+        : chatDraftLabel(record.markdown, record.meta);
+      return { sid, firstLine };
     } catch (error) {
       return { sid, firstLine: sid, error: String(error) };
     }
