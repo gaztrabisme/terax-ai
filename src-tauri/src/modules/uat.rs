@@ -635,6 +635,10 @@ impl UatState {
         state.requests.clear();
         state.acknowledged = None;
         state.sample = None;
+        // A refresh request left by a previous run is not this run's request.
+        // Remove it before the collector watches so the new run never consumes
+        // it; a missing .pi or file is fine and must not be created here.
+        let _ = fs::remove_file(root.join(".pi/uat-refresh.json"));
         Ok(
             json!({"runId": self.run_id, "windowId": window_id, "cwd": super::fs::to_canon(&root), "seq": state.seq, "layoutSeq": state.layout_seq}),
         )
@@ -693,7 +697,7 @@ impl UatState {
         window_id: &str,
         bytes: &[u8],
         source: Option<&Path>,
-    ) -> Result<RefreshRequest, String> {
+    ) -> Result<Option<RefreshRequest>, String> {
         self.guard()?;
         if bytes.len() > REFRESH_CAP as usize {
             return Err("REFRESH_INVALID: request too large".into());
@@ -708,18 +712,27 @@ impl UatState {
         {
             return Err("REFRESH_INVALID: invalid request fields".into());
         }
-        if request.run_id != self.run_id {
-            return Err("RUN_MISMATCH: refresh is for another run".into());
-        }
-        if request.window_id != window_id {
-            return Err("WINDOW_UNKNOWN: refresh is for another window".into());
-        }
         let mut inner = self.inner.lock().map_err(|_| "UAT_STATE_UNAVAILABLE")?;
         let state = inner
             .windows
             .get_mut(window_id)
             .filter(|s| s.root.is_some())
             .ok_or("WINDOW_UNKNOWN")?;
+        if request.run_id != self.run_id {
+            // A request naming another run is stale state, not this run's
+            // failure: record it once and keep health unchanged.
+            if let Some(root) = state.root.as_deref() {
+                append_uat_log(
+                    root,
+                    &json!({"time": now(), "event": "ignored-refresh", "nonce": request.nonce, "runId": request.run_id}),
+                )
+                .unwrap_or_else(|error| eprintln!("UAT refresh log unavailable: {error}"));
+            }
+            return Ok(None);
+        }
+        if request.window_id != window_id {
+            return Err("WINDOW_UNKNOWN: refresh is for another window".into());
+        }
         if source.is_some_and(|root| state.root.as_deref() != Some(root)) {
             return Err("PROJECT_CHANGED: refresh watcher no longer owns this project".into());
         }
@@ -737,7 +750,7 @@ impl UatState {
             )
             .unwrap_or_else(|error| eprintln!("UAT refresh log unavailable: {error}"));
         }
-        Ok(request)
+        Ok(Some(request))
     }
 
     fn write(
@@ -922,9 +935,9 @@ fn watch_refresh(window: tauri::WebviewWindow, root: PathBuf, stop: Arc<AtomicBo
                 let result =
                     read_bounded(&root, ".pi/uat-refresh.json", REFRESH_CAP).and_then(|bytes| {
                         match bytes {
-                            Some(bytes) => state
-                                .accept_refresh(window.label(), &bytes, Some(&root))
-                                .map(Some),
+                            Some(bytes) => {
+                                state.accept_refresh(window.label(), &bytes, Some(&root))
+                            }
                             None => Ok(None),
                         }
                     });
@@ -1406,7 +1419,6 @@ mod tests {
         }
         for (field, changed) in [
             ("v", json!(2)),
-            ("runId", json!("old")),
             ("windowId", json!("unknown")),
             ("nonce", json!("")),
             ("afterSeq", json!(1)),
@@ -1419,9 +1431,10 @@ mod tests {
                 .accept_refresh("main", bad.to_string().as_bytes(), None)
                 .is_err());
         }
-        state
+        let accepted = state
             .accept_refresh("main", request.to_string().as_bytes(), None)
             .unwrap();
+        assert!(accepted.is_some());
         assert!(state
             .accept_refresh("main", request.to_string().as_bytes(), None)
             .unwrap_err()
@@ -1444,6 +1457,53 @@ mod tests {
                 .nonce,
             "fresh"
         );
+    }
+
+    #[test]
+    fn stale_refresh_file_from_a_previous_run_is_removed_at_start() {
+        let (dir, registry, state, _value) = setup();
+        let pi = dir.path().join(".pi");
+        fs::create_dir_all(&pi).unwrap();
+        let request = json!({"v": 1, "runId": "previous-run", "windowId": "main", "nonce": "stale", "afterSeq": 41, "requestedAt": now()});
+        fs::write(pi.join("uat-refresh.json"), request.to_string()).unwrap();
+        state
+            .start("main", dir.path().to_str().unwrap(), &registry)
+            .unwrap();
+        assert!(!pi.join("uat-refresh.json").exists());
+        assert!(!pi.join("uat-status.json").exists());
+        assert!(!pi.join("logs").exists());
+    }
+
+    #[test]
+    fn foreign_run_refresh_is_ignored_with_a_log_line_and_no_health_change() {
+        let (dir, registry, state, mut value) = setup();
+        let request = json!({"v": 1, "runId": "previous-run", "windowId": "main", "nonce": "stale", "afterSeq": 0, "requestedAt": now()});
+        let accepted = state
+            .accept_refresh("main", request.to_string().as_bytes(), None)
+            .unwrap();
+        assert!(accepted.is_none());
+        {
+            let inner = state.inner.lock().unwrap();
+            let window = &inner.windows["main"];
+            assert!(window.requests.is_empty());
+            assert!(window.acknowledged.is_none());
+            assert!(window.error.is_none());
+            assert_eq!(window.failures, 0);
+            assert!(!window.seen_nonces.contains("stale"));
+        }
+        assert!(!dir.path().join(".pi/uat-status.json").exists());
+        let lines: Vec<Value> = fs::read_to_string(dir.path().join(".pi/logs/uat.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0],
+            json!({"time": lines[0]["time"], "event": "ignored-refresh", "nonce": "stale", "runId": "previous-run"})
+        );
+        value["refreshNonce"] = json!("stale");
+        assert!(state.write("main", &value.to_string(), &registry).is_err());
     }
 
     #[test]
