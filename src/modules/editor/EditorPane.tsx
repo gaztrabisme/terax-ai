@@ -31,6 +31,8 @@ initVimGlobals();
 import { resolveLanguage } from "./lib/languageResolver";
 import {
   createEditorDraftController,
+  readDiskVersion,
+  saveEditorCopy,
   type EditorDraftUiState,
 } from "./lib/editorDraft";
 import { useDocument } from "./lib/useDocument";
@@ -105,13 +107,25 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       [controller],
     );
 
-    const { doc, onChange, save, reload } = useDocument({
+    const { doc, onChange, save, reload, replaceFromDisk, getBuffer } = useDocument({
       path,
       onDirtyChange: handleDirty,
       recover: controller?.recover,
       beforeWrite: controller?.beforeWrite,
       onWritten: controller?.onWritten,
     });
+    const [diskVersion, setDiskVersion] = useState<string | null>(null);
+    const [reloadConfirm, setReloadConfirm] = useState(false);
+    const [actionError, setActionError] = useState<string | null>(null);
+    const [actionBusy, setActionBusy] = useState(false);
+    const runConflictAction = async (action: () => Promise<void>) => {
+      setActionBusy(true); setActionError(null);
+      try { await action(); } catch (error) { setActionError(String(error)); }
+      finally { setActionBusy(false); }
+    };
+    useEffect(() => {
+      if (doc.status === "ready") window.dispatchEvent(new CustomEvent("editor:loaded", { detail: { path, content: doc.content } }));
+    }, [path, doc]);
     const reloadRef = useRef(reload);
     reloadRef.current = reload;
     const cmRef = useRef<ReactCodeMirrorRef>(null);
@@ -325,10 +339,35 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
                 Save refused: {draftState.conflict.path} changed on disk since
                 this buffer was last saved; the unsaved buffer is kept at{" "}
                 {draftState.conflict.draftPath}.
+                <div className="mt-2 flex flex-wrap gap-2 text-foreground">
+                  <button data-uat="editor-compare" type="button" disabled={actionBusy} onClick={() => void runConflictAction(async () => setDiskVersion(await readDiskVersion(path)))}>Compare with disk</button>
+                  <button data-uat="editor-save-copy" type="button" disabled={actionBusy} onClick={() => void runConflictAction(async () => {
+                    const copy = await saveEditorCopy(path, getBuffer());
+                    window.dispatchEvent(new CustomEvent("pi:open-file", { detail: { path: copy } }));
+                  })}>Save a copy</button>
+                  <button data-uat="editor-reload" type="button" disabled={actionBusy} onClick={() => setReloadConfirm(true)}>Reload from disk</button>
+                </div>
+                {reloadConfirm ? <div role="alertdialog" aria-label="Confirm reload" className="mt-2 text-foreground">
+                  Reload from disk? Your draft will be kept at {draftState.conflict.draftPath}.
+                  <div className="flex gap-2">
+                    <button data-uat="editor-reload-confirm" type="button" disabled={actionBusy} onClick={() => void runConflictAction(async () => {
+                      const disk = await readDiskVersion(path);
+                      await controller!.retainForReload(getBuffer(), disk);
+                      replaceFromDisk(disk); setReloadConfirm(false); setDiskVersion(null);
+                    })}>Confirm reload</button>
+                    <button data-uat="editor-keep-editing" type="button" onClick={() => setReloadConfirm(false)}>Keep editing</button>
+                  </div>
+                </div> : null}
               </div>
             )}
           </div>
         )}
+        {actionError ? <div role="alert" className="p-2 text-xs text-destructive">{actionError}</div> : null}
+        <div className="flex min-h-0 flex-1">
+        {diskVersion !== null ? <section aria-label="Disk version (read only)" className="w-1/2 min-w-0 overflow-auto border-r p-2 text-xs">
+          <div className="flex justify-between gap-2"><span>Disk version (read only)</span><button type="button" onClick={() => setDiskVersion(null)}>Close comparison</button></div>
+          <pre className="whitespace-pre-wrap break-words">{diskVersion}</pre>
+        </section> : null}
         <CodeMirror
           ref={cmRef}
           value={doc.content}
@@ -349,6 +388,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
             searchKeymap: true,
           }}
         />
+        </div>
       </div>
     );
   },

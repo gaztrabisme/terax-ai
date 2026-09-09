@@ -244,6 +244,8 @@ export type RuntimeReportView = {
       thinking: string;
       endpoint: string | null;
       source: string;
+      model_source?: string;
+      thinking_source?: string;
     };
   };
   launched_at: string;
@@ -336,7 +338,7 @@ export function runtimeReportRows(
       label: "Model",
       status: role.model.trim() ? "ok" : "missing",
       detail: role.model.trim()
-        ? `${role.model} (${role.source})`
+        ? `${role.model} (${role.model_source || role.source})`
         : "none recorded",
     },
     {
@@ -344,7 +346,7 @@ export function runtimeReportRows(
       label: "Thinking",
       status: role.thinking.trim() ? "ok" : "missing",
       detail: role.thinking.trim()
-        ? `${role.thinking} (${role.source})`
+        ? `${role.thinking} (${role.thinking_source || role.source})`
         : "none recorded",
     },
   );
@@ -533,12 +535,13 @@ export function PiFirstRun({
         bppcHost: piBppcHost,
       };
       const overrides = await loadWorkspaceOverrides(selectedCwd);
-      const roles: PiRoles = effectiveRoles(globalPrefs, overrides);
+      let roles: PiRoles = effectiveRoles(globalPrefs, overrides);
       const scope = rolesScopeLabel(selectedCwd);
       // pi runs from the runtime agent dir (the seeded copy when the source
       // is bundled), so the credentials, endpoints and provider table are
       // read there, not from the launcher dir.
-      const runtimeDir = paths.runtimeAgentDir.path;
+      const report = await loadRuntimeReport(selectedCwd);
+      const runtimeDir = report?.agent_dir || paths.runtimeAgentDir.path;
       const ready = !!runtimeDir && !runtimeDir.startsWith("$HOME");
       const [
         authStatusMap,
@@ -547,7 +550,6 @@ export function PiFirstRun({
         storedKeys,
         envPresence,
         homeDir,
-        report,
       ] = await Promise.all([
         loadAuthStatus(runtimeDir, ready),
         loadEndpoints(runtimeDir, ready),
@@ -555,8 +557,8 @@ export function PiFirstRun({
         loadStoredCloudKeys(),
         loadCloudEnvPresence(),
         loadHomeDir(),
-        loadRuntimeReport(selectedCwd),
       ]);
+      if (report) roles = { ...roles, provider: report.roles.orchestrator.provider };
       const local = await loadLocalKeySources(
         endpoints,
         storedKeys.omlx === true,
@@ -588,7 +590,7 @@ export function PiFirstRun({
             base: report.roles.orchestrator.endpoint,
             provider: report.roles.orchestrator.provider,
           },
-          probeAgentDir,
+          report.agent_dir,
         );
       }
       let checkRows = buildRows({

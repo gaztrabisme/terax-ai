@@ -335,6 +335,7 @@ describe("PiTab mode strip", () => {
         .every((b) => b.getAttribute("aria-pressed") === "false"),
     ).toBe(true);
     expect(document.querySelectorAll("section[data-mode]")).toHaveLength(0);
+
     expect(uat("transcript")).toBeTruthy();
     expect(uat("sessions-search")).toBeNull();
     expect(screen.queryByTestId("run-graph")).toBeNull();
@@ -880,6 +881,12 @@ describe("F9 restore working layout", () => {
     recordChatView("/proj-1", "pita1", { view: "board", mode: "panel" });
     render(<PiTab tabId={1} sid="pita1" cwd="/proj-1" active onOpenChild={() => {}} />);
     expect(await screen.findByText("Last session ended unexpectedly.")).toBeTruthy();
+    const restore = screen.getByRole("button", { name: "Restore working layout" });
+    const dismiss = screen.getByRole("button", { name: "Dismiss" });
+    for (const button of [restore, dismiss]) expect(button.childNodes).toHaveLength(1);
+    expect(restore.parentElement!.className).toContain("min-w-max");
+    expect(restore.parentElement!.className).toContain("gap-2");
+    expect(restore.parentElement!.className).toContain("whitespace-nowrap");
     expect(document.querySelectorAll("section[data-mode]")).toHaveLength(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Restore working layout" }));
@@ -934,4 +941,19 @@ describe("F9 restore working layout", () => {
     expect(screen.queryByText("Last session ended unexpectedly.")).toBeNull();
     expect(document.querySelectorAll("section[data-mode]")).toHaveLength(0);
   });
+});
+
+it("reserves Retry save width beside a 320-character storage path", async () => {
+  const cwd = "/" + "a".repeat(319 - "/.pi/ui-state.json".length);
+  const longPath = `${cwd}/.pi/ui-state.json`;
+  expect(longPath).toHaveLength(320);
+  useUiStateStore.setState({ error: { path: longPath, message: "write failed" } });
+  render(<PiTab tabId={1} sid="pita1" cwd={cwd} active onOpenChild={() => {}} />);
+  const retry = screen.getByRole("button", { name: "Retry save" });
+  expect(retry.childNodes).toHaveLength(1);
+  expect(retry.parentElement!.className).toContain("min-w-max");
+  expect(retry.parentElement!.className).toContain("whitespace-nowrap");
+  expect(retry.parentElement!.className).toContain("gap-2");
+  expect(retry.closest('[data-uat="storage-error"]')!.textContent).toContain(longPath);
+  expect(retry.parentElement!.previousElementSibling!.className).toContain("break-all");
 });

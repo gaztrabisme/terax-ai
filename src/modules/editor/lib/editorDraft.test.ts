@@ -8,6 +8,8 @@ vi.mock("@/modules/workspace", () => ({
 
 import {
   createEditorDraftController,
+  answerTabTitle,
+  saveEditorCopy,
   windowProjectCwd,
   type EditorDraftUiState,
 } from "./editorDraft";
@@ -23,6 +25,11 @@ function memoryFs() {
       args?: { path?: string; content?: string; showHidden?: boolean },
     ) => {
       const path = args?.path ?? "";
+      if (cmd === "fs_create_file") {
+        if (files.has(path)) throw new Error("already exists");
+        files.set(path, "");
+        return;
+      }
       if (cmd === "fs_create_dir") {
         dirs.add(path);
         return undefined;
@@ -267,4 +274,37 @@ describe("editor draft controller", () => {
       invoke.mock.calls.filter(([cmd]) => cmd === "fs_write_file"),
     ).toHaveLength(0);
   });
+});
+
+it("names promoted answers by heading, first line or short session id", () => {
+  const path = "/proj/.pi/answers/12345678-aaaa-1.md";
+  expect(answerTabTitle(path, "Introduction\n## The answer\nbody")).toBe("The answer");
+  expect(answerTabTitle(path, "a".repeat(60))).toBe("a".repeat(40));
+  expect(answerTabTitle(path, "")).toBe("Answer 12345678");
+  expect(answerTabTitle("/proj/ordinary.md", "# Heading")).toBeNull();
+});
+it("reserves a sibling copy before writing and never overwrites the backing file", async () => {
+  const files = memoryFs();
+  files.set("/proj/answer.md", "disk");
+  const copy = await saveEditorCopy("/proj/answer.md", "buffer");
+  expect(copy).toMatch(/^\/proj\/answer\.[a-z0-9]+\.md$/);
+  expect(files.get(copy)).toBe("buffer");
+  expect(files.get("/proj/answer.md")).toBe("disk");
+  expect(invoke.mock.calls.find(([cmd]) => cmd === "fs_create_file")?.[1]).toMatchObject({ path: copy });
+});
+
+it("keeps the named conflict draft through reload and subsequent edits", async () => {
+  const files = memoryFs();
+  files.set("/w/a.md", "base");
+  const controller = createEditorDraftController({ cwd: "/w", path: "/w/a.md", sid: "keep1", isDirty: () => true, onState: () => {} });
+  await controller.recover("base");
+  files.set("/w/a.md", "changed disk");
+  expect(await controller.beforeWrite("unsaved buffer")).toBe(false);
+  await controller.retainForReload("unsaved buffer", "changed disk");
+  await controller.onClean();
+  controller.scheduleSave("new edits");
+  await vi.advanceTimersByTimeAsync(600);
+  expect(files.get("/w/.pi/drafts/keep1.md")).toBe("unsaved buffer");
+  expect(files.get("/w/a.md")).toBe("changed disk");
+  controller.stop();
 });

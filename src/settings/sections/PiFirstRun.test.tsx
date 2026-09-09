@@ -356,3 +356,12 @@ it("shows no report rows when the project carries no runtime.json", async () => 
   expect(screen.queryByText("Effective binary")).toBeNull();
   expect(screen.queryByText("Runtime agent dir")).toBeNull();
 });
+
+it("shows pi defaults and per-field sources in the first-run rows", async () => {
+  const { runtimeReportRows } = await import("./PiFirstRun");
+  const rows = runtimeReportRows({ ...REPORT, roles: { orchestrator: { ...REPORT.roles.orchestrator, source: "pi default", model_source: "global", thinking_source: "explicit" } } }, {});
+  expect(rows.find((row) => row.id === "runtime-provider")?.detail).toBe("local-fixture (pi default)");
+  expect(rows.find((row) => row.id === "runtime-model")?.detail).toBe("fixture-model (global)");
+  expect(rows.find((row) => row.id === "runtime-thinking")?.detail).toBe("high (explicit)");
+  expect(rows.find((row) => row.id === "runtime-endpoint")?.detail).toContain("127.0.0.1:9999");
+});

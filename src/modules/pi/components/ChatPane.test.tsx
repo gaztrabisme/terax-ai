@@ -26,7 +26,7 @@ vi.mock("./Composer", () => ({
     onStop?: () => void;
   }) => {
     composerProps.push(props);
-    return null;
+    return <div data-testid="composer" />;
   },
 }));
 vi.mock("./Transcript", () => ({
@@ -131,7 +131,7 @@ describe("ChatPane header chip", () => {
     const tokens = strip.querySelector('[data-uat="turn-tokens"]')!;
     const cost = strip.querySelector('[data-uat="session-cost"]')!;
     expect(tokens.textContent).toBe("no turns yet");
-    expect(cost.textContent).toBe("no turns yet");
+    expect(cost.textContent).toBe("");
   });
 
   it("shows cost unknown, never a blank or $0, when the provider priced nothing", () => {
@@ -438,4 +438,15 @@ describe("G1 New session queue decision", () => {
     expect(view.close).not.toHaveBeenCalled();
     expect(view.open).not.toHaveBeenCalled();
   });
+});
+
+it("puts empty guidance directly beside the composer", () => {
+  seedTab(90, initialPiSessionState());
+  const entry = usePiStore.getState().tabs[90];
+  usePiStore.setState({ tabs: { 90: { ...entry, session: { id: 90 } as never, recovering: false } } });
+  invokeMock.mockResolvedValue({ kind: "text", content: "{}" });
+  const view = render(<ChatPane tabId={90} cwd="/work/project-name" onOpenChild={() => {}} />);
+  const guidance = view.container.querySelector('[data-uat="empty-guidance"]')!;
+  expect(guidance.textContent).toContain("project-name · Enter sends, Shift+Enter newline");
+  expect(guidance.nextElementSibling).toBe(view.getByTestId("composer"));
 });

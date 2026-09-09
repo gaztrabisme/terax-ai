@@ -126,9 +126,8 @@ const DIRECT_TOOLS: &str = "read,grep,find,ls,todo,subagent";
 /// routes sessions to `<project>/.pi/sessions`), then `--mode rpc` plus the
 /// launcher's PI_BASE_ARGS role flags. The session-dir flag leads so it can
 /// never be swallowed by a positional prompt; `--provider`/`--model` are
-/// omitted when the provider is empty (then pi uses the agent dir's
-/// settings.json default) and `--smol` when the smol role is empty;
-/// `--thinking` and `--tools` always pass, matching the bash launcher.
+/// omitted independently when empty so pi uses its settings.json defaults.
+/// `--smol` and `--thinking` also pass only when configured.
 pub fn direct_rpc_args(roles: &PrepareRoles, project_root: &Path) -> Vec<String> {
     let session_dir = project_root.join(".pi").join("sessions");
     let mut args = vec![
@@ -141,14 +140,16 @@ pub fn direct_rpc_args(roles: &PrepareRoles, project_root: &Path) -> Vec<String>
     if !provider.is_empty() {
         args.push("--provider".to_string());
         args.push(provider.to_string());
-        let model = roles.model.trim();
-        if !model.is_empty() {
-            args.push("--model".to_string());
-            args.push(model.to_string());
-        }
     }
-    args.push("--thinking".to_string());
-    args.push(roles.thinking.trim().to_string());
+    let model = roles.model.trim();
+    if !model.is_empty() {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    if !roles.thinking.trim().is_empty() {
+        args.push("--thinking".to_string());
+        args.push(roles.thinking.trim().to_string());
+    }
     let smol = roles.smol.trim();
     if !smol.is_empty() {
         args.push("--smol".to_string());
@@ -646,8 +647,6 @@ mod tests {
                 "bppc".to_string(),
                 "--model".to_string(),
                 "qwen3.8-27b".to_string(),
-                "--thinking".to_string(),
-                String::new(),
                 "--tools".to_string(),
                 "read,grep,find,ls,todo,subagent".to_string(),
             ]
@@ -1008,13 +1007,15 @@ mod tests {
         expected.extend([
             "--mode".to_string(),
             "rpc".to_string(),
+            "--model".to_string(),
+            "qwen3.8-27b".to_string(),
             "--thinking".to_string(),
             "xhigh".to_string(),
             "--tools".to_string(),
             "read,grep,find,ls,todo,subagent".to_string(),
         ]);
         assert_eq!(direct_rpc_args(&roles, project.path()), expected);
-        // Whitespace-only counts as unset, and --thinking still passes.
+        // Whitespace-only values leave Pi defaults in control.
         let blank = PrepareRoles {
             provider: "  ".to_string(),
             model: String::new(),
@@ -1025,8 +1026,6 @@ mod tests {
         expected_blank.extend([
             "--mode".to_string(),
             "rpc".to_string(),
-            "--thinking".to_string(),
-            String::new(),
             "--tools".to_string(),
             "read,grep,find,ls,todo,subagent".to_string(),
         ]);

@@ -1,3 +1,4 @@
+import { answerTabTitle } from "@/modules/editor/lib/editorDraft";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   findLeafCwd,
@@ -189,6 +190,21 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     tabsRef.current = next;
     setTabsState(next);
   }, []);
+
+  useEffect(() => {
+    const titleChanged = (event: Event) => {
+      const { path, content } = (event as CustomEvent<{ path: string; content: string }>).detail;
+      const title = answerTabTitle(path, content);
+      if (title) setTabs((current) => current.map((tab) => tab.kind === "editor" && tab.path === path && tab.title !== title ? { ...tab, title } : tab));
+    };
+    window.addEventListener("editor:loaded", titleChanged);
+    return () => window.removeEventListener("editor:loaded", titleChanged);
+  }, [setTabs]);
+  useEffect(() => {
+    for (const tab of tabs) {
+      if (tab.kind === "editor") document.querySelector(`[data-tab-id="${tab.id}"]`)?.setAttribute("title", tab.path);
+    }
+  }, [tabs]);
 
   const newTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;

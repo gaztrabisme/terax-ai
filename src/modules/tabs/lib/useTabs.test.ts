@@ -223,3 +223,16 @@ describe("useTabs uiState recovery of written docs", () => {
     expect(doc.windows.main.activeTabId).toBe(editorSid as string);
   });
 });
+
+ it("uses an answer heading as the tab title while preserving its path", () => {
+  const { result } = renderHook(() => useTabs());
+  const path = "/proj/.pi/answers/12345678-session-1.md";
+  act(() => { result.current.openFileTab(path); });
+  const trigger = document.createElement("button");
+  trigger.dataset.tabId = String(result.current.activeId);
+  document.body.append(trigger);
+  act(() => { window.dispatchEvent(new CustomEvent("editor:loaded", { detail: { path, content: "# Useful answer\nbody" } })); });
+  expect(trigger.title).toBe(path);
+  trigger.remove();
+  expect(result.current.tabs.find((tab) => tab.kind === "editor")).toMatchObject({ title: "Useful answer", path });
+});

@@ -2,10 +2,13 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Transcript } from "@/modules/pi/components/Transcript";
+import { Transcript, TurnCards } from "@/modules/pi/components/Transcript";
 import { applyEvent, initialPiSessionState, requestCancel, sessionExited } from "@/modules/pi/lib/parse";
 import type { PiQueued } from "@/modules/pi/lib/piStore";
 import { collectSnapshot } from "@/modules/uat/snapshot";
+
+const settingsInvoke = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: settingsInvoke }));
 
 vi.mock("@/components/chat", () => {
   const Container = ({ children }: { children: ReactNode }) => <div>{children}</div>;
@@ -113,4 +116,19 @@ describe("G1 transcript recovery", () => {
     expect(result.lastError).toBeNull();
     expect(result.health).toBe("ok");
   });
+});
+
+it("names the refused host and opens settings or retries from the failure summary", () => {
+  const retry = vi.fn();
+  const view = render(<TurnCards turnKey="t" cards={[{ kind: "error", text: "Connection refused (os error 61)", at: 0 }]} endpoint="http://user:secret@localhost:8080/v1?key=secret" onRetry={retry} />);
+  expect(view.container.textContent).toContain("localhost:8080: Connection refused");
+  expect(view.container.textContent).not.toContain("secret");
+  fireEvent.click(view.getByRole("button", { name: "Retry now" }));
+  expect(retry).toHaveBeenCalledOnce();
+  fireEvent.click(view.getByRole("button", { name: "Open provider settings" }));
+  expect(settingsInvoke).toHaveBeenCalledWith("open_settings_window", { tab: "pi" });
+});
+it("keeps the empty transcript area blank", () => {
+  const view = render(<Transcript {...callbacks} blocks={[]} cwd="/proj" />);
+  expect(view.container.querySelector('[data-uat="transcript"]')?.textContent).toBe("");
 });

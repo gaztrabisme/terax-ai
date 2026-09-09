@@ -28,7 +28,7 @@ type Options = {
   /** After the file loads: offer the disk text, get a draft buffer back. */
   recover?: (diskContent: string) => Promise<RecoveryPayload | null>;
   /** Gate every write-through to disk; false refuses (K11c conflict). */
-  beforeWrite?: () => Promise<boolean>;
+  beforeWrite?: (buffer: string) => Promise<boolean>;
   /** The buffer reached disk: the draft mirror is now stale. */
   onWritten?: () => void;
 };
@@ -170,12 +170,21 @@ export function useDocument({
     return true;
   }, [path]);
 
+  const replaceFromDisk = useCallback((content: string) => {
+    clearAutoSaveTimer();
+    savedRef.current = content;
+    bufferRef.current = content;
+    dirtyRef.current = false;
+    setDirty(false);
+    setDoc({ status: "ready", content, size: new TextEncoder().encode(content).length });
+  }, [clearAutoSaveTimer]);
+
   const save = useCallback(async (): Promise<boolean> => {
     clearAutoSaveTimer();
     if (!dirtyRef.current) return false;
     // K11c: every write-through passes the gate; a refused save keeps the
     // buffer dirty (conflict surfaced by the caller).
-    if (beforeWriteRef.current && !(await beforeWriteRef.current())) {
+    if (beforeWriteRef.current && !(await beforeWriteRef.current(bufferRef.current))) {
       return false;
     }
     await saveNow();
@@ -206,5 +215,5 @@ export function useDocument({
 
   useEffect(() => clearAutoSaveTimer, [path, clearAutoSaveTimer]);
 
-  return { doc, dirty, onChange, save, reload };
+  return { doc, dirty, onChange, save, reload, replaceFromDisk, getBuffer: () => bufferRef.current };
 }

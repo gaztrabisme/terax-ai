@@ -145,13 +145,16 @@ pub async fn pi_open(
             );
         }
     };
-    overlay(
-        &mut env,
-        "EFFICIENT_PI_PROVIDER",
-        &overrides.provider,
-    );
-    overlay(&mut env, "EFFICIENT_PI_MODEL", &overrides.model);
-    overlay(&mut env, "EFFICIENT_PI_THINKING", &overrides.thinking);
+    let inherited_env = std::env::vars().collect();
+    let resolve_role = |key: &str, pi_key: Option<&str>, project: Option<&str>| {
+        runtime::resolve_launch_role(key, pi_key, project, &env, &inherited_env)
+    };
+    let (provider, provider_source) = resolve_role("EFFICIENT_PI_PROVIDER", Some("PI_PROVIDER"), overrides.provider.as_deref());
+    let (model, model_source) = resolve_role("EFFICIENT_PI_MODEL", Some("PI_MODEL"), overrides.model.as_deref());
+    let (thinking, thinking_source) = resolve_role("EFFICIENT_PI_THINKING", None, overrides.thinking.as_deref());
+    env.insert("EFFICIENT_PI_PROVIDER".to_string(), provider);
+    env.insert("EFFICIENT_PI_MODEL".to_string(), model);
+    env.insert("EFFICIENT_PI_THINKING".to_string(), thinking);
     overlay(&mut env, "EFFICIENT_PI_SMOL", &overrides.smol);
     overlay(&mut env, "EFFICIENT_PI_BPPC_HOST", &overrides.bppc_host);
     overlay(&mut env, "PI_CODING_AGENT_DIR", &overrides.agent_dir);
@@ -206,15 +209,6 @@ pub async fn pi_open(
         thinking: env_var("EFFICIENT_PI_THINKING"),
         smol: env_var("EFFICIENT_PI_SMOL"),
     };
-    // Where each role value came from, per the design 3.6 order: the project
-    // override, the global preference the caller resolved into the env, or
-    // the packaged default. An explicit launch-environment override is
-    // indistinguishable from a global value at this layer and reports as
-    // "global"; runtime.rs documents the limitation.
-    let provider_source = runtime::role_source(overrides.provider.is_some(), &roles.provider);
-    let model_source = runtime::role_source(overrides.model.is_some(), &roles.model);
-    let thinking_source =
-        runtime::role_source(overrides.thinking.is_some(), &roles.thinking);
     let endpoints = launcher::PrepareEndpoints {
         bppc_host: env_var("EFFICIENT_PI_BPPC_HOST").trim().to_string(),
         omlx_key,

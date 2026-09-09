@@ -250,11 +250,13 @@ describe("composer model chip", () => {
     expect(send).toBeTruthy();
   });
 
-  it("renders model unset without roles and lists unknown values in the popover", async () => {
-    const { container } = render(<Composer tabId={8} onSubmit={vi.fn()} />);
+  it("offers model setup without roles and lists unknown values in the popover", async () => {
+    const { container, getByRole } = render(<Composer tabId={8} onSubmit={vi.fn()} />);
+    fireEvent.click(getByRole("button", { name: "Choose a model" }));
+    expect(invokeMock).toHaveBeenCalledWith("open_settings_window", { tab: "pi" });
     await waitFor(() => {
       const el = container.querySelector('[data-uat="model-chip"]')!;
-      expect(el.textContent).toBe("model unset");
+      expect(el.textContent).toBe("Choose a model");
     });
     expect(
       container.querySelector('[data-uat="model-chip"]')!.getAttribute("title"),

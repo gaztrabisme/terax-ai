@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+import { currentWorkspaceEnv } from "@/modules/workspace";
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -185,7 +187,16 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
     }
     return null;
   }, [blocks]);
-  const roles = entry?.roles;
+  const [runtimeRole, setRuntimeRole] = useState<{ provider: string; model: string; endpoint: string | null } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setRuntimeRole(null);
+    if (cwd && entry?.session) void invoke<{ kind: string; content: string }>("fs_read_file", { path: `${cwd}/.pi/runtime.json`, workspace: currentWorkspaceEnv() }).then((res) => {
+      if (res.kind === "text" && alive) setRuntimeRole(JSON.parse(res.content).roles?.orchestrator ?? null);
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [cwd, entry?.session]);
+  const roles = runtimeRole ? { ...entry?.roles, ...runtimeRole } : entry?.roles;
   const chipModel = roles?.model || model;
 
   // Vision flag for the effective provider/model, read from the cached
@@ -308,7 +319,7 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
           {(!entry || (entry.recovering && !sessionId) || (entry.error && !sessionId)) ? "" : stripTurnTokensLabel(state?.turnTokens ?? 0, hasTurnUsage)}
         </span>
         <span data-uat="session-cost">
-          {(!entry || (entry.recovering && !sessionId) || (entry.error && !sessionId)) ? "" : stripSessionCostLabel(state?.sessionCost ?? 0, hasTurnUsage)}
+          {(!entry || (entry.recovering && !sessionId) || (entry.error && !sessionId) || !hasTurnUsage) ? "" : stripSessionCostLabel(state?.sessionCost ?? 0, hasTurnUsage)}
         </span>
         {sessionId ? (
           <span
@@ -407,6 +418,19 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
         <div role="status" className="p-4 text-xs text-muted-foreground">Recovering session...</div>
       ) : entry.error && !blocks.length ? null : <Transcript
         blocks={blocks}
+        endpoint={runtimeRole?.endpoint}
+        onRetryTurn={(turn) => { void (async () => {
+          let images: ComposerImage[] = turnImages[turn.key] ?? [];
+          if (!images.length && turn.savedAttachments.length) {
+            images = await Promise.all(turn.savedAttachments.map(async (attachment) => {
+              if (!cwd || !attachment.path || attachment.error) throw new Error(attachment.error || "Attachment is unavailable; restore it before retrying");
+              const bytes = await invoke<{ base64: string }>("fs_read_file_bytes", { path: `${cwd}/${attachment.path}`, workspace: currentWorkspaceEnv() });
+              if (!bytes.base64) throw new Error(`Attachment is empty: ${attachment.path}`);
+              return { mediaType: /\.png$/i.test(attachment.path) ? "image/png" : "image/jpeg", data: bytes.base64 };
+            }));
+          }
+          await submit(turn.user, images);
+        })().catch((error) => setSendError(String(error))); }}
         turnImages={turnImages}
         queued={entry?.queued ?? []}
         onRetryQueued={(id) => queueAction(retryQueued(tabId, id))}
@@ -428,6 +452,9 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
       />}
 
       {cwd && onRecoverDraft && <RecoverableDrafts cwd={cwd} openDraftIds={openDraftIds} onRecoverDraft={onRecoverDraft} />}
+      {blocks.length === 0 && entry?.session && !entry.recovering ? <div data-uat="empty-guidance" className="shrink-0 px-2 py-2 text-xs text-muted-foreground">
+        {cwd?.split(/[\\/]/).filter(Boolean).pop() ?? "pi"} · Enter sends, Shift+Enter newline
+      </div> : null}
       <Composer
         tabId={tabId}
         cwd={cwd}

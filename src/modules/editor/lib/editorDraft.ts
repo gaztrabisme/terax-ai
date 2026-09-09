@@ -90,6 +90,7 @@ export function createEditorDraftController({
   let activeSid = sid;
   let baseSha256: string | null = null;
   let loaded = false;
+  let keepDraft = false;
   let recovered = false;
   let conflict: EditorConflict | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -125,7 +126,11 @@ export function createEditorDraftController({
   };
 
   /** useDocument beforeWrite hook: refuse when the file moved under us. */
-  const beforeWrite = async (): Promise<boolean> => {
+  const beforeWrite = async (buffer?: string): Promise<boolean> => {
+    if (buffer !== undefined && baseSha256 !== null) {
+      stop();
+      await saveEditorDraft(cwd, activeSid, { v: 1, kind: "editor", path, baseSha256 }, buffer);
+    }
     let diskContent: string | null = null;
     try {
       const res = await invoke<{ kind: string; content?: string }>(
@@ -165,6 +170,7 @@ export function createEditorDraftController({
 
   /** Debounced draft mirror for ongoing edits. */
   const scheduleSave = (buffer: string): void => {
+    keepDraft = false;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
@@ -185,7 +191,7 @@ export function createEditorDraftController({
       clearTimeout(timer);
       timer = null;
     }
-    if (!loaded) return;
+    if (!loaded || keepDraft) return;
     await clearDraft(cwd, activeSid);
     recovered = false;
     conflict = null;
@@ -200,7 +206,18 @@ export function createEditorDraftController({
     }
   };
 
-  return { recover, beforeWrite, onWritten, scheduleSave, onClean, stop };
+  const retainForReload = async (buffer: string, disk: string): Promise<void> => {
+    stop();
+    if (baseSha256 === null) throw new Error("Editor base is unavailable");
+    await saveEditorDraft(cwd, activeSid, { v: 1, kind: "editor", path, baseSha256 }, buffer);
+    keepDraft = true;
+    activeSid = `${sid}-reload-${Date.now().toString(36)}`;
+    baseSha256 = await sha256Hex(disk);
+    recovered = false;
+    conflict = null;
+    push();
+  };
+  return { recover, beforeWrite, onWritten, scheduleSave, onClean, stop, retainForReload };
 }
 
 export type EditorDraftController = ReturnType<
@@ -210,4 +227,31 @@ export type EditorDraftController = ReturnType<
 /** Load a draft directly by stable id (tests and recovery tooling). */
 export function readEditorDraft(cwd: string, sid: string) {
   return loadEditorDraft(cwd, sid);
+}
+
+export function answerTabTitle(path: string, markdown: string): string | null {
+  if (!path.replace(/\\/g, "/").includes("/.pi/answers/")) return null;
+  const lines = markdown.split(/\r?\n/);
+  let fence = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(```|~~~)/.test(lines[i])) { fence = !fence; continue; }
+    if (fence) continue;
+    const heading = lines[i].match(/^ {0,3}#{1,6}\s+(.+?)\s*#*$/)?.[1];
+    if (heading) return heading;
+    if (i > 0 && /^ {0,3}(=+|-+)\s*$/.test(lines[i]) && lines[i - 1].trim()) return lines[i - 1].trim();
+  }
+  return lines[0].trim().slice(0, 40) || `Answer ${path.split(/[\\/]/).pop()!.slice(0, 8)}`;
+}
+
+export async function readDiskVersion(path: string): Promise<string> {
+  const result = await invoke<{ kind: string; content?: string }>("fs_read_file", { path, workspace: currentWorkspaceEnv() });
+  if (result.kind !== "text" || typeof result.content !== "string") throw new Error(`Cannot read text from ${path}`);
+  return result.content;
+}
+
+export async function saveEditorCopy(path: string, content: string): Promise<string> {
+  const copy = `${path.replace(/\.[^./\\]+$/, "")}.${Date.now().toString(36)}.md`;
+  await invoke("fs_create_file", { path: copy, workspace: currentWorkspaceEnv() });
+  await invoke("fs_write_file", { path: copy, content, workspace: currentWorkspaceEnv(), source: "editor" });
+  return copy;
 }

@@ -526,11 +526,12 @@ export function PiTab({
       <div
         data-uat="storage-error"
         role="status"
-        className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-destructive/10 px-2 text-xs font-medium text-destructive"
+        className="flex min-h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-destructive/10 px-2 py-1 text-xs font-medium text-destructive"
       >
-        <span className="min-w-0 flex-1 truncate">
+        <span className="min-w-0 flex-1 break-all">
           Storage error: {storageError.path}
         </span>
+        <div className="flex min-w-max shrink-0 flex-nowrap gap-2 whitespace-nowrap">
         <button
           type="button"
           data-uat="storage-retry"
@@ -541,6 +542,7 @@ export function PiTab({
         >
           Retry save
         </button>
+        </div>
       </div>
     ) : null;
   return (
@@ -575,11 +577,12 @@ export function PiTab({
         <div
           data-uat="layout-offer"
           role="status"
-          className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-secondary/60 px-2 text-xs font-medium"
+          className="flex min-h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-secondary/60 px-2 py-1 text-xs font-medium"
         >
-          <span className="min-w-0 flex-1 truncate">
+          <span className="min-w-0 flex-1 break-all">
             Last session ended unexpectedly.
           </span>
+          <div className="flex min-w-max shrink-0 flex-nowrap gap-2 whitespace-nowrap">
           <button
             type="button"
             data-uat="layout-restore"
@@ -600,6 +603,7 @@ export function PiTab({
           >
             Dismiss
           </button>
+          </div>
         </div>
       ) : null}
       <div className="flex min-h-0 min-w-0 flex-1">

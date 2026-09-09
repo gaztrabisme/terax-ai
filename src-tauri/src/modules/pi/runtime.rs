@@ -58,8 +58,7 @@ pub struct RuntimeBinary {
 
 /// The effective orchestrator role: provider, model, thinking level, endpoint
 /// (a baseUrl from the rendered models.json, never a credential) and where
-/// each value came from ("project", "global" or "default", per the design 3.6
-/// precedence order).
+/// each value came from (explicit, project, global or pi default).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrchestratorRole {
     pub provider: String,
@@ -67,6 +66,10 @@ pub struct OrchestratorRole {
     pub thinking: String,
     pub endpoint: Option<String>,
     pub source: String,
+    #[serde(default)]
+    pub model_source: String,
+    #[serde(default)]
+    pub thinking_source: String,
 }
 
 /// The role block: one entry today, keyed so a future subagent role slots in
@@ -208,21 +211,92 @@ pub fn read_endpoint(agent_dir: &Path, provider: &str) -> Option<String> {
         .get(provider)?
         .get("baseUrl")?
         .as_str()?;
-    (!base.trim().is_empty()).then(|| base.to_string())
+    let mut url = reqwest::Url::parse(base.trim()).ok()?;
+    url.set_username("").ok()?;
+    url.set_password(None).ok()?;
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
 }
 
-/// Where a role value came from, per the design 3.6 order: the project
-/// override wins, then the global preference the caller resolved into the
-/// spawn env, then the packaged default. (An explicit launch-environment
-/// override is indistinguishable from a global value at this layer; pi_open
-/// documents the limitation.)
+pub fn resolve_role_value(explicit: Option<&str>, project: Option<&str>, global: &str) -> (String, &'static str) {
+    for (value, source) in [(explicit, "explicit"), (project, "project"), (Some(global), "global")] {
+        if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
+            return (value.to_string(), source);
+        }
+    }
+    (String::new(), "pi default")
+}
+
+pub fn resolve_launch_role(
+    key: &str,
+    pi_key: Option<&str>,
+    project: Option<&str>,
+    passed: &HashMap<String, String>,
+    inherited: &HashMap<String, String>,
+) -> (String, &'static str) {
+    let explicit = pi_key.and_then(|key| passed.get(key).or_else(|| inherited.get(key)))
+        .or_else(|| inherited.get(key));
+    resolve_role_value(explicit.map(String::as_str), project, passed.get(key).map(String::as_str).unwrap_or_default())
+}
+
+#[cfg(test)]
 pub fn role_source(from_project: bool, value: &str) -> &'static str {
-    if from_project {
-        "project"
-    } else if !value.trim().is_empty() {
-        "global"
-    } else {
-        "default"
+    resolve_role_value(None, from_project.then_some(value), value).1
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    fs::read_to_string(path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default()
+}
+
+pub fn resolved_role(agent_dir: &Path, ctx: &RuntimeContext) -> OrchestratorRole {
+    let settings = read_json(&agent_dir.join("settings.json"));
+    let models = read_json(&agent_dir.join("models.json"));
+    let setting = |key: &str| settings.get(key).and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+    let mut provider = if ctx.provider.trim().is_empty() { setting("default_provider") } else { ctx.provider.trim().to_string() };
+    let mut requested_model = ctx.model.trim();
+    if ctx.provider.trim().is_empty() && !requested_model.is_empty() {
+        if let Some((scope, id)) = requested_model.split_once('/').filter(|(scope, _)| models["providers"].get(scope).is_some()) {
+            provider = scope.to_string();
+            requested_model = id;
+        } else if let Some(providers) = models["providers"].as_object() {
+            let matches = |value: &serde_json::Value| value["models"].as_array().is_some_and(|rows| rows.iter().any(|row| row["id"].as_str() == Some(requested_model)));
+            if let Some((id, _)) = providers.iter().find(|(_, value)| matches(value)).filter(|_| !matches(&models["providers"][&provider])) {
+                provider.clone_from(id);
+            }
+        }
+    }
+    let provider_models = models["providers"][&provider]["models"].as_array();
+    let model = if requested_model.is_empty() {
+        let configured = setting("default_model");
+        provider_models.and_then(|rows| rows.iter().find(|row| row["id"].as_str() == Some(&configured)).or_else(|| rows.first()))
+            .and_then(|row| row["id"].as_str()).map(str::to_string).unwrap_or_else(|| if provider == setting("default_provider") { configured } else { String::new() })
+    } else { requested_model.to_string() };
+    let configured_thinking = if ctx.thinking.trim().is_empty() { setting("default_thinking_level") } else { ctx.thinking.trim().to_string() };
+    let mut thinking = if configured_thinking.is_empty() { "xhigh".to_string() } else { configured_thinking };
+    let entry = models["providers"][&provider]["models"].as_array().and_then(|rows| rows.iter().find(|row| row["id"].as_str() == Some(&model)));
+    if let Some(entry) = entry {
+        if entry["reasoning"].as_bool() == Some(false) {
+            thinking = "off".to_string();
+        } else if thinking == "xhigh" {
+            let compat = entry.get("compat").or_else(|| models["providers"][&provider].get("compat"));
+            let declared = compat.and_then(|c| c["thinkingLevelMap"].get("xhigh")).is_some();
+            let deepseek = compat.and_then(|c| c["thinkingFormat"].as_str()).map_or_else(
+                || provider == "deepseek" || read_endpoint(agent_dir, &provider).is_some_and(|url| url.contains("deepseek.com")),
+                |format| format.eq_ignore_ascii_case("deepseek"),
+            );
+            let known = matches!(model.as_str(), "gpt-5.1-codex-max" | "gpt-5.2" | "gpt-5.5" | "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.4" | "gpt-5.2-codex" | "gpt-5.3-codex" | "gpt-5.3-codex-spark");
+            let api = entry["api"].as_str().or_else(|| models["providers"][&provider]["api"].as_str());
+            let anthropic = api == Some("anthropic-messages") && ["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-fable-", "claude-mythos-"].iter().any(|prefix| model.contains(prefix));
+            if !declared && !deepseek && !known && !anthropic { thinking = "high".to_string(); }
+        }
+    }
+    OrchestratorRole {
+        endpoint: read_endpoint(agent_dir, &provider),
+        provider, model, thinking,
+        source: if ctx.provider.trim().is_empty() { if ctx.model.trim().is_empty() { "pi default".to_string() } else { ctx.model_source.clone() } } else { ctx.provider_source.clone() },
+        model_source: if ctx.model.trim().is_empty() { "pi default".to_string() } else { ctx.model_source.clone() },
+        thinking_source: if ctx.thinking.trim().is_empty() { "pi default".to_string() } else { ctx.thinking_source.clone() },
     }
 }
 
@@ -237,7 +311,6 @@ pub fn build_report(
     ctx: &RuntimeContext,
 ) -> RuntimeReport {
     let agent_dir = prepare.agent_dir.to_string_lossy().into_owned();
-    let endpoint = read_endpoint(&prepare.agent_dir, ctx.provider.trim());
     RuntimeReport {
         v: REPORT_VERSION,
         steps: prepare
@@ -273,13 +346,7 @@ pub fn build_report(
         },
         agent_dir_source: ctx.agent_dir_source.clone(),
         roles: RuntimeRoles {
-            orchestrator: OrchestratorRole {
-                provider: ctx.provider.clone(),
-                model: ctx.model.clone(),
-                thinking: ctx.thinking.clone(),
-                endpoint,
-                source: ctx.provider_source.clone(),
-            },
+            orchestrator: resolved_role(&prepare.agent_dir, ctx),
         },
         launched_at: now_rfc3339(),
     }
@@ -303,6 +370,8 @@ pub fn scrub_report(report: &mut RuntimeReport, secrets: &[String]) {
     role.model = scrub(&role.model, secrets);
     role.thinking = scrub(&role.thinking, secrets);
     role.source = scrub(&role.source, secrets);
+    role.model_source = scrub(&role.model_source, secrets);
+    role.thinking_source = scrub(&role.thinking_source, secrets);
     if let Some(endpoint) = &role.endpoint {
         role.endpoint = Some(scrub(endpoint, secrets));
     }
@@ -465,6 +534,53 @@ mod tests {
     }
 
     #[test]
+    fn native_pi_environment_and_inherited_launch_environment_beat_preferences() {
+        let passed = HashMap::from([("EFFICIENT_PI_PROVIDER".to_string(), "global".to_string()), ("PI_PROVIDER".to_string(), "native".to_string())]);
+        let inherited = HashMap::from([("EFFICIENT_PI_PROVIDER".to_string(), "launch".to_string())]);
+        assert_eq!(resolve_launch_role("EFFICIENT_PI_PROVIDER", Some("PI_PROVIDER"), Some("project"), &passed, &inherited), ("native".to_string(), "explicit"));
+        assert_eq!(resolve_launch_role("EFFICIENT_PI_PROVIDER", None, Some("project"), &passed, &inherited), ("launch".to_string(), "explicit"));
+        assert_eq!(resolve_launch_role("EFFICIENT_PI_PROVIDER", None, Some("project"), &passed, &HashMap::new()), ("project".to_string(), "project"));
+    }
+
+    #[test]
+    fn resolved_roles_follow_all_four_sources_without_credentials() {
+        let agent = tempfile::tempdir().unwrap();
+        fs::write(agent.path().join("settings.json"), r#"{"default_provider":"bppc","default_model":"qwen3.8-27b","default_thinking_level":"high"}"#).unwrap();
+        fs::write(agent.path().join("models.json"), r#"{"providers":{"bppc":{"baseUrl":"http://user:password@127.0.0.1:8080/v1?key=secret#token","apiKey":"secret","models":[{"id":"qwen3.8-27b","reasoning":true}]}}}"#).unwrap();
+        for (explicit, project, global, expected) in [
+            (Some("bppc"), Some("project"), "global", "explicit"),
+            (None, Some("bppc"), "global", "project"),
+            (None, None, "bppc", "global"),
+            (None, None, "", "pi default"),
+        ] {
+            let (provider, source) = resolve_role_value(explicit, project, global);
+            let role = resolved_role(agent.path(), &RuntimeContext { provider, provider_source: source.to_string(), ..Default::default() });
+            assert_eq!(role.provider, "bppc");
+            assert_eq!(role.model, "qwen3.8-27b");
+            assert_eq!(role.thinking, "high");
+            assert_eq!(role.source, expected);
+            assert_eq!(role.model_source, "pi default");
+            assert_eq!(role.endpoint.as_deref(), Some("http://127.0.0.1:8080/v1"));
+            let json = serde_json::to_string(&role).unwrap();
+            for secret in ["password", "user", "secret", "token"] { assert!(!json.contains(secret)); }
+        }
+    }
+
+    #[test]
+    fn model_only_selection_and_thinking_match_rendered_capabilities() {
+        let agent = tempfile::tempdir().unwrap();
+        fs::write(agent.path().join("settings.json"), r#"{"default_provider":"old","default_model":"old-model","default_thinking_level":"xhigh"}"#).unwrap();
+        fs::write(agent.path().join("models.json"), r#"{"providers":{"custom":{"baseUrl":"http://localhost:9000/v1","models":[{"id":"text","reasoning":false},{"id":"reasoner","reasoning":true},{"id":"mapped","reasoning":true,"compat":{"thinkingLevelMap":{"xhigh":"maximum"}}}]}}}"#).unwrap();
+        for (model, thinking) in [("custom/text", "off"), ("reasoner", "high"), ("custom/mapped", "xhigh")] {
+            let role = resolved_role(agent.path(), &RuntimeContext { model: model.to_string(), model_source: "explicit".to_string(), ..Default::default() });
+            assert_eq!(role.provider, "custom");
+            assert_eq!(role.model, model.strip_prefix("custom/").unwrap_or(model));
+            assert_eq!(role.source, "explicit");
+            assert_eq!(role.thinking, thinking);
+        }
+    }
+
+    #[test]
     fn report_shape_round_trips_through_the_atomic_writer() {
         let project = tempfile::tempdir().expect("tempdir");
         let prepare = prepare_with_status("OK", "models.json unchanged");
@@ -597,9 +713,9 @@ mod tests {
 
     #[test]
     fn role_source_follows_the_project_global_default_order() {
-        assert_eq!(role_source(true, ""), "project");
+        assert_eq!(role_source(true, ""), "pi default");
         assert_eq!(role_source(false, "bppc"), "global");
-        assert_eq!(role_source(false, "   "), "default");
+        assert_eq!(role_source(false, "   "), "pi default");
     }
 
     #[test]

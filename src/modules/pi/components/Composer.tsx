@@ -1,3 +1,4 @@
+import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { Extension, EditorContent, useEditor } from "@tiptap/react";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Cancel01Icon, ImageAdd01Icon } from "@hugeicons/core-free-icons";
@@ -328,7 +329,7 @@ export function Composer({
   submitRef.current = onSubmit;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled || recovering;
-  const chipRef = useRef<HTMLSpanElement>(null);
+  const chipRef = useRef<HTMLButtonElement>(null);
   const { model, smol, provider } = useModelChip(chipRef);
   // UX-21: one details affordance for the exact provider/model/role values.
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -1265,7 +1266,9 @@ export function Composer({
         {/* Short model name only (UX-21): the exact provider/model/role
             values live in the title and the details popover, so a long
             identifier cannot push Send around at narrow widths. */}
-        <span
+        <button
+          type="button"
+          onClick={() => void openSettingsWindow("pi")}
           ref={chipRef}
           data-uat="model-chip"
           title={
@@ -1275,9 +1278,9 @@ export function Composer({
           }
           className="min-w-0 max-w-48 truncate rounded-md border border-border/60 px-2 py-0.5 text-xs text-muted-foreground"
         >
-          {model ? shortModelName(model) : "model unset"}
-          {smol ? `, subagent ${shortModelName(smol)}` : ""}
-        </span>
+          {provider && model ? shortModelName(model) : "Choose a model"}
+          {provider && model && smol ? `, subagent ${shortModelName(smol)}` : ""}
+        </button>
         <div ref={detailsRef} className="relative shrink-0">
           <button
             type="button"

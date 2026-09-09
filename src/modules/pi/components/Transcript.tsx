@@ -1,3 +1,4 @@
+import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { cn } from "@/lib/utils";
@@ -18,7 +19,6 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Conversation,
   ConversationContent,
-  ConversationEmptyState,
   ConversationScrollButton,
   MessageResponse,
   Shimmer,
@@ -67,6 +67,8 @@ type Props = {
   onAnswer: (requestId: string, answers: PiAskAnswer[]) => void;
   onDismiss: (requestId: string) => void;
   emptyHint?: string;
+  endpoint?: string | null;
+  onRetryTurn?: (turn: Turn) => void;
   /** Workspace root: anchors empty state and exported answer files. */
   cwd?: string;
   /** The pi session id, naming exported answer and artifact files. */
@@ -140,11 +142,6 @@ async function openAnswerInEditor(
     new CustomEvent("pi:open-file", { detail: { path: absolute } }),
   );
   return absolute;
-}
-
-function basename(cwd?: string): string | null {
-  const base = cwd?.split(/[\\/]/).filter(Boolean).pop();
-  return base ?? null;
 }
 
 function projectPath(cwd: string, relative: string): string {
@@ -352,23 +349,30 @@ function retryLabel(block: PiRetryBlock, current = false): string {
   return block.success ? `retry ${block.attempt} succeeded` : `Final failure after ${block.attempt} retries`;
 }
 
-function TurnCards({ cards, turnKey }: { cards: (PiErrorBlock | PiRetryBlock)[]; turnKey: string }) {
+export function TurnCards({ cards, turnKey, endpoint, onRetry, retryDisabled }: { cards: (PiErrorBlock | PiRetryBlock)[]; turnKey: string; endpoint?: string | null; onRetry?: () => void; retryDisabled?: boolean }) {
   const provider = cards.filter((b) => b.kind === "retry" || !b.text.startsWith("prompt rejected:"));
   const rejected = cards.filter((b): b is PiErrorBlock => b.kind === "error" && b.text.startsWith("prompt rejected:"));
   const latest = provider[provider.length - 1];
   const retry = [...provider].reverse().find((b): b is PiRetryBlock => b.kind === "retry");
   const lastError = [...provider].reverse().flatMap((b) => (b.kind === "error" ? [b.text] : b.errorText ? [b.errorText] : []))[0];
   const text = latest?.kind === "retry" ? retryLabel(latest, true) : retry ? `Final failure after ${retry.attempt} retries` : latest?.text;
+  const providerFailure = !(latest?.kind === "retry" && (latest.success || latest.outcome === "cancelled")) && /connect|provider|ECONN|fetch failed|network|HTTP [45]|api.?key|unauthorized|rate.limit/i.test(lastError ?? "");
+  let address = "";
+  try { const url = new URL(endpoint ?? ""); address = `${url.hostname}:${url.port || (url.protocol === "https:" ? "443" : "80")}`; } catch { /* No recorded endpoint. */ }
   return <>
     {latest ? <div data-uat={retry ? "retry-card" : "error-card"} data-uat-key={`${turnKey}/status`}
       className="max-w-[72ch] rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-[13px] text-muted-foreground">
       <div className="flex items-start gap-2" aria-live="polite">
         <HugeiconsIcon icon={retry ? Refresh01Icon : AlertCircleIcon} size={14} strokeWidth={1.75} className="mt-0.5 shrink-0" />
         <div className="select-text whitespace-pre-wrap wrap-break-word">
-          <span>{text}</span>
+          <span>{providerFailure && address ? `${address}: ` : ""}{text}</span>
           {retry && lastError ? <div>Last error: {lastError}</div> : null}
         </div>
       </div>
+      {providerFailure && onRetry ? <div className="mt-2 flex min-w-max gap-2">
+        <button type="button" data-uat="provider-settings" data-uat-key={turnKey} className="whitespace-nowrap rounded border px-2 py-1" onClick={() => void openSettingsWindow("pi")}>Open provider settings</button>
+        <button type="button" data-uat="provider-retry" data-uat-key={turnKey} className="whitespace-nowrap rounded border px-2 py-1" disabled={retryDisabled} onClick={onRetry}>Retry now</button>
+      </div> : null}
       {provider.length > 1 ? <details className="mt-2" data-uat="retry-history" data-uat-key={`${turnKey}/history`}>
         <summary role="button" data-uat="retry-history-toggle" data-uat-key={`${turnKey}/history`} className="cursor-pointer text-xs">Attempt history</summary>
         <ol className="mt-2 space-y-2">
@@ -865,7 +869,8 @@ export function Transcript({
   blocks,
   onAnswer,
   onDismiss,
-  emptyHint = "Enter sends, Shift+Enter newline",
+  endpoint,
+  onRetryTurn,
   cwd,
   sessionId,
   onOpenChild,
@@ -903,10 +908,6 @@ export function Transcript({
         data-uat="transcript"
         className="min-h-0 flex-1 select-text overflow-y-auto"
       >
-        <ConversationEmptyState
-          title={basename(cwd) ?? "pi"}
-          description={emptyHint}
-        />
       </div>
     );
   }
@@ -944,7 +945,7 @@ export function Transcript({
                     ? "empty completion: no usage reported" : undefined
                 )}
               />
-              <TurnCards turnKey={turn.key} cards={(cards.get(i) ?? []).filter((b) => b.kind !== "error" || b.text !== "empty completion: no usage reported")} />
+              <TurnCards turnKey={turn.key} endpoint={endpoint} onRetry={onRetryTurn ? () => onRetryTurn(turn) : undefined} retryDisabled={busy || !!queueRetryDisabled} cards={(cards.get(i) ?? []).filter((b) => b.kind !== "error" || b.text !== "empty completion: no usage reported")} />
             </Fragment>
           ))}
           {/* Cards with no turn under them (failed before any message). */}

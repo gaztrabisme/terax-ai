@@ -133,6 +133,13 @@ export const UAT_IDS_K4: UatIdEntry[] = [
 export type UatStatefulEntry = { id: string; file: string; state: string };
 
 export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
+  ...["provider-settings", "provider-retry"].map((id) => ({
+    id, file: "src/modules/pi/components/Transcript.tsx", state: "a provider request failed",
+  })),
+  ...["editor-compare", "editor-save-copy", "editor-reload", "editor-reload-confirm", "editor-keep-editing"].map((id) => ({
+    id, file: "src/modules/editor/EditorPane.tsx", state: "an editor save conflict or reload confirmation is visible",
+  })),
+
   { id: "attachment-remove", file: "src/modules/pi/components/Composer.tsx", state: "a draft attachment chip is present" },
   { id: "attachment-relink", file: "src/modules/pi/components/Composer.tsx", state: "a recovered attachment is missing" },
   { id: "attachment-conversion", file: "src/modules/pi/components/Composer.tsx", state: "an oversized image was converted to JPEG" },
