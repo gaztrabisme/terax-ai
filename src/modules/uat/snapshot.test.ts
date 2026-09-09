@@ -306,6 +306,34 @@ function harness() {
 }
 
 describe("paced collector", () => {
+  it("renders one bottom health line while healthy and the retry control only on failure", async () => {
+    const h = harness();
+    const collector = await mountCollector(context, h.io);
+    await vi.advanceTimersByTimeAsync(40);
+    const line = document.querySelector('[data-uat="uat-health"]')!;
+    expect(line.getAttribute("aria-label")).toBe("UAT snapshot health");
+    expect(line.hasAttribute("data-uat-text")).toBe(true);
+    expect(line.textContent).toBe(`UAT snapshot ok, seq 1, ${h.writes[0].ts}`);
+    expect(document.querySelector('[data-uat="uat-retry"]')).toBeNull();
+    h.health({
+      code: "WRITE_FAILED",
+      message: "Project is unwritable",
+      at: new Date().toISOString(),
+      consecutiveFailures: 1,
+      logPath: ".pi/logs/uat.jsonl",
+    });
+    expect(
+      document.querySelector('[data-uat="uat-health"]')!.textContent,
+    ).toContain(
+      "UAT snapshot unavailable: Project is unwritable Evidence: .pi/uat-status.json; .pi/logs/uat.jsonl",
+    );
+    const retry = document.querySelector('[data-uat="uat-retry"]')!;
+    expect(retry.getAttribute("aria-label")).toBe("Retry snapshot");
+    expect(retry.textContent).toBe("Retry");
+    await collector.stop();
+    expect(document.querySelector('[data-uat="uat-health"]')).toBeNull();
+  });
+
   it("keeps invalid refresh health visible until a valid refresh recovers", async () => {
     const h = harness();
     const collector = await mountCollector(context, h.io);
@@ -326,7 +354,10 @@ describe("paced collector", () => {
       health: "ok",
       refreshNonce: "valid-recovery",
     });
-    expect(document.querySelector('[data-uat="uat-health"]')).toBeNull();
+    expect(
+      document.querySelector('[data-uat="uat-health"]')!.textContent,
+    ).toContain("UAT snapshot ok");
+    expect(document.querySelector('[data-uat="uat-retry"]')).toBeNull();
     await collector.stop();
   });
   it("does not rebind a project when Rust canonicalizes its path", async () => {
@@ -461,8 +492,12 @@ describe("paced collector", () => {
       refreshNonce: "failed-recovery",
       health: "ok",
     });
-    expect(document.querySelector('[data-uat="uat-health"]')).toBeNull();
+    expect(
+      document.querySelector('[data-uat="uat-health"]')!.textContent,
+    ).toContain(`UAT snapshot ok, seq 1, ${h.writes[0].ts}`);
+    expect(document.querySelector('[data-uat="uat-retry"]')).toBeNull();
     await collector.stop();
+    expect(document.querySelector('[data-uat="uat-health"]')).toBeNull();
   });
 
   it("shows invalid refresh errors from the watcher and removes all observers on stop", async () => {

@@ -59,7 +59,7 @@ const LABELS: Record<string, string> = {
   "composer-input": "Chat input",
   "terminal-emulator": "Terminal",
   "editor-input": "Editor",
-  "uat-retry": "Retry",
+  "uat-retry": "Retry snapshot",
   "uat-health": "UAT snapshot health",
 };
 const PROPS = new Set(
@@ -515,28 +515,61 @@ const nativeIO: CollectorIO = {
   },
 };
 
-function healthBanner(doc: Document, retry: () => void) {
-  const banner = doc.createElement("div");
-  banner.setAttribute("data-uat", "uat-health");
-  banner.setAttribute("role", "alert");
-  banner.style.cssText =
-    "position:fixed;bottom:12px;left:12px;right:12px;z-index:2147483647;padding:12px;background:#3d1717;color:#fff;border:1px solid #d77;border-radius:6px;font:13px sans-serif;";
+// K7-D03: one health line, always rendered with --uat. It sits as a 20 px
+// strip above the 32 px status bar row so it never covers the cwd breadcrumb.
+// Text changes are the collector's own DOM writes; the mutation observer in
+// mountCollector ignores records whose targets stay inside this strip so the
+// healthy line cannot feed back into an endless capture loop.
+function healthLine(doc: Document, retry: () => void) {
+  const strip = doc.createElement("div");
+  strip.setAttribute("data-uat", "uat-health");
+  strip.setAttribute("role", "status");
+  strip.setAttribute("aria-label", "UAT snapshot health");
+  strip.setAttribute("data-uat-text", "");
+  strip.style.cssText =
+    "position:fixed;left:0;right:0;bottom:32px;height:20px;z-index:2147483647;display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:0 12px;font:11px/20px sans-serif;background:rgba(24,24,27,0.92);color:#a1a1aa;border-top:1px solid rgba(255,255,255,0.08);";
   const message = doc.createElement("span");
+  message.style.cssText =
+    "overflow:hidden;white-space:nowrap;text-overflow:ellipsis;";
   const button = doc.createElement("button");
   button.type = "button";
   button.textContent = "Retry";
   button.setAttribute("data-uat", "uat-retry");
+  button.setAttribute("aria-label", "Retry snapshot");
   button.style.cssText =
-    "margin-left:12px;padding:4px 12px;border:1px solid currentColor;border-radius:4px;";
+    "padding:0 12px;border:1px solid currentColor;border-radius:4px;background:transparent;font:inherit;line-height:16px;";
   button.addEventListener("click", retry);
-  banner.append(message, button);
+  let failed = false;
+  const paint = (error: boolean) => {
+    if (failed === error) return;
+    failed = error;
+    strip.style.background = error ? "#3d1717" : "rgba(24,24,27,0.92)";
+    strip.style.color = error ? "#fff" : "#a1a1aa";
+  };
+  const say = (text: string) => {
+    if (message.textContent !== text) message.textContent = text;
+  };
+  message.textContent = "UAT snapshot ok";
+  strip.append(message);
   return {
+    node: strip,
+    mount() {
+      if (!strip.isConnected) doc.body.append(strip);
+    },
+    ok(seq: number, ts: string) {
+      paint(false);
+      say(`UAT snapshot ok, seq ${seq}, ${ts}`);
+      button.remove();
+    },
     show(error: UatError) {
-      message.textContent = `UAT snapshot unavailable: ${error.message} Evidence: .pi/uat-status.json; .pi/logs/uat.jsonl`;
-      if (!banner.isConnected) doc.body.append(banner);
+      paint(true);
+      say(
+        `UAT snapshot unavailable: ${error.message} Evidence: .pi/uat-status.json; .pi/logs/uat.jsonl`,
+      );
+      if (!button.isConnected) strip.append(button);
     },
     clear() {
-      banner.remove();
+      strip.remove();
     },
   };
 }
@@ -563,11 +596,12 @@ export async function mountCollector(
   let protocolError: UatError | null = null;
   let acknowledgedNonce: string | null = null;
   const requests: RefreshRequest[] = [];
-  const banner = healthBanner(doc, () => {
+  const line = healthLine(doc, () => {
     recovery = true;
     dirty = true;
     schedule();
   });
+  line.mount();
   const receiveHealth = (error: UatError) => {
     failures = Math.max(failures, error.consecutiveFailures);
     lastHealth = error;
@@ -582,7 +616,10 @@ export async function mountCollector(
       ].includes(error.code)
     )
       protocolError = error;
-    banner.show(error);
+    line.show(error);
+    // The strip's own DOM changes are ignored by the observer below, so a
+    // health event must invalidate on its own to commit the error state.
+    invalidate();
   };
   const invalidate = () => {
     layoutSeq++;
@@ -671,7 +708,7 @@ export async function mountCollector(
         failures = 0;
         lastHealth = null;
         protocolError = null;
-        banner.clear();
+        line.ok(committed.seq, committed.ts);
       } else if (snapshot.dupes.length) dirty = true;
       if (captureLayout !== layoutSeq || requests.length) dirty = true;
     } catch (error) {
@@ -743,7 +780,10 @@ export async function mountCollector(
     receiveHealth,
     invalidate,
   );
-  const mutation = new MutationObserver(invalidate);
+  const mutation = new MutationObserver((records) => {
+    if (!records.every((record) => line.node.contains(record.target)))
+      invalidate();
+  });
   mutation.observe(doc.documentElement, {
     subtree: true,
     childList: true,
@@ -815,7 +855,7 @@ export async function mountCollector(
       win.visualViewport?.removeEventListener("resize", invalidate);
       win.visualViewport?.removeEventListener("scroll", invalidate);
       scaleQuery?.removeEventListener("change", scaleChange);
-      banner.clear();
+      line.clear();
       await busy;
       if (session) await io.stop();
     },

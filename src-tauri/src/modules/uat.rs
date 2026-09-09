@@ -679,16 +679,7 @@ impl UatState {
             let written = (|| {
                 let pi = private_dir(root, ".pi")?;
                 atomic_write(&pi.join("uat-status.json"), status.to_string().as_bytes())?;
-                let logs = private_dir(root, ".pi/logs")?;
-                let path = logs.join("uat.jsonl");
-                let mut bytes = match read_bounded(root, ".pi/logs/uat.jsonl", 1_048_576) {
-                    Ok(Some(bytes)) => bytes,
-                    Ok(None) => Vec::new(),
-                    Err(_) => Vec::new(),
-                };
-                bytes.extend(status.to_string().bytes());
-                bytes.push(b'\n');
-                atomic_write(&path, &bytes)
+                append_uat_log(root, &status)
             })();
             if let Err(error) = written {
                 eprintln!("UAT health evidence unavailable: {error}");
@@ -739,6 +730,13 @@ impl UatState {
             return Err("NONCE_REUSED: refresh nonce was already used".into());
         }
         state.requests.push_back(request.clone());
+        if let Some(root) = state.root.as_deref() {
+            append_uat_log(
+                root,
+                &json!({"time": now(), "event": "refresh", "nonce": request.nonce, "seq": state.seq}),
+            )
+            .unwrap_or_else(|error| eprintln!("UAT refresh log unavailable: {error}"));
+        }
         Ok(request)
     }
 
@@ -814,6 +812,15 @@ impl UatState {
             .is_some_and(|r| Some(r.nonce.as_str()) == nonce.as_deref())
         {
             state.acknowledged = state.requests.pop_front();
+            if let Some(ack) = state.acknowledged.as_ref() {
+                if let Some(root) = state.root.as_deref() {
+                    append_uat_log(
+                        root,
+                        &json!({"time": now(), "event": "ack", "nonce": ack.nonce, "seq": seq}),
+                    )
+                    .unwrap_or_else(|error| eprintln!("UAT ack log unavailable: {error}"));
+                }
+            }
         }
         if snapshot["health"] == "ok" {
             state.failures = 0;
@@ -821,6 +828,19 @@ impl UatState {
         }
         Ok(json!({"seq": seq, "ts": snapshot["ts"]}))
     }
+}
+
+fn append_uat_log(root: &Path, event: &Value) -> Result<(), String> {
+    private_dir(root, ".pi")?;
+    let logs = private_dir(root, ".pi/logs")?;
+    let path = logs.join("uat.jsonl");
+    let mut bytes = match read_bounded(root, ".pi/logs/uat.jsonl", 1_048_576) {
+        Ok(Some(bytes)) => bytes,
+        _ => Vec::new(),
+    };
+    bytes.extend(event.to_string().bytes());
+    bytes.push(b'\n');
+    atomic_write(&path, &bytes)
 }
 
 fn read_bounded(root: &Path, name: &str, cap: u64) -> Result<Option<Vec<u8>>, String> {
@@ -1423,6 +1443,34 @@ mod tests {
                 .unwrap()
                 .nonce,
             "fresh"
+        );
+    }
+
+    #[test]
+    fn accepted_refreshes_and_acknowledged_writes_append_event_lines() {
+        let (dir, registry, state, mut value) = setup();
+        let request = json!({"v": 1, "runId": state.run_id, "windowId": "main", "nonce": "n1", "afterSeq": 0, "requestedAt": now()});
+        state
+            .accept_refresh("main", request.to_string().as_bytes(), None)
+            .unwrap();
+        value["refreshNonce"] = json!("n1");
+        state.write("main", &value.to_string(), &registry).unwrap();
+        value["seq"] = json!(2);
+        sample(&state, &value);
+        state.write("main", &value.to_string(), &registry).unwrap();
+        let lines: Vec<Value> = fs::read_to_string(dir.path().join(".pi/logs/uat.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            json!({"time": lines[0]["time"], "event": "refresh", "nonce": "n1", "seq": 0})
+        );
+        assert_eq!(
+            lines[1],
+            json!({"time": lines[1]["time"], "event": "ack", "nonce": "n1", "seq": 1})
         );
     }
 
