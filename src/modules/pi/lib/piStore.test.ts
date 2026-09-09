@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sent: string[] = [];
+const aborts: number[] = [];
+const exits: Array<(code: number) => void> = [];
 const { invokeMock, openPiSessionMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   openPiSessionMock: vi.fn(),
@@ -14,6 +16,7 @@ openPiSessionMock.mockImplementation(
     onEvent: (l: string) => void;
     onExit?: (c: number) => void;
   }) => {
+    exits.push(opts.onExit ?? (() => {}));
     queueMicrotask(() =>
       opts.onEvent(
         JSON.stringify({ type: "agent_start", sessionId: "abcd1234-test" }),
@@ -24,6 +27,9 @@ openPiSessionMock.mockImplementation(
       send: async (line: string) => {
         sent.push(line);
       },
+      abort: async () => {
+        aborts.push(1);
+      },
       kill: async () => {
         opts.onExit?.(0);
       },
@@ -31,6 +37,7 @@ openPiSessionMock.mockImplementation(
   },
 );
 
+import { usePreferencesStore } from "@/modules/settings/preferences";
 import { usePiStore } from "./piStore";
 
 // Every patch goes through zustand's set(); a patch that returns the tabs map
@@ -39,6 +46,8 @@ describe("piStore", () => {
   beforeEach(() => {
     usePiStore.setState({ tabs: {} });
     sent.length = 0;
+    aborts.length = 0;
+    exits.length = 0;
     invokeMock.mockReset();
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "fs_read_file") return { kind: "text", content: "" };
@@ -279,6 +288,9 @@ describe("piStore", () => {
         send: async () => {
           throw new Error("stdin closed");
         },
+        abort: async () => {
+          throw new Error("stdin closed");
+        },
         kill: async () => {
           opts.onExit?.(0);
         },
@@ -492,5 +504,189 @@ describe("piStore", () => {
       expect.objectContaining({ submissionId }),
     );
     expect(usePiStore.getState().tabs[22]?.failedSubmission).toBeNull();
+  });
+});
+
+describe("piStore cancellation and queue acknowledgement", () => {
+  beforeEach(() => {
+    usePiStore.setState({ tabs: {} });
+    sent.length = 0;
+    aborts.length = 0;
+    exits.length = 0;
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "fs_read_file") return { kind: "text", content: "" };
+      return ".pi/attachments/0-0.png";
+    });
+  });
+
+  function lastEvents() {
+    const calls = vi.mocked(openPiSessionMock).mock.calls;
+    return calls[calls.length - 1]![0].onEvent;
+  }
+
+  it("Stop sends the rpc abort, flips to cancelling, then idle on the abort response", async () => {
+    await usePiStore.getState().openSession(30, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(usePiStore.getState().tabs[30]?.state.status).toBe("thinking");
+
+    await usePiStore.getState().cancelTurn(30);
+    expect(aborts).toHaveLength(1);
+    expect(usePiStore.getState().tabs[30]?.state.status).toBe("cancelling");
+    expect(usePiStore.getState().tabs[30]?.state.cancelRequested).toBe(true);
+
+    // pi answers abort with response_ok: Cancelling resolves at once while
+    // the run drains; the flag stays so the closing agent_end cannot turn
+    // pi's own "Aborted" error into a failure card.
+    lastEvents()('{"type":"response","command":"abort","success":true}');
+    expect(usePiStore.getState().tabs[30]?.state.status).toBe("idle");
+    expect(usePiStore.getState().tabs[30]?.state.cancelRequested).toBe(true);
+
+    lastEvents()(
+      '{"type":"agent_end","messages":[],"error":"Aborted"}',
+    );
+    const entry = usePiStore.getState().tabs[30]!;
+    expect(entry.state.status).toBe("idle");
+    expect(entry.state.cancelRequested).toBe(false);
+    expect(
+      entry.state.blocks.filter((block) => block.kind === "error"),
+    ).toHaveLength(0);
+  });
+
+  it("cancelTurn is a no-op when idle and never kills the session", async () => {
+    await usePiStore.getState().openSession(31, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    usePiStore.setState((s) => ({
+      tabs: {
+        ...s.tabs,
+        31: { ...s.tabs[31]!, state: { ...s.tabs[31]!.state, status: "idle" } },
+      },
+    }));
+    await usePiStore.getState().cancelTurn(31);
+    expect(aborts).toHaveLength(0);
+    expect(usePiStore.getState().tabs[31]?.state.status).toBe("idle");
+  });
+
+  it("cancelTurn during an auto-retry also withdraws the retry", async () => {
+    await usePiStore.getState().openSession(32, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    lastEvents()(
+      '{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":4000,"errorMessage":"boom"}',
+    );
+    await usePiStore.getState().cancelTurn(32);
+    expect(aborts).toHaveLength(1);
+    expect(JSON.parse(sent[sent.length - 1]!)).toEqual({ type: "abort_retry" });
+    expect(usePiStore.getState().tabs[32]?.state.retry).toBeNull();
+  });
+
+  it("a failed abort write surfaces the error instead of staying silent", async () => {
+    openPiSessionMock.mockImplementationOnce(
+      async (opts: { onEvent: (l: string) => void }) => {
+        queueMicrotask(() =>
+          opts.onEvent(
+            JSON.stringify({ type: "agent_start", sessionId: "abcd1234-test" }),
+          ),
+        );
+        return {
+          id: 8,
+          send: async () => {},
+          abort: async () => {
+            throw new Error("stdin closed");
+          },
+          kill: async () => {},
+        };
+      },
+    );
+    await usePiStore.getState().openSession(33, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await usePiStore.getState().cancelTurn(33);
+    expect(usePiStore.getState().tabs[33]?.error).toBe("stdin closed");
+  });
+
+  it("process exit while thinking sets idle with the exited marker", async () => {
+    await usePiStore.getState().openSession(34, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(usePiStore.getState().tabs[34]?.state.status).toBe("thinking");
+    exits[exits.length - 1]!(0);
+    const entry = usePiStore.getState().tabs[34]!;
+    expect(entry.exited).toBe(true);
+    expect(entry.exitCode).toBe(0);
+    expect(entry.session).toBeNull();
+    expect(entry.state.status).toBe("idle");
+    expect(entry.state.cancelRequested).toBe(false);
+  });
+
+  it("a second send while one is queued joins the queue and both acks land", async () => {
+    await usePiStore.getState().openSession(35, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await usePiStore.getState().sendPrompt(35, "Reply FAST_A.");
+    await usePiStore.getState().sendPrompt(35, "Reply FAST_B.");
+    const entry = usePiStore.getState().tabs[35]!;
+    expect(entry.queued?.map((q) => q.text)).toEqual([
+      "Reply FAST_A.",
+      "Reply FAST_B.",
+    ]);
+    expect(entry.pendingPrompts).toHaveLength(2);
+    expect(JSON.parse(sent[1]!)).toMatchObject({
+      streamingBehavior: "follow-up",
+    });
+
+    // Both responses arrive after both sends: acks land FIFO, once each.
+    lastEvents()('{"type":"response","command":"prompt","success":true}');
+    lastEvents()('{"type":"response","command":"prompt","success":true}');
+    const after = usePiStore.getState().tabs[35]!;
+    expect(after.queued?.every((q) => q.acked)).toBe(true);
+    expect(after.pendingPrompts).toHaveLength(0);
+  });
+
+  it("a refusal of the second send removes its queue entry and keeps its text", async () => {
+    await usePiStore.getState().openSession(36, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await usePiStore.getState().sendPrompt(36, "Reply FAST_A.");
+    lastEvents()('{"type":"response","command":"prompt","success":true}');
+    await usePiStore.getState().sendPrompt(36, "Reply FAST_B.");
+    lastEvents()(
+      '{"type":"response","command":"prompt","success":false,"error":"Follow-up queue is full"}',
+    );
+    const entry = usePiStore.getState().tabs[36]!;
+    expect(entry.queued?.map((q) => q.text)).toEqual(["Reply FAST_A."]);
+    expect(entry.pendingPrompts).toHaveLength(0);
+    expect(entry.rejectedDraft).toMatchObject({
+      text: "Reply FAST_B.",
+      error: "Follow-up queue is full",
+    });
+    expect(
+      entry.state.blocks.some(
+        (block) =>
+          block.kind === "error" && block.text.startsWith("prompt rejected"),
+      ),
+    ).toBe(true);
+  });
+
+  it("a send during a cancel is refused visibly with the text kept", async () => {
+    await usePiStore.getState().openSession(37, { cwd: "/tmp/p" });
+    await new Promise((r) => setTimeout(r, 0));
+    await usePiStore.getState().cancelTurn(37);
+    await expect(
+      usePiStore.getState().sendPrompt(37, "too late"),
+    ).rejects.toThrow("cancellation in progress");
+    const entry = usePiStore.getState().tabs[37]!;
+    expect(entry.rejectedDraft).toMatchObject({
+      text: "too late",
+      error: "cancellation in progress; send again once the strip is idle",
+    });
+    expect(sent).toHaveLength(0);
+  });
+
+  it("openSession passes the global piAgentBin pref to the launch (F7b)", async () => {
+    usePreferencesStore.setState({ piAgentBin: "$HOME/bin/pi-agent" });
+    try {
+      await usePiStore.getState().openSession(38, { cwd: "/tmp/p" });
+      expect(openPiSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ agentBin: "$HOME/bin/pi-agent" }),
+      );
+    } finally {
+      usePreferencesStore.setState({ piAgentBin: "" });
+    }
   });
 });

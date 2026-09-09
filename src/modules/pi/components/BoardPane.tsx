@@ -1,12 +1,10 @@
 import { PI_MODULE_PREFS_DEFAULTS } from "@/modules/pi/lib/settingsSchema";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useState } from "react";
-import { railTickets } from "../lib/board";
 import { useBoardData, type BoardData } from "../lib/useBoardData";
 export { POLL_MS } from "../lib/useBoardData";
-import { ColumnStrip } from "./board/ColumnStrip";
 import { Kanban } from "./board/Kanban";
-import { TicketCard } from "./board/TicketCard";
+import { LaneList } from "./board/LaneList";
 import { TicketSheet } from "./board/TicketSheet";
 
 type Props = {
@@ -45,19 +43,11 @@ export function BoardView({
   });
   const { snapshot, error, failedCommand, refresh } = data ?? ownData;
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [filter, setFilter] = useState<string | null>(null);
 
   // A failed poll keeps the previous snapshot on screen, marked stale, instead
   // of dropping the content (design.md section 3.5 row "Board/graph refresh
   // fails").
   const stale = Boolean(error && snapshot);
-
-  const tickets = snapshot
-    ? railTickets(
-        snapshot,
-        snapshot.states.includes(filter ?? "") ? filter : null,
-      )
-    : [];
 
   const errorLine = error ? (
     <>
@@ -104,37 +94,10 @@ export function BoardView({
           <Skeleton className="h-9 w-full rounded-md" />
           <Skeleton className="h-9 w-3/4 rounded-md" />
         </div>
-      ) : snapshot.tickets.length === 0 ? (
-        <div className="flex min-h-0 flex-1 items-start px-2 pb-2 text-[14px] text-muted-foreground">
-          No tickets yet
-        </div>
       ) : mode === "full" ? (
         <Kanban snapshot={snapshot} onOpen={setSelectedId} />
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <ColumnStrip
-            snapshot={snapshot}
-            filter={filter}
-            onFilter={setFilter}
-          />
-          <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-2 pb-2">
-            {tickets.length === 0 ? (
-              <div className="text-[12px] text-muted-foreground">
-                No tickets
-              </div>
-            ) : (
-              tickets.map((ticket, ti) => (
-                <TicketCard
-                  key={ticket.id}
-                  ticket={ticket}
-                  dense
-                  uatIndex={ti}
-                  onOpen={setSelectedId}
-                />
-              ))
-            )}
-          </div>
-        </div>
+        <LaneList snapshot={snapshot} onOpen={setSelectedId} />
       )}
 
       <TicketSheet

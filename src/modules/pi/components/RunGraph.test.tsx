@@ -63,13 +63,52 @@ describe("run graph reconstruction", () => {
     expect(view.container.querySelectorAll('[data-uat="graph-node-child"]')).toHaveLength(1);
   });
 
-  it("does not create a node for an unused slot or another session's child", async () => {
+  it("renders only the idle orchestrator for an unused slot or another session's child", async () => {
     files.set(ledgerPath("/project", "session-1"), "");
     useChildStore.setState({ children: { "/project/.pi/agent-hub/idle.transcript.jsonl": initialPiSessionState() } });
     const { container } = render(<RunGraph tabId={1} onOpenChild={() => {}} />);
     await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
     expect(container.querySelector('[data-uat="graph-node-child"]')).toBeNull();
-    expect(container.querySelector('[data-uat="graph-node-orchestrator"]')).toBeNull();
+    const orchestrator = container.querySelector('[data-uat="graph-node-orchestrator"]');
+    expect(orchestrator).not.toBeNull();
+    expect(orchestrator?.textContent).toContain("Orchestrator");
+    expect(orchestrator?.textContent).toContain("idle");
+  });
+
+  it("renders the orchestrator with its role and model, diagnostics compactly below the canvas", async () => {
+    usePiStore.setState({
+      tabs: {
+        ...usePiStore.getState().tabs,
+        1: {
+          ...usePiStore.getState().tabs[1]!,
+          roles: { provider: "ollama", model: "glm-4", smol: "" },
+        },
+      },
+    });
+    vi.mocked(watchTranscripts).mockRejectedValue(new Error("watch permission denied"));
+    const { container } = render(<RunGraph tabId={1} onOpenChild={() => {}} />);
+    await waitFor(() => {
+      const node = container.querySelector('[data-uat="graph-node-orchestrator"]');
+      expect(node?.textContent).toContain("Orchestrator · glm-4");
+    });
+    const orchestrator = container.querySelector('[data-uat="graph-node-orchestrator"]')!;
+    // The done delegation record replaced the running one (keyed by actionId),
+    // so the finished orchestrator run reads stopped.
+    expect(orchestrator.textContent).toContain("stopped");
+    // With a standing failure the canvas is labelled as the stale graph.
+    const canvas = container.querySelector('[aria-label="Stale run graph"]')!;
+    const errorLine = await waitFor(() => {
+      const el = container.querySelector('[data-uat="graph-error"]');
+      expect(el?.textContent).toContain("watch permission denied");
+      return el!;
+    });
+    // Below the canvas, one compact line: no large red region above the work.
+    expect(
+      canvas.compareDocumentPosition(errorLine) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(errorLine.querySelector('[data-uat="error-card"]')).toBeNull();
+    expect(errorLine.className).toContain("text-xs");
+    expect(errorLine.textContent).toContain("Previous graph content is stale.");
   });
 
   it("shows watcher failures with their path while retaining the recorded graph", async () => {

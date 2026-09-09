@@ -1,12 +1,20 @@
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { retryPendingLabel, type PiImageAttachment } from "../lib/parse";
+import {
+  retryPendingLabel,
+  turnInFlight,
+  type PiImageAttachment,
+} from "../lib/parse";
 import { modelAcceptsImages } from "../lib/providers";
 import { bindPendingImages } from "../lib/turnImages";
 import type { ArtifactFileRef } from "../lib/artifacts";
 import { usePiStore, type ComposerImage } from "../lib/piStore";
+import {
+  stripSessionCostLabel,
+  stripTurnTokensLabel,
+} from "../lib/usage";
 import { Composer } from "./Composer";
-import { formatCost, Transcript } from "./Transcript";
+import { Transcript } from "./Transcript";
 
 type Props = {
   tabId: number;
@@ -31,6 +39,8 @@ function statusLabel(
       return "running tool";
     case "awaiting-ask":
       return "waiting for answer";
+    case "cancelling":
+      return "cancelling";
     case "done":
       return "done";
     case "error":
@@ -50,7 +60,7 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
   const removeQueued = usePiStore((s) => s.removeQueued);
   const answerAsk = usePiStore((s) => s.answerAsk);
   const dismissAsk = usePiStore((s) => s.dismissAsk);
-  const kill = usePiStore((s) => s.kill);
+  const cancelTurn = usePiStore((s) => s.cancelTurn);
   const close = usePiStore((s) => s.close);
   const openSession = usePiStore((s) => s.openSession);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -103,15 +113,19 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
   }, [failedSubmission]);
 
   const status = state?.status ?? "idle";
+  // A turn has reported usage once a turn_end arrived (the totals' only
+  // source); before that the strip says "no turns yet" (UX-14).
+  const hasTurnUsage = !!state && (state.turnTokens > 0 || state.turnUsage !== null);
   const exited = entry?.exited === true;
   // A pending auto-retry replaces the running label until it resolves.
   const retry = state?.retry ?? null;
   // Stop only while the session is actively working; New session takes over
   // once the run is done, nothing is busy, or the process exited. The two are
   // mutually exclusive, so a done-but-alive session no longer shows both.
-  const showStop =
-    !exited &&
-    (status === "thinking" || status === "tool" || status === "awaiting-ask");
+  // During a cancel the button stays visible but disabled: the strip shows
+  // Cancelling until the abort response or the run's end resolves it.
+  const cancelling = status === "cancelling";
+  const showStop = !exited && (turnInFlight(status) || cancelling);
   const showNew =
     exited || status === "done" || status === "idle" || status === "error";
 
@@ -183,7 +197,9 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
     close(tabId);
     void openSession(tabId, { cwd });
   };
-  const stop = () => void kill(tabId);
+  // Stop and composer Escape share this one action: rpc abort, never a kill
+  // (the process exit path only serves real exits and teardown).
+  const stop = () => void cancelTurn(tabId);
 
   // K14: a launch failure is an entry error with no session behind it (a
   // failed preparation or spawn never produced a process). Errors that arrive
@@ -209,11 +225,12 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
     <div
       data-pi-model={chipModel ?? undefined}
       data-pi-smol={roles?.smol || undefined}
+      data-pi-provider={roles?.provider || undefined}
       className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-card"
     >
       <div
         data-uat="session-strip"
-        className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-xs text-muted-foreground"
+        className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 px-2 text-xs text-muted-foreground"
       >
         <span
           className={cn(
@@ -233,21 +250,22 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
             ? retryPendingLabel(retry)
             : statusLabel(status, exited, entry?.exitCode ?? null)}
         </span>
-        {state && state.turnTokens > 0 ? (
-          <span data-uat="turn-tokens">
-            {state.turnTokens.toLocaleString()} tok
-          </span>
-        ) : null}
-        {state && state.sessionCost > 0 ? (
-          <span data-uat="session-cost">{formatCost(state.sessionCost)}</span>
-        ) : null}
+        {/* Always present: "no turns yet" at idle, the sums after turns, and
+            "cost unknown" when the provider priced nothing (UX-14). */}
+        <span data-uat="turn-tokens">
+          {stripTurnTokensLabel(state?.turnTokens ?? 0, hasTurnUsage)}
+        </span>
+        <span data-uat="session-cost">
+          {stripSessionCostLabel(state?.sessionCost ?? 0, hasTurnUsage)}
+        </span>
         <span className="flex-1" />
         {showStop ? (
           <button
             type="button"
             data-uat="stop-button"
             onClick={stop}
-            className={headerBtn}
+            disabled={cancelling}
+            className={cn(headerBtn, cancelling && "opacity-50")}
           >
             Stop
           </button>
@@ -316,7 +334,7 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
         onDismiss={(requestId) => void dismissAsk(tabId, requestId)}
         cwd={cwd}
         sessionId={state?.sessionId ?? null}
-        inFlight={!!state && ["thinking", "tool", "awaiting-ask"].includes(state.status)}
+        inFlight={!!state && (turnInFlight(state.status) || state.status === "cancelling")}
         artifactFiles={artifactFiles}
         failedSubmission={entry?.failedSubmission ?? null}
         onRetrySubmission={retryFailed}
@@ -336,7 +354,9 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
         }
         modelAcceptsImages={tabModelAcceptsImages}
         onSubmit={submit}
-        onStop={showStop ? stop : undefined}
+        // Escape maps to the same stop action only while a turn is actually
+        // in flight; during a cancel there is nothing to re-cancel.
+        onStop={turnInFlight(status) ? stop : undefined}
       />
     </div>
   );

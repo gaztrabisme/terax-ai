@@ -26,11 +26,21 @@ export type PiRunGraph = {
 export const PARENT_NODE_ID = "parent";
 
 /**
+ * Display status for a node. The orchestrator's finished run reads "stopped"
+ * (the session ended, whether by agent_end or stop), not "done"; children
+ * keep their raw status.
+ */
+export function nodeStatusText(node: PiRunNode): string {
+  if (node.role === "parent" && node.status === "done") return "stopped";
+  return node.status;
+}
+
+/**
  * One-line status for a node, e.g. "done · 4,828 tok · 2 tools". Fields with
  * nothing to show are dropped: no elapsed yet, zero tokens, zero tool calls.
  */
 export function formatNodeStatus(node: PiRunNode): string {
-  const parts: string[] = [node.status];
+  const parts: string[] = [nodeStatusText(node)];
   if (node.elapsedMs !== null) {
     parts.push(`${(node.elapsedMs / 1000).toFixed(1)}s`);
   }
@@ -83,16 +93,19 @@ export function summarizeChild(file: string, state: PiSessionState): PiRunNode {
 }
 
 /**
- * Parent node plus one node per known child transcript, star-wired. Children
- * are never filtered by status: a finished child stays a node carrying its
- * final status (done or error), so the graph keeps the full run shape after
- * the turn ends.
+ * Parent node plus one node per known child transcript, star-wired. The
+ * orchestrator node always exists (UX-13): before the first turn it is the
+ * session's idle anchor, so the empty graph explains itself. Children are
+ * never filtered by status: a finished child stays a node carrying its final
+ * status (done or error), so the graph keeps the full run shape after the
+ * turn ends.
  */
 export function buildRunGraph(
   parent: PiSessionState,
   children: Record<string, PiSessionState>,
   ledger: LedgerSnapshot = EMPTY_LEDGER,
   cwd?: string,
+  model?: string,
 ): PiRunGraph {
   const records = Object.values(ledger.actions);
   const realChildren = Object.entries(children).filter(([, state]) => hasTask(state));
@@ -110,7 +123,6 @@ export function buildRunGraph(
       toolCalls: existing?.toolCalls ?? 0,
     });
   }
-  if (!hasTask(parent) && records.length === 0 && childNodes.size === 0) return { nodes: [], edges: [] };
   const sourceIds = new Set(records.map((r) => r.usage.sourceEventId).filter((id): id is string => !!id));
   const sourceTokens = [...sourceIds].reduce((total, id) => {
     const message = ledger.sources[id]?.event.message as { usage?: unknown } | undefined;
@@ -122,9 +134,9 @@ export function buildRunGraph(
   const nodes: PiRunNode[] = [
     {
       id: PARENT_NODE_ID,
-      label: "pi (parent)",
+      label: model ? `Orchestrator · ${model}` : "Orchestrator",
       role: "parent",
-      status: hasTask(parent) ? parentStatus(parent) : recordedStatus,
+      status: hasTask(parent) || records.length === 0 ? parentStatus(parent) : recordedStatus,
       elapsedMs:
         parent.startedMs !== null && parent.lastMs !== null
           ? Math.max(0, parent.lastMs - parent.startedMs)

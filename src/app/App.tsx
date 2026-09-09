@@ -3,7 +3,14 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { homeDir } from "@tauri-apps/api/path";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { SearchAddon } from "@xterm/addon-search";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 import { toast } from "sonner";
 import {
@@ -28,7 +35,7 @@ import { native } from "@/lib/native";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useZoom } from "@/lib/useZoom";
 import { cn } from "@/lib/utils";
-import { chooseStartupProject } from "@/app/startup";
+import { launchEffects, planLaunch, sidebarCollapsedAfter } from "@/app/startup";
 import {
   type EditorPaneHandle,
   EditorStack,
@@ -224,10 +231,24 @@ export default function App() {
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
 
+  // UX-04 dock recovery: useTabs seeds a terminal tab from the launch
+  // directory (the home directory on a no-argument launch) before any
+  // project can be resolved. That shell stays hidden, and therefore never
+  // spawns, until the startup decision says a terminal-first launch really
+  // happened; a dock recovery closes it instead of showing it.
+  const initialShellTabIdRef = useRef<number | null>(tabs[0]?.id ?? null);
+  const [initialShellHidden, setInitialShellHidden] = useState(true);
+
+  const visibleTabs = useMemo(() => {
+    const shellId = initialShellTabIdRef.current;
+    if (!initialShellHidden || shellId === null) return tabs;
+    return tabs.filter((t) => t.id !== shellId);
+  }, [tabs, initialShellHidden]);
+
   const activeTerminalTab = useMemo(() => {
-    const t = tabs.find((x) => x.id === activeId);
+    const t = visibleTabs.find((x) => x.id === activeId);
     return t && t.kind === "terminal" ? t : null;
-  }, [tabs, activeId]);
+  }, [visibleTabs, activeId]);
   const activeLeafId = activeTerminalTab?.activeLeafId ?? null;
 
   const searchAddons = useRef<Map<number, SearchAddon>>(new Map());
@@ -261,8 +282,29 @@ export default function App() {
   const toggleSidebar = useCallback(() => {
     const p = sidebarRef.current;
     if (!p) return;
-    if (p.getSize().asPercentage <= 0) p.expand();
-    else p.collapse();
+    if (p.getSize().asPercentage <= 0) {
+      // Expand to the remembered width; the panel mounts collapsed, so
+      // expand() would fall back to minSize instead of the saved width.
+      p.resize(`${sidebarWidthRef.current}px`);
+    } else {
+      p.collapse();
+    }
+  }, []);
+  const sidebarIsCollapsed = useCallback(() => {
+    const p = sidebarRef.current;
+    return !p || p.getSize().asPercentage <= 0;
+  }, []);
+  const collapseSidebar = useCallback(() => {
+    sidebarRef.current?.collapse();
+  }, []);
+  // Design 3.1 startup transition: every new app process, chat launch and
+  // reopened chat tab starts with the sidebar collapsed, before the first
+  // content paint (the layout effect runs synchronously before it). The
+  // saved width key only sizes the next expansion; no saved visibility flag
+  // is read at startup or in the background, and switching between
+  // still-open tabs keeps whatever visibility the user last chose.
+  useLayoutEffect(() => {
+    sidebarRef.current?.collapse();
   }, []);
   const cycleSidebarView = useCallback(
     (view: SidebarViewId) => {
@@ -411,56 +453,102 @@ export default function App() {
     },
     [workspaceEnv, setWorkspaceEnv, resetWorkspace],
   );
-  // K14 dock recovery: when a --pi launch carries no project argument, the
-  // last project is reopened from preferences when it exists and is
-  // authorized; a missing or unauthorized one shows the folder picker (with
-  // the missing path) instead of any conversation.
+  // Every chat tab opens through here: tab creation is the sidebar's
+  // collapse event, per the launch transition in design.md 3.1.
+  const openChatTab = useCallback(
+    (cwd?: string) => {
+      const id = newPiTab(cwd);
+      if (!sidebarCollapsedAfter("chat-open", sidebarIsCollapsed())) {
+        collapseSidebar();
+      }
+      return id;
+    },
+    [newPiTab, sidebarIsCollapsed, collapseSidebar],
+  );
+
+  // UX-04 dock recovery: a launch with no project argument resolves the
+  // recorded last project before any primary tab shows. When it exists and
+  // is authorized, the chat tab opens on it and the pre-seeded home shell
+  // is closed without ever being shown; when it is missing or unauthorized,
+  // the folder picker stands with the missing path, still with no home
+  // terminal behind it. An explicit --pi project wins exactly as before,
+  // and a positional dir without --pi stays a plain terminal-first launch.
   const [startupPick, setStartupPick] = useState<{
     missingPath: string | null;
   } | null>(null);
   useEffect(() => {
     let alive = true;
+    let decided = false;
     native
       .workspaceCurrentDir()
       .then(async (cwd) => {
         if (!alive) return;
         setLaunchCwd(cwd);
-        if (!(await consumeLaunchPi())) return;
-        // An explicit project argument always wins, exactly as before.
-        const argDir = getLaunchDir();
-        if (argDir) {
-          newPiTab(cwd);
-          return;
+        const piFlag = await consumeLaunchPi();
+        const explicitDir = await invoke<string | null>(
+          "get_launch_dir_arg",
+        ).catch(() => null);
+        if (!alive) return;
+        let lastProject: string | null = null;
+        let lastProjectExists = false;
+        let lastProjectAuthorized = false;
+        if (!piFlag && !explicitDir) {
+          const prefs = usePreferencesStore.getState();
+          if (!prefs.hydrated) await prefs.init();
+          if (!alive) return;
+          lastProject = usePreferencesStore.getState().lastProject;
+          lastProjectExists = lastProject
+            ? await dirExists(lastProject)
+            : false;
+          lastProjectAuthorized =
+            lastProjectExists && lastProject
+              ? await pathAuthorized(lastProject)
+              : false;
         }
-        const prefs = usePreferencesStore.getState();
-        if (!prefs.hydrated) await prefs.init();
         if (!alive) return;
-        const lastProject = usePreferencesStore.getState().lastProject;
-        const exists = lastProject ? await dirExists(lastProject) : false;
-        const authorized = exists && lastProject
-          ? await pathAuthorized(lastProject)
-          : false;
-        if (!alive) return;
-        const decision = chooseStartupProject(
-          { lastProject },
-          () => exists,
-          () => authorized,
-        );
-        if (decision.action === "open") {
-          newPiTab(decision.path);
-        } else {
-          setStartupPick({ missingPath: decision.missingPath });
+        const plan = planLaunch({
+          piFlag,
+          explicitDir: explicitDir ?? null,
+          fallbackDir: cwd,
+          lastProject,
+          lastProjectExists,
+          lastProjectAuthorized,
+        });
+        decided = true;
+        for (const effect of launchEffects(plan)) {
+          switch (effect.kind) {
+            case "open-chat":
+              openChatTab(effect.project);
+              break;
+            case "close-initial-shell": {
+              const shellId = initialShellTabIdRef.current;
+              if (shellId !== null) closeTab(shellId);
+              break;
+            }
+            case "reveal-initial-shell":
+              setInitialShellHidden(false);
+              break;
+            case "show-picker":
+              setStartupPick({ missingPath: effect.missingPath });
+              break;
+          }
         }
       })
       .catch(() => setLaunchCwd(null))
-      .finally(() => setLaunchCwdResolved(true));
+      .finally(() => {
+        setLaunchCwdResolved(true);
+        // A failed decision must never leave the seeded shell invisible.
+        if (!decided) setInitialShellHidden(false);
+      });
     return () => {
       alive = false;
     };
-  }, [newPiTab]);
+  }, [openChatTab, closeTab]);
 
   // The picker side of dock recovery: the existing open-folder flow, whose
-  // pick authorizes the folder the same way a --pi argument path is.
+  // pick authorizes the folder the same way a --pi argument path is. The
+  // chosen project replaces the still-hidden home shell rather than
+  // stacking beside it.
   const pickStartupProject = useCallback(async () => {
     const picked = await pickPiSessionFolder();
     if (picked.status === "cancelled") return;
@@ -469,8 +557,11 @@ export default function App() {
       return;
     }
     setStartupPick(null);
-    newPiTab(picked.dir);
-  }, [newPiTab]);
+    openChatTab(picked.dir);
+    setInitialShellHidden(false);
+    const shellId = initialShellTabIdRef.current;
+    if (shellId !== null) closeTab(shellId);
+  }, [openChatTab, closeTab]);
 
   // The launcher passes --launcher-dir <checkout> next to --pi. An empty
   // launcherDir pref adopts the passed path (one log line); a stored value
@@ -555,7 +646,7 @@ export default function App() {
   useEffect(() => {
     void initPrefs();
   }, [initPrefs]);
-  const activeTab = tabs.find((t) => t.id === activeId);
+  const activeTab = visibleTabs.find((t) => t.id === activeId);
   const isTerminalTab = activeTab?.kind === "terminal";
   const isEditorTab = activeTab?.kind === "editor";
   const isMarkdownTab = activeTab?.kind === "markdown";
@@ -624,7 +715,7 @@ export default function App() {
       }
       const targetId = chooseChatTab(current, activeId, termCwd);
       if (targetId === null) {
-        const tabId = newPiTab(termCwd ?? undefined);
+        const tabId = openChatTab(termCwd ?? undefined);
         const forward = (attempt: number) => {
           window.setTimeout(() => {
             const mounted = tabsRef.current.some(
@@ -653,7 +744,7 @@ export default function App() {
     };
     window.addEventListener(SEND_TO_CHAT_EVENT, handler);
     return () => window.removeEventListener(SEND_TO_CHAT_EVENT, handler);
-  }, [activeId, newPiTab, setActiveId]);
+  }, [activeId, openChatTab, setActiveId]);
 
   // pi module bridge: run a command in a fresh terminal tab (Tauri event,
   // may originate from the backend or another window). Waits for the pty to
@@ -891,8 +982,8 @@ export default function App() {
   }, [newPrivateTab, inheritedCwdForNewTab]);
 
   const openNewPiTab = useCallback(() => {
-    newPiTab(inheritedCwdForNewTab());
-  }, [newPiTab, inheritedCwdForNewTab]);
+    openChatTab(inheritedCwdForNewTab());
+  }, [openChatTab, inheritedCwdForNewTab]);
 
   const openNewPiSession = useCallback(async () => {
     // Seed the picker from the active tab's cwd; only a picked folder opens a
@@ -906,8 +997,8 @@ export default function App() {
       toast(picked.error);
       return;
     }
-    newPiTab(picked.dir);
-  }, [activeTab, inheritedCwdForNewTab, newPiTab]);
+    openChatTab(picked.dir);
+  }, [activeTab, inheritedCwdForNewTab, openChatTab]);
 
   const openChildTranscript = useCallback(
     (path: string) => {
@@ -1407,7 +1498,13 @@ export default function App() {
     </div>
   );
 
-  const activeCwd = activeTerminalLeafCwd;
+  // The status bar breadcrumb reports the primary surface's directory. A
+  // terminal tab follows its focused pane; a chat tab reports the project
+  // path recorded on its tab (design.md 3.2 S1), never a bare "no directory"
+  // while a project is open.
+  const activeCwd =
+    activeTerminalLeafCwd ??
+    (activeTab?.kind === "pi" ? (activeTab.cwd ?? null) : null);
 
   const shell = (
     <ThemeProvider>

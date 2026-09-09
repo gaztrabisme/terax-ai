@@ -97,6 +97,7 @@ class ResizeObserverStub {
 }
 
 const kill = vi.fn().mockResolvedValue(undefined);
+const abort = vi.fn().mockResolvedValue(undefined);
 const send = vi.fn().mockResolvedValue(undefined);
 const originalStore = usePiStore.getState();
 const defaultShortcuts = usePreferencesStore.getState().shortcuts;
@@ -111,7 +112,7 @@ function seedTabs(ids: number[]) {
         [id]: {
           gen: 1,
           state: { ...initialPiSessionState(), sessionId: "current" },
-          session: { id, send, kill },
+          session: { id, send, kill, abort },
           exited: false,
           exitCode: null,
           error: null,
@@ -215,6 +216,7 @@ beforeEach(() => {
   });
   seedTabs([1, 2]);
   kill.mockReset().mockResolvedValue(undefined);
+  abort.mockReset().mockResolvedValue(undefined);
   send.mockReset().mockResolvedValue(undefined);
   boardTickets = [];
   draftPromise = null;
@@ -462,25 +464,13 @@ describe("PiTab mode strip", () => {
     ).toHaveLength(polls);
   });
 
-  it("keeps Open in tab actions in panel headers", () => {
-    const onOpenBoard = vi.fn();
-    const onOpenRunGraph = vi.fn();
-    render(
-      <PiTab
-        tabId={1}
-        cwd="/proj-1"
-        active
-        onOpenChild={() => {}}
-        onOpenBoard={onOpenBoard}
-        onOpenRunGraph={onOpenRunGraph}
-      />,
-    );
+  it("offers no Open in tab control; board and graph tabs come from the tab menu only", () => {
+    render(<PiTab tabId={1} cwd="/proj-1" active onOpenChild={() => {}} />);
     click("Board");
-    click("Open Board in tab");
-    expect(onOpenBoard).toHaveBeenCalledWith("/proj-1");
+    expect(screen.queryByRole("button", { name: "Open Board in tab" })).toBeNull();
+    expect(document.body.textContent).not.toContain("Open in tab");
     click("Graph");
-    click("Open Graph in tab");
-    expect(onOpenRunGraph).toHaveBeenCalledWith("/proj-1", 1);
+    expect(screen.queryByRole("button", { name: "Open Graph in tab" })).toBeNull();
   });
 });
 
@@ -738,17 +728,20 @@ describe("focused-control priority and active-tab shortcuts", () => {
     const composer = screen.getByLabelText("pi composer");
     composer.focus();
     escape();
-    expect(kill).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(kill).not.toHaveBeenCalled();
     expect(uat("board-panel")).toBeTruthy();
     expect(screen.getByText("Partial answer stays")).toBeTruthy();
     expect(usePiStore.getState().tabs[1].state.blocks).toEqual([partial]);
+    // Stop and Escape share one cancel action; while cancelling, Stop is disabled.
     fireEvent.click(uat("stop-button")!);
-    expect(kill).toHaveBeenCalledTimes(2);
+    expect(abort).toHaveBeenCalledTimes(1);
     setSession(1, { status: "done" });
     composer.focus();
     escape();
     expect(uat("board-panel")).toBeNull();
-    expect(kill).toHaveBeenCalledTimes(2);
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(kill).not.toHaveBeenCalled();
   });
 
   it("prompt-menu Escape dismisses only the menu before Stop or view Escape", async () => {

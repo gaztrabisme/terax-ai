@@ -48,6 +48,10 @@ type LoadedArtifact = {
   title: string;
   source: string;
   sha256: string;
+  /** Exact path this document was read from; a kept frame only ever shows
+   * this file, and its load time drives the stale marker (UX-19). */
+  path: string;
+  loadedAt: string;
 };
 
 type Props = {
@@ -90,10 +94,17 @@ export function ArtifactPane({ doc, cwd }: Props) {
           reply.content ??
           `data:${reply.mime};base64,${reply.base64 ?? ""}`,
         sha256: reply.sha256,
+        path: absolute,
+        loadedAt: new Date().toLocaleTimeString(),
       });
     } catch (e) {
-      setLoaded(null);
       setError(e instanceof Error ? e.message : String(e));
+      // A load failure is unmistakable (design.md section 7.1): a frame for
+      // this same file is kept only deliberately, marked stale since its last
+      // successful load. Anything else replaces the frame with the error.
+      setLoaded((current) =>
+        current && current.path === absolute ? current : null,
+      );
     }
   }, [absolute, cwd, doc?.title]);
 
@@ -171,27 +182,80 @@ export function ArtifactPane({ doc, cwd }: Props) {
           <HugeiconsIcon icon={FileEditIcon} size={12} strokeWidth={1.75} />
         </button>
       </div>
-      {error ? (
+      {error && loaded ? (
         <div
           data-uat="artifact-error"
           role="alert"
-          className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+          className="shrink-0 border-b border-border/60 bg-destructive/10 px-2 py-1.5 text-xs text-destructive"
         >
-          <span className="min-w-0 flex-1 truncate" title={error}>
-            {error}
-          </span>
-          <button
-            type="button"
-            aria-label="Retry artifact load"
-            onClick={() => void read()}
-            className={cn(toolbarBtn, "text-destructive hover:text-destructive")}
-          >
-            Retry
-          </button>
+          <div className="flex items-start gap-2">
+            <p className="min-w-0 flex-1 whitespace-pre-wrap wrap-break-word">
+              {error}
+            </p>
+            <button
+              type="button"
+              aria-label="Retry artifact load"
+              onClick={() => void read()}
+              className={cn(
+                toolbarBtn,
+                "text-destructive hover:text-destructive",
+              )}
+            >
+              Retry
+            </button>
+          </div>
         </div>
       ) : null}
-      <div className="min-h-0 flex-1 bg-white">
-        {loaded ? (
+      {error && !loaded ? (
+        <div
+          data-uat="artifact-error"
+          role="alert"
+          className="flex min-h-0 flex-1 flex-col items-start gap-2 overflow-y-auto p-3 text-xs"
+        >
+          <p className="whitespace-pre-wrap wrap-break-word text-destructive">
+            {error}
+          </p>
+          <p className="select-text break-all whitespace-pre-wrap text-muted-foreground">
+            {absolute}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-label="Copy path"
+              onClick={() => {
+                void navigator.clipboard?.writeText(absolute).catch(() => {});
+              }}
+              className={toolbarBtn}
+            >
+              <HugeiconsIcon icon={CopyIcon} size={12} strokeWidth={1.75} />
+              Copy path
+            </button>
+            <button
+              type="button"
+              aria-label="Retry artifact load"
+              onClick={() => void read()}
+              className={cn(
+                toolbarBtn,
+                "text-destructive hover:text-destructive",
+              )}
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {!error && !loaded ? <div className="min-h-0 flex-1" /> : null}
+      {loaded ? (
+        <div className="flex min-h-0 flex-1 flex-col bg-white">
+          {error ? (
+            <div
+              data-uat="artifact-stale"
+              className="shrink-0 bg-amber-500/15 px-2 py-1 text-xs text-amber-600 dark:text-amber-400"
+            >
+              stale since {loaded.loadedAt}: the last successful load; the file
+              could not be re-read
+            </div>
+          ) : null}
           <iframe
             title={loaded.title}
             data-uat="artifact-frame"
@@ -201,10 +265,10 @@ export function ArtifactPane({ doc, cwd }: Props) {
               source: loaded.source,
             })}
             sandbox={ARTIFACT_SANDBOX}
-            className="h-full w-full border-0"
+            className="min-h-0 w-full flex-1 border-0"
           />
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }

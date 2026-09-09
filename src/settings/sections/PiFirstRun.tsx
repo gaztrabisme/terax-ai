@@ -12,7 +12,6 @@ import {
   buildRows,
   chosenLocalEndpoints,
   effectiveRoles,
-  probeUrlFor,
   rolesScopeLabel,
   summarize,
   type CheckRow,
@@ -57,7 +56,7 @@ type PiFirstRunProps = {
   onAddKey: (provider: string) => void;
 };
 
-type Probe = { id: string; url: string };
+type Probe = { id: string; base: string; provider: string | null };
 
 const STATUS_STYLES: Record<
   CheckStatus,
@@ -68,17 +67,104 @@ const STATUS_STYLES: Record<
   missing: { icon: CancelCircleIcon, className: "text-destructive" },
 };
 
-async function invokeHealth(probe: Probe): Promise<PiHealthResult> {
+/**
+ * PiHealthResult plus the exact probed URL: pi_health echoes the URL its GET
+ * actually went to (health.rs HealthResult.url), so a check row can only
+ * ever name the request that was made, never a different one.
+ */
+type ProbedHealth = PiHealthResult & { url?: string | null };
+
+/**
+ * The models-list URL for an endpoint base: `<base>/models`, the request the
+ * inference path itself answers (oMLX at http://127.0.0.1:8000/v1 and the
+ * llama-server proxies serve GET /v1/models with the bearer key; the bare
+ * base answers 404, and the old status endpoints sit outside the
+ * authenticated API). Mirrors health.rs models_url; the frontend fills a
+ * __BPPC_HOST__ placeholder first because it owns the piBppcHost pref.
+ */
+export function modelsProbeUrl(base: string): string {
+  return `${base.trim().replace(/\/+$/, "")}/models`;
+}
+
+/**
+ * The endpoint base a session would reach: the settings entry's baseUrl with
+ * the piBppcHost pref filling the render's host placeholder, or the bundled
+ * template default when no entry resolves.
+ */
+function endpointBase(
+  endpoints: PiEndpointView[] | null,
+  id: string,
+  bppcHost?: string | null,
+): string {
+  const fallback =
+    id === "bppc" ? "http://127.0.0.1:8080" : "http://127.0.0.1:8000";
+  const base = (endpoints?.find((ep) => ep.id === id)?.baseUrl ?? "")
+    .trim()
+    .replace(/\/+$/, "");
+  return (base.length > 0 ? base : fallback).replace(
+    /__BPPC_HOST__/g,
+    bppcHost?.trim() || "127.0.0.1",
+  );
+}
+
+/**
+ * One pi_health probe: the backend GETs `<base>/models` with the rendered
+ * models.json bearer key for the provider (`agentDir` names the runtime
+ * agent dir), so the probe goes through the same base URL and auth the
+ * inference path uses. A rejected invoke degrades to a failed result naming
+ * the URL the local builder computes.
+ */
+async function invokeHealth(
+  probe: Probe,
+  agentDir: string | null,
+): Promise<ProbedHealth> {
   try {
-    return await invoke<PiHealthResult>("pi_health", { url: probe.url });
+    return await invoke<ProbedHealth>("pi_health", {
+      url: probe.base,
+      agentDir,
+      provider: probe.provider,
+    });
   } catch (e) {
     return {
       ok: false,
       status: null,
       ms: 0,
       error: e instanceof Error ? e.message : String(e),
+      url: modelsProbeUrl(probe.base),
     };
   }
+}
+
+/**
+ * One row per chosen local endpoint, green only when its own probe answered.
+ * The detail names the exact URL the probe requested plus the latency, or
+ * the URL and the failure reason: the HTTP status when the endpoint
+ * answered, the transport error otherwise. No other endpoint's success
+ * stands in for a failed one.
+ */
+function localEndpointRows(roles: PiRoles, health: PiHealthMap): CheckRow[] {
+  return chosenLocalEndpoints(roles).map((id) => {
+    const result: ProbedHealth | undefined = health[id];
+    const url = result?.url ?? "";
+    if (result?.ok) {
+      return {
+        id: `endpoint-${id}`,
+        label: `${id} endpoint`,
+        status: "ok",
+        detail: `${url} answered in ${result.ms} ms`,
+      };
+    }
+    const why = result
+      ? (result.error ?? `HTTP ${result.status ?? "?"}`)
+      : "not probed";
+    return {
+      id: `endpoint-${id}`,
+      label: `${id} endpoint`,
+      status: "missing",
+      detail: `${url}: ${why}`,
+      action: { label: "Open endpoints", kind: "focus-endpoints" },
+    };
+  });
 }
 
 async function loadAuthStatus(
@@ -199,9 +285,10 @@ function stepStatus(status: string): CheckStatus {
  * orchestrator provider, model, thinking and endpoint, each with the source
  * the report records, plus the seed step's verbatim status (design 3.6:
  * Settings shows resolved values and seed status for the active project).
- * The endpoint row reflects the report endpoint's own probe: a failure names
- * the endpoint and the error, and no other endpoint's success stands in for
- * it (R2.2).
+ * The endpoint row reflects the report endpoint's own probe, GET
+ * <endpoint>/models with the session's rendered key: a failure names the
+ * exact probed URL and the error, and no other endpoint's success stands in
+ * for it (R2.2).
  */
 export function runtimeReportRows(
   report: RuntimeReportView,
@@ -262,7 +349,8 @@ export function runtimeReportRows(
     },
   );
   if (role.endpoint) {
-    const result = health["runtime-endpoint"];
+    const result: ProbedHealth | undefined = health["runtime-endpoint"];
+    const url = result?.url ?? modelsProbeUrl(role.endpoint);
     const why = result
       ? (result.error ?? `HTTP ${result.status ?? "?"}`)
       : "not probed";
@@ -271,8 +359,8 @@ export function runtimeReportRows(
       label: "Endpoint",
       status: result?.ok ? "ok" : "missing",
       detail: result?.ok
-        ? `${role.endpoint} answered in ${result.ms} ms (${role.source})`
-        : `${role.endpoint}: ${why} (${role.source})`,
+        ? `${url} answered in ${result.ms} ms (${role.source})`
+        : `${url}: ${why} (${role.source})`,
     });
   } else {
     rows.push({
@@ -474,22 +562,34 @@ export function PiFirstRun({
         storedKeys.omlx === true,
         homeDir,
       );
+      // The probes go to `<base>/models` with the rendered models.json key
+      // for the endpoint's provider: the same base URL and auth an inference
+      // request uses, so a green row means chat would answer too.
+      const probeAgentDir = ready ? runtimeDir : null;
       const probes: Probe[] = chosenLocalEndpoints(roles).map((id) => ({
         id,
-        url: probeUrlFor(endpoints, id, piBppcHost),
+        base: endpointBase(endpoints, id, piBppcHost),
+        provider: id,
       }));
-      const results = await Promise.all(probes.map(invokeHealth));
+      const results = await Promise.all(
+        probes.map((probe) => invokeHealth(probe, probeAgentDir)),
+      );
       const health: PiHealthMap = {};
       probes.forEach((probe, i) => {
         health[probe.id] = results[i];
       });
-      // K14: the report endpoint is probed itself, exactly as recorded, so
-      // the row never reaches a different URL than the last launch did.
+      // K14: the report endpoint is probed itself, under the provider the
+      // report names, so the row never reaches a different URL or key than
+      // the last launch did.
       if (report?.roles.orchestrator.endpoint) {
-        health["runtime-endpoint"] = await invokeHealth({
-          id: "runtime-endpoint",
-          url: report.roles.orchestrator.endpoint,
-        });
+        health["runtime-endpoint"] = await invokeHealth(
+          {
+            id: "runtime-endpoint",
+            base: report.roles.orchestrator.endpoint,
+            provider: report.roles.orchestrator.provider,
+          },
+          probeAgentDir,
+        );
       }
       let checkRows = buildRows({
         paths,
@@ -500,7 +600,9 @@ export function PiFirstRun({
         health,
         rolesScope: scope,
         cloudKeys: { stored: storedKeys, env: envPresence, local },
-      });
+      })
+        .filter((row) => !row.id.startsWith("endpoint-"))
+        .concat(localEndpointRows(roles, health));
       if (report) {
         const provider = report.roles.orchestrator.provider.trim();
         // The report's endpoint row is the effective one: the generic row

@@ -123,9 +123,10 @@ struct AgentReport {
 
 /// Prepares a pi session by running the resolved harness agent
 /// (`agent pi prepare`) and mapping its JSON report onto PrepareReport, so
-/// launcher.log and the frontend keep their shape. A missing agent, a spawn
-/// failure or an unreadable report yields one FAIL step named "prepare",
-/// never a panic; every other step outcome comes from the agent verbatim.
+/// launcher.log and the frontend keep their shape. A missing agent, an
+/// agent binary that is not an executable file, a spawn failure or an
+/// unreadable report yields one FAIL step named "prepare", never a panic;
+/// every other step outcome comes from the agent verbatim.
 pub fn prepare_session(input: PrepareInput, agent_bin: Option<&Path>) -> PrepareReport {
     let agent_dir = if input.agent_dir.as_os_str().is_empty() {
         user_agent_dir(&input.app_data_dir)
@@ -150,6 +151,17 @@ pub fn prepare_session(input: PrepareInput, agent_bin: Option<&Path>) -> Prepare
                 .to_string(),
         );
     };
+    // A resolved agent binary that is not an executable file must fail the
+    // launch visibly with the exact path (design 3.6, R15.1): running
+    // anything else, or a confusing "permission denied" from the spawn,
+    // would hide the broken configuration from the reader. The FAIL step
+    // reaches launcher.log and the caller refuses the spawn.
+    if !super::launch::is_executable_file(agent_bin) {
+        return fail(format!(
+            "harness agent binary is not an executable file: {}",
+            agent_bin.display()
+        ));
+    }
     match run_agent_prepare(&input, &agent_dir, agent_bin) {
         Ok(report) => report,
         Err(detail) => fail(detail),

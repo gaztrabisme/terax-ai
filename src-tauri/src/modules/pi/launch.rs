@@ -173,11 +173,17 @@ fn checkout_rpc_args(bppc_host: &str) -> Vec<String> {
     args
 }
 
-/// Spawn decision, shared by pi_open and the resolve_spec wrapper: the
-/// checkout launcher wins when its file exists and no explicit agent dir is
-/// set (today's behavior for the shell-oriented wrapper), else a pi binary resolved through the shared
-/// precedence chain spawns directly, else the error names every candidate so
-/// a missing-install tab still explains itself. The launcher root falls back
+/// Spawn decision, shared by pi_open and the resolve_spec wrapper: an
+/// explicitly configured pi binary is honored first (design 3.6's order puts
+/// the explicit configured path ahead of the checkout launcher, which would
+/// exec the checkout's own bin/pi rather than the configured binary), then
+/// the checkout launcher wins when its file exists and no explicit agent dir
+/// is set (today's behavior for the shell-oriented wrapper), then a pi
+/// binary resolved through the shared precedence chain spawns directly, else
+/// the error names the exact failure: a configured-but-missing path fails
+/// with "configured pi binary not found: <path>" and never falls through to
+/// another binary, while an unset resolution names every candidate so a
+/// missing-install tab still explains itself. The launcher root falls back
 /// to the workspace cwd when launcherDir is unset or blank. `roles` carries
 /// the resolved EFFICIENT_PI_* values the direct args are built from.
 pub fn spawn_plan(
@@ -188,6 +194,7 @@ pub fn spawn_plan(
     roles: &PrepareRoles,
     bppc_host: &str,
 ) -> Result<SpawnPlan, String> {
+    let configured_pi = pref_path(prefs.pi_bin.as_deref(), home);
     let root = launcher_root(prefs, home, cwd);
     let launcher = root.join("bin").join("efficient-pi");
     let has_agent_dir = prefs
@@ -195,16 +202,17 @@ pub fn spawn_plan(
         .as_deref()
         .map(str::trim)
         .is_some_and(|dir| !dir.is_empty());
-    if !cfg!(windows) && !has_agent_dir && launcher.is_file() {
+    if configured_pi.is_none() && !cfg!(windows) && !has_agent_dir && launcher.is_file() {
         return Ok(SpawnPlan::CheckoutLauncher {
             program: launcher.to_string_lossy().into_owned(),
             args: checkout_rpc_args(bppc_host),
         });
     }
-    // No launcher: resolve the pi binary through the shared precedence chain,
-    // with the checkout rooted at launcherDir (or the workspace when unset).
-    // The runtime agent dir needs the app data dir, which a spawn decision
-    // never reads; an empty dir degrades it instead of guessing.
+    // No launcher applies: resolve the pi binary through the shared
+    // precedence chain, with the checkout rooted at launcherDir (or the
+    // workspace when unset). The runtime agent dir needs the app data dir,
+    // which a spawn decision never reads; an empty dir degrades it instead
+    // of guessing.
     let effective = PiPrefs {
         launcher_dir: (!cfg!(windows)).then(|| root.to_string_lossy().into_owned()),
         ..prefs.clone()
@@ -224,6 +232,17 @@ pub fn spawn_plan(
                 source,
             })
         }
+        // A configured path that does not exist (or is not executable) is a
+        // visible launch failure naming it: silently running the bundled
+        // sidecar or the checkout instead would hide the user's own
+        // configuration from them.
+        _ if configured_pi.is_some() => Err(format!(
+            "configured pi binary not found: {}",
+            configured_pi
+                .as_deref()
+                .unwrap_or_else(|| Path::new(""))
+                .display()
+        )),
         _ => {
             let mut expected = vec![launcher.display().to_string()];
             expected.extend(resolved.pi.candidates.iter().cloned());
@@ -449,8 +468,8 @@ fn resolve_paths_with(
 
     let agent_dir = pick(agent_dir, true);
     ResolvedPaths {
-        pi: pick(pi, false),
-        agent: pick(agent, false),
+        pi: pick_binary(pi),
+        agent: pick_binary(agent),
         runtime_agent_dir: runtime_agent_dir(&agent_dir, app_data_dir),
         agent_dir,
     }
@@ -470,13 +489,59 @@ fn sidecar_path(dir: &Path, base: &str, exe_suffix: &str) -> Option<PathBuf> {
     Some(dir.join(sidecar_name(base, exe_suffix)))
 }
 
+/// Whether `path` is a file the OS would execute: it must exist as a file and
+/// carry an execute bit (unix); on Windows the file existing is the check,
+/// the loader decides the rest. Only explicit binary configuration is held to
+/// this standard; the bundled sidecars and the checkout keep the plain
+/// existence check they always had.
+pub(crate) fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.is_file()
+            && path
+                .metadata()
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// Every candidate path as a string, in precedence order: the useful bit for
+/// Missing diagnostics.
+fn listed_candidates(candidates: &[(PathBuf, PathSource)]) -> Vec<String> {
+    candidates
+        .iter()
+        .map(|(p, _)| p.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Binary resolution with design 3.6's first rule enforced: an explicitly
+/// configured path is authoritative. When it exists as an executable file it
+/// wins; when it does not, the resolution reports Missing naming it first
+/// among the candidates and never falls through to a lower-precedence
+/// binary, so a launch fails visibly instead of silently running another
+/// binary. The bundled sidecar applies only when nothing is configured.
+fn pick_binary(candidates: Vec<(PathBuf, PathSource)>) -> ResolvedPath {
+    if let Some((configured, PathSource::Pref)) = candidates.first() {
+        if !is_executable_file(configured) {
+            return ResolvedPath {
+                path: None,
+                source: PathSource::Missing,
+                candidates: listed_candidates(&candidates),
+            };
+        }
+    }
+    pick(candidates, false)
+}
+
 /// First candidate whose file (or dir, for `is_dir`) exists wins; the listed
 /// candidates are returned either way for Missing diagnostics.
 fn pick(candidates: Vec<(PathBuf, PathSource)>, is_dir: bool) -> ResolvedPath {
-    let listed = candidates
-        .iter()
-        .map(|(p, _)| p.to_string_lossy().into_owned())
-        .collect();
+    let listed = listed_candidates(&candidates);
     for (path, source) in candidates {
         let exists = if is_dir {
             path.is_dir()
@@ -1004,6 +1069,105 @@ mod tests {
     }
 
     #[test]
+    fn spawn_plan_configured_missing_pi_binary_fails_naming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The bundled sidecar exists: the configured path must still fail the
+        // launch instead of silently running the bundled binary.
+        let exe = tempfile::tempdir().expect("tempdir");
+        touch(&exe.path().join("pi"));
+        let bundled = BundledPaths {
+            exe_dir: exe.path().to_path_buf(),
+            resource_dir: PathBuf::new(),
+        };
+        let configured = "/no/such/pi-for-terax-tests";
+        let prefs = PiPrefs {
+            pi_bin: Some(configured.to_string()),
+            ..PiPrefs::default()
+        };
+        let roles = PrepareRoles {
+            provider: String::new(),
+            model: String::new(),
+            thinking: String::new(),
+            smol: String::new(),
+        };
+        let err = spawn_plan(&prefs, &bundled, None, dir.path(), &roles, "")
+            .expect_err("configured missing pi binary must fail");
+        assert!(
+            err.contains("configured pi binary not found: /no/such/pi-for-terax-tests"),
+            "err: {err}"
+        );
+        // No lower-precedence candidate is named: nothing else was tried.
+        assert!(
+            !err.contains(exe.path().join("pi").to_str().expect("utf8")),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn spawn_plan_unset_uses_the_bundled_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = tempfile::tempdir().expect("tempdir");
+        touch(&exe.path().join("pi"));
+        let bundled = BundledPaths {
+            exe_dir: exe.path().to_path_buf(),
+            resource_dir: PathBuf::new(),
+        };
+        let roles = PrepareRoles {
+            provider: String::new(),
+            model: String::new(),
+            thinking: String::new(),
+            smol: String::new(),
+        };
+        let plan = spawn_plan(&PiPrefs::default(), &bundled, None, dir.path(), &roles, "")
+            .expect("plan");
+        match plan {
+            SpawnPlan::Direct { program, source, .. } => {
+                assert_eq!(
+                    program,
+                    exe.path().join("pi").to_str().expect("utf8")
+                );
+                assert_eq!(source, PathSource::Bundled);
+            }
+            other => panic!("expected a direct bundled spawn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_plan_configured_pi_binary_beats_the_checkout_launcher() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let launcher_home = tempfile::tempdir().expect("tempdir");
+        // The checkout launcher exists; the explicit pi binary is still the
+        // design 3.6 first choice and must not be bypassed by it.
+        touch(&launcher_home.path().join("bin").join("efficient-pi"));
+        let configured = tempfile::tempdir().expect("tempdir");
+        touch(&configured.path().join("my-pi"));
+        let configured_path = configured.path().join("my-pi");
+        let prefs = PiPrefs {
+            pi_bin: Some(configured_path.to_string_lossy().into_owned()),
+            launcher_dir: Some(launcher_home.path().to_str().expect("utf8").to_string()),
+            ..PiPrefs::default()
+        };
+        let roles = PrepareRoles {
+            provider: String::new(),
+            model: String::new(),
+            thinking: String::new(),
+            smol: String::new(),
+        };
+        let plan = spawn_plan(&prefs, &BundledPaths::default(), None, dir.path(), &roles, "")
+            .expect("plan");
+        match plan {
+            SpawnPlan::Direct { program, source, .. } => {
+                assert_eq!(
+                    program,
+                    configured_path.to_string_lossy().into_owned()
+                );
+                assert_eq!(source, PathSource::Pref);
+            }
+            other => panic!("expected a direct configured spawn, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn errors_without_workspace_cwd() {
         let err =
             resolve_spec(None, Some("/somewhere"), &[], HashMap::new()).expect_err("must error");
@@ -1071,6 +1235,14 @@ mod resolve_paths_tests {
             std::fs::create_dir_all(parent).expect("mkdir");
         }
         std::fs::write(path, b"binary").expect("write");
+        // Pref binaries are held to the executable-file standard, so every
+        // fixture binary carries the execute bit.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
     }
 
     fn make_dir(path: &Path) {
@@ -1150,6 +1322,93 @@ mod resolve_paths_tests {
             Some(format!("{home_str}/custom/agent-dir")).as_deref()
         );
         assert!(!resolved.runtime_agent_dir.seeded);
+    }
+
+    #[test]
+    fn configured_missing_pi_binary_never_falls_through_to_bundled() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let exe = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
+        // The bundled sidecar exists and would win if the resolution fell
+        // through; the configured path is authoritative instead.
+        write_file(&exe.path().join("pi"));
+        write_file(&exe.path().join("agent"));
+        let home_str = home.path().to_str().expect("utf8");
+        let p = prefs(Some("$HOME/no-such-pi"), None, None, None);
+        let resolved = resolve_paths_with(
+            &p,
+            &bundled(exe.path(), Path::new("")),
+            Some(home_str),
+            "",
+            data.path(),
+        );
+        assert_eq!(resolved.pi.source, PathSource::Missing);
+        assert_eq!(resolved.pi.path, None);
+        assert_eq!(
+            resolved.pi.candidates,
+            vec![
+                format!("{home_str}/no-such-pi"),
+                exe.path().join("pi").to_str().expect("utf8").to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn configured_missing_agent_binary_never_falls_through_to_bundled() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let exe = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
+        write_file(&exe.path().join("pi"));
+        write_file(&exe.path().join("agent"));
+        let home_str = home.path().to_str().expect("utf8");
+        let p = prefs(None, Some("$HOME/no-such-agent"), None, None);
+        let resolved = resolve_paths_with(
+            &p,
+            &bundled(exe.path(), Path::new("")),
+            Some(home_str),
+            "",
+            data.path(),
+        );
+        assert_eq!(resolved.agent.source, PathSource::Missing);
+        assert_eq!(resolved.agent.path, None);
+        assert_eq!(
+            resolved.agent.candidates,
+            vec![
+                format!("{home_str}/no-such-agent"),
+                exe.path()
+                    .join("agent")
+                    .to_str()
+                    .expect("utf8")
+                    .to_string()
+            ]
+        );
+        // The pi resolution next to it is untouched.
+        assert_eq!(resolved.pi.source, PathSource::Bundled);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn configured_binary_that_is_not_executable_fails_like_a_missing_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().expect("tempdir");
+        let exe = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
+        write_file(&exe.path().join("pi"));
+        let home_str = home.path().to_str().expect("utf8");
+        let configured = home.path().join("not-executable-pi");
+        std::fs::write(&configured, b"binary").expect("write");
+        std::fs::set_permissions(&configured, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod");
+        let p = prefs(Some(configured.to_str().expect("utf8")), None, None, None);
+        let resolved = resolve_paths_with(
+            &p,
+            &bundled(exe.path(), Path::new("")),
+            Some(home_str),
+            "",
+            data.path(),
+        );
+        assert_eq!(resolved.pi.source, PathSource::Missing);
+        assert_eq!(resolved.pi.path, None);
     }
 
     #[test]

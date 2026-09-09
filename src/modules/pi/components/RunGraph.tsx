@@ -12,7 +12,6 @@ import { usePiStore } from "@/modules/pi/lib/piStore";
 import { initialPiSessionState } from "@/modules/pi/lib/parse";
 import { actionTurnKey, ledgerDiscrepancies, ledgerPath, useLedger } from "@/modules/pi/lib/ledgerStore";
 import { LedgerActionRow, usageFooterId } from "@/modules/pi/components/blocks/ActionRow";
-import { ErrorCard } from "@/modules/pi/components/Transcript";
 
 // React Flow and dagre load only when the pane first mounts.
 const ReactFlow = lazy(() =>
@@ -98,8 +97,15 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
     paths.includes(path) || (!!owner && owners[path] === owner) || Object.values(ledger.actions).some((action) => action.agentId !== null && action.agentId === childAgentId(path)),
   )), [children, owners, owner, paths, ledger.actions]);
   const graph = useMemo(
-    () => buildRunGraph(parent ?? emptyParent, scopedChildren, ledger, cwd),
-    [parent, scopedChildren, ledger, cwd],
+    () =>
+      buildRunGraph(
+        parent ?? emptyParent,
+        scopedChildren,
+        ledger,
+        cwd,
+        entry?.roles.model || undefined,
+      ),
+    [parent, scopedChildren, ledger, cwd, entry?.roles.model],
   );
   const [positions, setPositions] = useState<
     Record<string, { x: number; y: number }>
@@ -156,7 +162,16 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
     () =>
       graph.nodes.map((n) => ({
         id: n.id,
-        style: { width: 190, minHeight: 84 },
+        // The app's own card palette (UX-13): nodes are dark cards with the
+        // existing text sizes, not React Flow's pale default.
+        style: {
+          width: 190,
+          minHeight: 84,
+          background: "var(--card)",
+          color: "var(--card-foreground)",
+          border: "1px solid var(--border)",
+          borderRadius: 8,
+        },
         position: positions[n.id] ?? { x: 0, y: 0 },
         data: {
           label: (
@@ -204,14 +219,13 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
     .filter(([path]) => paths.includes(path) || (owner && owners[path] === owner) || (cwd && (path === cwd || path === `${cwd}/.pi/agent-hub`)) || Object.values(ledger.actions).some((action) => action.agentId !== null && action.agentId === childAgentId(path)))
     .map(([, error]) => error)].filter((error): error is string => !!error);
   const discrepancies = ledgerDiscrepancies(ledger, inFlight);
+  // One compact diagnostic line below the canvas (UX-13): ledger, watcher and
+  // usage-discrepancy failures share the existing text sizes, never a large
+  // red region above the agent's work.
+  const diagnostics = [...errors, ...discrepancies];
 
   return (
     <div className="flex h-full w-full flex-col">
-      {errors.length > 0 ? <div data-uat="graph-error" aria-label="Run graph error" role="alert" className="space-y-2 p-2">
-        {errors.map((text) => <ErrorCard key={text} block={{ kind: "error", text, at: 0 }} />)}
-        <div className="text-xs text-muted-foreground">Previous graph content is stale.</div>
-      </div> : null}
-      {discrepancies.map((text) => <ErrorCard key={text} block={{ kind: "error", text, at: 0 }} />)}
       <div className="min-h-0 flex-1" aria-label={errors.length ? "Stale run graph" : "Run graph"}>
       <SuspenseWithFallback>
         <ReactFlow
@@ -239,6 +253,25 @@ export function RunGraph({ tabId, onOpenChild }: Props) {
         </ReactFlow>
       </SuspenseWithFallback>
       </div>
+      {diagnostics.length > 0 ? (
+        <div
+          data-uat="graph-error"
+          aria-label="Run graph error"
+          role="alert"
+          className="max-h-24 shrink-0 space-y-0.5 overflow-y-auto border-t border-border/60 px-2 py-1 text-xs text-destructive"
+        >
+          {diagnostics.map((text) => (
+            <div key={text} className="min-w-0 truncate" title={text}>
+              {text}
+            </div>
+          ))}
+          {errors.length > 0 ? (
+            <div className="text-muted-foreground">
+              Previous graph content is stale.
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {Object.keys(ledger.actions).length > 0 ? <div className="max-h-[40%] space-y-1 overflow-auto border-t border-border/60 p-2" aria-label="Run actions">
         {Object.values(ledger.actions).map((action) => {
           const turnKey = actionTurnKey(action, ledger, parent?.blocks ?? []);

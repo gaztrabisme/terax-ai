@@ -9,6 +9,7 @@ import {
   composerExtensions,
   imageEncoder,
   imagePathsOf,
+  shortModelName,
   MAX_ATTACHMENTS,
   MAX_TOTAL_IMAGE_BYTES,
   type EncodedImage,
@@ -179,6 +180,80 @@ function renderComposer(
   ) as Element;
   return { ...utils, onSubmit, pm };
 }
+
+describe("composer model chip", () => {
+  const MODEL = "opendev/custom-namespace/very-long-model-identifier-x9";
+
+  function renderWithRoles() {
+    return render(
+      <div
+        data-pi-model={MODEL}
+        data-pi-provider="openrouter"
+        data-pi-smol="omlx/qwen3-small"
+      >
+        <Composer tabId={7} onSubmit={vi.fn()} />
+      </div>,
+    );
+  }
+
+  it("shortens the model name to the part after the last slash, max 24 characters", () => {
+    expect(shortModelName("anthropic/claude-sonnet-4-5")).toBe(
+      "claude-sonnet-4-5",
+    );
+    expect(shortModelName("plain-model")).toBe("plain-model");
+    expect(shortModelName(MODEL).length).toBeLessThanOrEqual(24);
+    expect(shortModelName(MODEL)).toBe(
+      MODEL.slice(MODEL.lastIndexOf("/") + 1).slice(0, 24),
+    );
+  });
+
+  it("shows the short name, keeps the exact value in the title and lists all three values in the details popover", async () => {
+    const { container } = renderWithRoles();
+    const chip = await waitFor(() => {
+      const el = container.querySelector('[data-uat="model-chip"]')!;
+      expect(el.textContent).not.toBe("model unset");
+      return el as HTMLElement;
+    });
+    // Short name on the chip, exact model in the title tooltip.
+    expect(chip.textContent).toBe(
+      `${shortModelName(MODEL)}, subagent ${shortModelName("omlx/qwen3-small")}`,
+    );
+    expect(chip.getAttribute("title")).toBe(
+      `provider openrouter, model ${MODEL}, smol omlx/qwen3-small`,
+    );
+
+    // The one details affordance lists provider, model and role exactly.
+    fireEvent.click(
+      container.querySelector("button[aria-label='Model details']")!,
+    );
+    const popover = container.querySelector("[role='dialog']")!;
+    expect(popover.textContent).toContain("provider");
+    expect(popover.textContent).toContain("openrouter");
+    expect(popover.textContent).toContain(MODEL);
+    expect(popover.textContent).toContain("smol");
+    expect(popover.textContent).toContain("omlx/qwen3-small");
+
+    // The details button keeps Send aligned: both stay shrink-0 siblings.
+    const send = container.querySelector("button[data-uat='send-button']")!;
+    expect(send).toBeTruthy();
+  });
+
+  it("renders model unset without roles and lists unknown values in the popover", async () => {
+    const { container } = render(<Composer tabId={8} onSubmit={vi.fn()} />);
+    await waitFor(() => {
+      const el = container.querySelector('[data-uat="model-chip"]')!;
+      expect(el.textContent).toBe("model unset");
+    });
+    expect(
+      container.querySelector('[data-uat="model-chip"]')!.getAttribute("title"),
+    ).toBeNull();
+    fireEvent.click(
+      container.querySelector("button[aria-label='Model details']")!,
+    );
+    const popover = container.querySelector("[role='dialog']")!;
+    expect(popover.textContent).toContain("unknown");
+  });
+});
 
 describe("composer image chips", () => {
   it("turns a pasted image into a thumbnail chip", async () => {
@@ -736,5 +811,28 @@ describe("composer pi:insert-draft", () => {
     renderComposer(vi.fn(), { cwd: "/tmp/proj" });
     insertDraft({ tabId: 8 });
     expect(writeCalls()).toHaveLength(0);
+  });
+});
+
+describe("composer Escape stop binding", () => {
+  afterEach(() => {
+    cleanup();
+    usePiStore.setState({ tabs: {} });
+  });
+
+  it("Escape in the focused composer triggers the same stop action as the button", () => {
+    const onStop = vi.fn();
+    const { container } = renderComposer(vi.fn(), { onStop });
+    const composer = container.querySelector("[aria-label='pi composer']")!;
+    fireEvent.keyDown(composer, { key: "Escape" });
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("Escape without a stop action falls through to the editor", () => {
+    const onStop = vi.fn();
+    const { container } = renderComposer(vi.fn(), {});
+    const composer = container.querySelector("[aria-label='pi composer']")!;
+    fireEvent.keyDown(composer, { key: "Escape" });
+    expect(onStop).not.toHaveBeenCalled();
   });
 });

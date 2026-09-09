@@ -59,19 +59,18 @@ type StackProps = {
   tabs: Tab[];
   activeId: number;
   onOpenChild: (path: string) => void;
+  /**
+   * Accepted for call compatibility but unused: board and run graph open as
+   * primary-surface tabs from the tab menu only (design.md section 3.1), so
+   * the panels carry no Open in tab route (UX-12).
+   */
   onOpenBoard?: (cwd: string) => void;
   onOpenRunGraph?: (cwd: string | undefined, piTabId: number) => void;
 };
 
 // Keep-alive slot: every pi tab stays mounted while hidden so the RPC
 // stream keeps filling the store when the user is on another tab.
-export function PiStack({
-  tabs,
-  activeId,
-  onOpenChild,
-  onOpenBoard,
-  onOpenRunGraph,
-}: StackProps) {
+export function PiStack({ tabs, activeId, onOpenChild }: StackProps) {
   const pis = tabs.filter((t): t is PiTabData => t.kind === "pi");
   if (pis.length === 0) return null;
   return (
@@ -86,14 +85,7 @@ export function PiStack({
             t.id !== activeId && "invisible pointer-events-none",
           )}
         >
-          <PiTab
-            tabId={t.id}
-            cwd={t.cwd}
-            active={t.id === activeId}
-            onOpenChild={onOpenChild}
-            onOpenBoard={onOpenBoard}
-            onOpenRunGraph={onOpenRunGraph}
-          />
+          <PiTab tabId={t.id} cwd={t.cwd} active={t.id === activeId} onOpenChild={onOpenChild} />
         </div>
       ))}
     </div>
@@ -105,8 +97,6 @@ export function PiTab({
   cwd,
   active,
   onOpenChild,
-  onOpenBoard,
-  onOpenRunGraph,
   launcherDir = PI_MODULE_PREFS_DEFAULTS.launcherDir,
 }: {
   tabId: number;
@@ -114,8 +104,6 @@ export function PiTab({
   /** Whether this tab is the visible one; only it mounts the run graph. */
   active: boolean;
   onOpenChild: (path: string) => void;
-  onOpenBoard?: (cwd: string) => void;
-  onOpenRunGraph?: (cwd: string | undefined, piTabId: number) => void;
   launcherDir?: string;
 }) {
   const entry = usePiStore((s) => s.tabs[tabId]);
@@ -482,7 +470,7 @@ export function PiTab({
           onClick={() => void retryStorage()}
           className={viewButtonClass}
         >
-          Retry
+          Retry save
         </button>
       </div>
     ) : null;
@@ -541,13 +529,6 @@ export function PiTab({
             onBack={() => transition({ type: "back", narrow })}
             onFullscreen={() => transition({ type: "fullscreen" })}
             onExpand={() => transition({ type: "expand", narrow })}
-            onOpenTab={
-              view === "board" && cwd && onOpenBoard
-                ? () => onOpenBoard(cwd)
-                : view === "graph" && onOpenRunGraph
-                  ? () => onOpenRunGraph(cwd, tabId)
-                  : undefined
-            }
             onWidthCommit={(widthCss) =>
               update({ views: { [view]: { widthCss } } })
             }

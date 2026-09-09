@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PI_MODULE_PREFS_DEFAULTS } from "@/modules/pi/lib/settingsSchema";
 import {
   DEFAULT_AGENT_BIN,
-  RAIL_STATES,
   stateLabel,
   parseBoard,
   type BoardSnapshot,
@@ -19,8 +18,9 @@ const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 // keeps every test in plain jsdom without a real Tauri backend.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-// Pane-level expectations: the compact rail lists the four active states, and
-// the binary defaults stay empty so the resolver decides per machine.
+// Pane-level expectations: panel and full screen are one board representation
+// (the state lanes), and the binary defaults stay empty so the resolver
+// decides per machine.
 describe("BoardView rail configuration", () => {
   it("counts distinct tickets in every human-decision column", () => {
     const tickets = [
@@ -37,12 +37,18 @@ describe("BoardView rail configuration", () => {
     );
     expect(awaitingDecisionCount(null)).toBe(0);
   });
-  it("lists exactly the four active states on the rail", () => {
-    expect(RAIL_STATES).toEqual(["align", "in_progress", "verify", "review"]);
-  });
 
-  it("labels every rail state without underscores", () => {
-    for (const state of RAIL_STATES) {
+  it("labels every board state without underscores", () => {
+    for (const state of [
+      "todo",
+      "align",
+      "in_progress",
+      "verify",
+      "review",
+      "land",
+      "done",
+      "rework",
+    ]) {
       expect(stateLabel(state)).not.toContain("_");
       expect(stateLabel(state).length).toBeGreaterThan(0);
     }
@@ -191,6 +197,83 @@ describe("BoardView loud refresh failures", () => {
     expect(line).not.toBeNull();
     expect(line?.textContent).toContain(".pi/logs/board.jsonl");
     expect(screen.getByText("stale")).toBeTruthy();
+  });
+});
+
+// UX-11: one board representation in both modes. The panel stacks the same
+// state lanes the full screen shows as columns; empty lanes are their single
+// muted count line, and no status filter narrows the view.
+describe("BoardView panel lanes", () => {
+  function lane(state: string): Element | null {
+    return document.body.querySelector(
+      `[data-uat="board-columns"][data-uat-key="${state}"]`,
+    );
+  }
+
+  it("renders one lane per board state with its count in the panel", () => {
+    render(
+      createElement(BoardView, {
+        cwd: "/proj",
+        data: boardData({ snapshot: SNAPSHOT }),
+      }),
+    );
+    const lanes = document.body.querySelectorAll('[data-uat="board-columns"]');
+    expect(lanes).toHaveLength(SNAPSHOT.states.length);
+    const align = lane("align");
+    expect(align?.textContent).toContain("Align");
+    expect(align?.textContent).toContain("Build the rail");
+    expect(align?.querySelectorAll('[data-uat="board-ticket"]')).toHaveLength(1);
+  });
+
+  it("collapses an empty lane to its single muted count line", () => {
+    render(
+      createElement(BoardView, {
+        cwd: "/proj",
+        data: boardData({ snapshot: SNAPSHOT }),
+      }),
+    );
+    const todo = lane("todo");
+    expect(todo?.textContent).toContain("Todo");
+    expect(todo?.textContent).toContain("0");
+    expect(todo?.querySelectorAll('[data-uat="board-ticket"]')).toHaveLength(0);
+  });
+
+  it("shows the same lanes as columns in full screen", () => {
+    render(
+      createElement(BoardView, {
+        cwd: "/proj",
+        mode: "full",
+        data: boardData({ snapshot: SNAPSHOT }),
+      }),
+    );
+    const lanes = document.body.querySelectorAll('[data-uat="board-columns"]');
+    expect(lanes).toHaveLength(SNAPSHOT.states.length);
+    expect(screen.getByText("Build the rail")).toBeTruthy();
+  });
+
+  it("offers no status filter control and shows each ticket exactly once", () => {
+    render(
+      createElement(BoardView, {
+        cwd: "/proj",
+        data: boardData({ snapshot: SNAPSHOT }),
+      }),
+    );
+    const labelled = Array.from(
+      document.body.querySelectorAll("button"),
+    ).filter((button) =>
+      [
+        "Todo",
+        "Align",
+        "In progress",
+        "Verify",
+        "Review",
+        "Land",
+        "Done",
+        "Rework",
+      ].some((label) => (button.textContent ?? "").startsWith(label)),
+    );
+    expect(labelled).toHaveLength(0);
+    expect(screen.getAllByText("Build the rail")).toHaveLength(1);
   });
 });
 

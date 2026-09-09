@@ -52,6 +52,16 @@ export function composerExtensions() {
   );
 }
 
+/**
+ * UX-21: the chip shows the model's short name, the part after the last
+ * slash capped at 24 characters, so long provider paths never push Send;
+ * the title and the details popover carry the exact value.
+ */
+export function shortModelName(model: string): string {
+  const tail = model.slice(model.lastIndexOf("/") + 1);
+  return tail.length > 24 ? tail.slice(0, 24) : tail;
+}
+
 /// ---------------------------------------------------------------------------
 /// Image attachments
 /// ---------------------------------------------------------------------------
@@ -254,35 +264,39 @@ type Props = {
 
 /**
  * Reads the model chip data from the nearest pane root. ChatPane fills
- * data-pi-model and data-pi-smol from the store's resolved session roles;
- * until then the chip renders "model unset".
+ * data-pi-model, data-pi-smol and data-pi-provider from the store's resolved
+ * session roles; until then the chip renders "model unset".
  */
 function useModelChip(ref: React.RefObject<HTMLElement | null>) {
   const [model, setModel] = useState<string | null>(null);
   const [smol, setSmol] = useState<string | null>(null);
+  const [provider, setProvider] = useState<string | null>(null);
 
   useEffect(() => {
     const read = () => {
       const root =
         ref.current?.closest<HTMLElement>("[data-pi-model]") ??
-        ref.current?.closest<HTMLElement>("[data-pi-smol]");
+        ref.current?.closest<HTMLElement>("[data-pi-smol]") ??
+        ref.current?.closest<HTMLElement>("[data-pi-provider]");
       if (!root) return;
       const value = root.getAttribute("data-pi-model");
       setModel(value && value.trim() ? value : null);
       const smolValue = root.getAttribute("data-pi-smol");
       setSmol(smolValue && smolValue.trim() ? smolValue : null);
+      const providerValue = root.getAttribute("data-pi-provider");
+      setProvider(providerValue && providerValue.trim() ? providerValue : null);
     };
     read();
     const observer = new MutationObserver(read);
     observer.observe(document.body, {
       attributes: true,
       subtree: true,
-      attributeFilter: ["data-pi-model", "data-pi-smol"],
+      attributeFilter: ["data-pi-model", "data-pi-smol", "data-pi-provider"],
     });
     return () => observer.disconnect();
   }, [ref]);
 
-  return { model, smol };
+  return { model, smol, provider };
 }
 
 export function Composer({
@@ -305,7 +319,29 @@ export function Composer({
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
   const chipRef = useRef<HTMLSpanElement>(null);
-  const { model, smol } = useModelChip(chipRef);
+  const { model, smol, provider } = useModelChip(chipRef);
+  // UX-21: one details affordance for the exact provider/model/role values.
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsRef = useRef<HTMLDivElement>(null);
+
+  // Outside click and Escape close the popover; no focus trap, it is a read-only listing.
+  useEffect(() => {
+    if (!detailsOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (!detailsRef.current?.contains(e.target as Node)) {
+        setDetailsOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDetailsOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [detailsOpen]);
 
   const [images, setImages] = useState<PendingImage[]>([]);
   const imagesRef = useRef<PendingImage[]>([]);
@@ -988,7 +1024,8 @@ export function Composer({
                   type="button"
                   aria-label={`Remove ${img.name}`}
                   onClick={() => removeImage(img.id)}
-                  className="absolute -right-1.5 -top-1.5 rounded-full border border-border/60 bg-background p-0.5 text-muted-foreground hover:text-foreground"
+                  // Padding, not a bigger glyph: the hit area clears 24 px.
+                  className="absolute -right-2 -top-2 rounded-full border border-border/60 bg-background p-2 text-muted-foreground hover:text-foreground"
                 >
                   <HugeiconsIcon
                     icon={Cancel01Icon}
@@ -1038,7 +1075,7 @@ export function Composer({
           This model may not accept images; pi decides what to do with them.
         </div>
       ) : null}
-      <div className="mt-1.5 flex items-center gap-2">
+      <div className="mt-2 flex items-center gap-2">
         <input
           ref={fileInputRef}
           type="file"
@@ -1064,14 +1101,54 @@ export function Composer({
         >
           <HugeiconsIcon icon={ImageAdd01Icon} size={14} strokeWidth={1.75} />
         </button>
+        {/* Short model name only (UX-21): the exact provider/model/role
+            values live in the title and the details popover, so a long
+            identifier cannot push Send around at narrow widths. */}
         <span
           ref={chipRef}
           data-uat="model-chip"
-          className="rounded-md border border-border/60 px-2 py-0.5 text-xs text-muted-foreground"
+          title={
+            model
+              ? `provider ${provider ?? "unknown"}, model ${model}${smol ? `, smol ${smol}` : ""}`
+              : undefined
+          }
+          className="min-w-0 max-w-48 truncate rounded-md border border-border/60 px-2 py-0.5 text-xs text-muted-foreground"
         >
-          {model ?? "model unset"}
-          {smol ? `, subagent ${smol}` : ""}
+          {model ? shortModelName(model) : "model unset"}
+          {smol ? `, subagent ${shortModelName(smol)}` : ""}
         </span>
+        <div ref={detailsRef} className="relative shrink-0">
+          <button
+            type="button"
+            aria-label="Model details"
+            title="Model details"
+            aria-expanded={detailsOpen}
+            onClick={() => setDetailsOpen((v) => !v)}
+            className="rounded-md border border-border/60 px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            details
+          </button>
+          {detailsOpen ? (
+            <div
+              role="dialog"
+              aria-label="Model details"
+              className="absolute bottom-7 left-0 z-20 w-72 rounded-md border border-border/60 bg-popover p-2 text-xs shadow-md"
+            >
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="shrink-0 text-muted-foreground">provider</span>
+                <span className="truncate">{provider ?? "unknown"}</span>
+              </div>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="shrink-0 text-muted-foreground">model</span>
+                <span className="truncate">{model ?? "unknown"}</span>
+              </div>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="shrink-0 text-muted-foreground">smol</span>
+                <span className="truncate">{smol ?? "unknown"}</span>
+              </div>
+            </div>
+          ) : null}
+        </div>
         <span className="flex-1" />
         <button
           type="button"

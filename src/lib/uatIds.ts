@@ -243,6 +243,12 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
     file: "src/modules/pi/components/ArtifactPane.tsx",
     state: "the artifact viewer whose file is missing or unreadable (K13)",
   },
+  {
+    id: "artifact-stale",
+    file: "src/modules/pi/components/ArtifactPane.tsx",
+    state:
+      "the artifact viewer keeping its last good frame after a failed re-read (stale since marker, UX-19)",
+  },
 ];
 
 /**

@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  abortLine,
+  abortRetryLine,
   answerAsk,
   applyEvent,
   askResponseLine,
@@ -11,8 +13,10 @@ import {
   initialPiSessionState,
   promptLine,
   recordSavedAttachments,
+  requestCancel,
   resetAsk,
   retryPendingLabel,
+  sessionExited,
   type PiBlock,
   type PiErrorBlock,
   type PiRetryBlock,
@@ -705,5 +709,102 @@ describe("local user attachment metadata", () => {
       { path: ".pi/attachments/0-0.png", error: null },
     ]);
     expect(unchanged).toBe(state);
+  });
+});
+
+describe("one cancellation state machine", () => {
+  const thinking = () => ({
+    ...initialPiSessionState(),
+    status: "thinking" as const,
+    blocks: [
+      {
+        kind: "message",
+        id: "msg-0",
+        role: "assistant",
+        parts: [{ type: "text", text: "1, 2, 3" }],
+        model: null,
+        usage: null,
+        streaming: true,
+        at: 1000,
+      },
+    ] as PiSessionState["blocks"],
+  });
+
+  it("requestCancel flips only an in-flight turn and is idempotent", () => {
+    for (const status of ["thinking", "tool", "awaiting-ask"] as const) {
+      const next = requestCancel({ ...initialPiSessionState(), status });
+      expect(next.status).toBe("cancelling");
+      expect(next.cancelRequested).toBe(true);
+      expect(requestCancel(next)).toBe(next);
+    }
+    for (const status of ["idle", "done", "error", "cancelling"] as const) {
+      const state = { ...initialPiSessionState(), status };
+      expect(requestCancel(state)).toBe(state);
+    }
+  });
+
+  it("the abort response resolves Cancelling to idle and keeps the cancel flag", () => {
+    const state = applyEvent(requestCancel(thinking()), '{"type":"response","command":"abort","success":true}', 1000);
+    expect(state.status).toBe("idle");
+    expect(state.cancelRequested).toBe(true);
+  });
+
+  it("straggler message and tool events keep the Cancelling label", () => {
+    let state = requestCancel(thinking());
+    state = applyEvent(state, '{"type":"tool_execution_start","toolCallId":"t1","toolName":"read"}', 1000);
+    expect(state.status).toBe("cancelling");
+    state = applyEvent(state, '{"type":"tool_execution_end","toolCallId":"t1","result":{"content":[]}}', 1000);
+    expect(state.status).toBe("cancelling");
+    state = applyEvent(state, '{"type":"message_start","message":{"role":"assistant","content":"4"}}', 1000);
+    expect(state.status).toBe("cancelling");
+  });
+
+  it("the closing agent_end of an aborted run lands idle with no error card", () => {
+    let state = requestCancel(thinking());
+    state = applyEvent(state, '{"type":"response","command":"abort","success":true}', 1000);
+    const end = applyEvent(state, '{"type":"agent_end","messages":[],"error":"Aborted"}', 1000);
+    expect(end.status).toBe("idle");
+    expect(end.cancelRequested).toBe(false);
+    expect(end.blocks.filter((b) => b.kind === "error")).toHaveLength(0);
+    // The partial answer stays in the transcript.
+    expect(end.blocks.some((b) => b.kind === "message" && b.role === "assistant")).toBe(true);
+  });
+
+  it("a cancel that loses the race to a normal end reports done", () => {
+    const end = applyEvent(requestCancel(thinking()), '{"type":"agent_end","messages":[],"error":null}', 1000);
+    expect(end.status).toBe("done");
+    expect(end.cancelRequested).toBe(false);
+  });
+
+  it("a run that starts after a cancel is a fresh Stop target", () => {
+    let state = applyEvent(requestCancel(thinking()), '{"type":"response","command":"abort","success":true}', 1000);
+    state = applyEvent(state, '{"type":"agent_start","sessionId":"abcd1234"}', 1000);
+    expect(state.status).toBe("thinking");
+    expect(state.cancelRequested).toBe(false);
+    const end = applyEvent(state, '{"type":"agent_end","messages":[],"error":"model down"}', 1000);
+    expect(end.status).toBe("error");
+    expect(end.blocks.some((b) => b.kind === "error" && b.text === "model down")).toBe(true);
+  });
+
+  it("an error without a cancel still paints the failure card", () => {
+    const end = applyEvent(thinking(), '{"type":"agent_end","messages":[],"error":"boom"}', 1000);
+    expect(end.status).toBe("error");
+    expect(end.blocks.some((b) => b.kind === "error" && b.text === "boom")).toBe(true);
+  });
+
+  it("sessionExited forces idle and stops streaming indicators", () => {
+    const exited = sessionExited(thinking());
+    expect(exited.status).toBe("idle");
+    expect(exited.openMessageId).toBeNull();
+    expect(
+      exited.blocks.every(
+        (b) => !(b.kind === "message" && b.streaming),
+      ),
+    ).toBe(true);
+  });
+
+  it("abort and abort_retry ride the exact wire shapes", () => {
+    expect(abortLine()).toBe('{"type":"abort"}');
+    expect(abortRetryLine()).toBe('{"type":"abort_retry"}');
   });
 });

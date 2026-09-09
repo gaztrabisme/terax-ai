@@ -132,8 +132,17 @@ export type PiStatus =
   | "thinking"
   | "tool"
   | "awaiting-ask"
+  | /** Stop pressed, pi's abort not answered by a turn end yet. */ "cancelling"
   | "done"
   | "error";
+
+/** True while a turn is actively running: Stop applies to it and a sent
+ *  prompt rides pi's follow-up queue. */
+export function turnInFlight(status: PiStatus): boolean {
+  return (
+    status === "thinking" || status === "tool" || status === "awaiting-ask"
+  );
+}
 
 export type PiSessionState = {
   status: PiStatus;
@@ -161,6 +170,10 @@ export type PiSessionState = {
   /** Between a switch_session ack and the new session's first start event:
    *  the transcript was reset but the new session id is not known yet. */
   switching: boolean;
+  /** Stop was pressed for the run in flight; stays set from requestCancel
+   *  until the run ends (agent_end), so pi's own "Aborted" agent_end error
+   *  resolves to idle instead of painting an error card for our cancel. */
+  cancelRequested: boolean;
 };
 
 export function initialPiSessionState(): PiSessionState {
@@ -181,6 +194,7 @@ export function initialPiSessionState(): PiSessionState {
     retry: null,
     lastErrorText: null,
     switching: false,
+    cancelRequested: false,
   };
 }
 
@@ -207,6 +221,43 @@ function switchedState(state: PiSessionState): PiSessionState {
     retry: null,
     lastErrorText: null,
     switching: true,
+    cancelRequested: false,
+  };
+}
+
+/** One cancellation state machine for Stop and composer Escape (design.md
+ *  3.3): acknowledges the request at once ("cancelling", Stop disabled) and
+ *  keeps the partial transcript. Resolution is requestCancel's callers'
+ *  business: pi answers the abort (applyEvent's abort response moves the
+ *  status to idle) or the run ends (agent_end). Idempotent: only a turn in
+ *  flight flips to cancelling. */
+export function requestCancel(state: PiSessionState): PiSessionState {
+  if (!turnInFlight(state.status)) return state;
+  return {
+    ...state,
+    status: "cancelling",
+    cancelRequested: true,
+    // A pending auto-retry label would sit on top of Cancelling; the abort
+    // (and abort_retry) withdraws the retry.
+    retry: null,
+  };
+}
+
+/** The process exited: the status must never read as a stale thinking or
+ *  Cancelling (UX-08). Idle plus the exited marker keeps New session
+ *  available and stops every streaming indicator. */
+export function sessionExited(state: PiSessionState): PiSessionState {
+  return {
+    ...state,
+    status: "idle",
+    cancelRequested: false,
+    retry: null,
+    openMessageId: null,
+    blocks: state.blocks.map((block) =>
+      block.kind === "message" && block.streaming
+        ? { ...block, streaming: false }
+        : block,
+    ),
   };
 }
 
@@ -350,6 +401,18 @@ export function askResponseLine(
   return JSON.stringify({ type: "ask_response", requestId, answers });
 }
 
+/** The rpc abort command (pi 0.3.0 rpc.rs "abort"): stops the run in flight
+ *  without killing the process. Always answered response_ok. */
+export function abortLine(): string {
+  return JSON.stringify({ type: "abort" });
+}
+
+/** Withdraws a pending auto-retry so a Stop during the backoff window cannot
+ *  leave the turn running after the abort (rpc.rs "abort_retry"). */
+export function abortRetryLine(): string {
+  return JSON.stringify({ type: "abort_retry" });
+}
+
 /**
  * Pure reducer over pi's measured stdout vocabulary. message_update carries a
  * FULL message snapshot, so it replaces the open message's parts rather than
@@ -402,6 +465,9 @@ export function applyEvent(
         ...base,
         switching: false,
         status: base.status === "awaiting-ask" ? base.status : "thinking",
+        // A run starting after a cancel is a new run: Stop applies to it
+        // again, and the old cancel may not swallow its outcome.
+        cancelRequested: false,
         ...(sessionId !== null && { sessionId }),
         ...(ts !== null && {
           startedMs: base.startedMs ?? ts,
@@ -470,9 +536,23 @@ export function applyEvent(
           status: "done",
           lastErrorText: null,
           retry: null,
+          cancelRequested: false,
           blocks: empty && !currentBlocks.some((b) => b.kind === "error" && b.text === text)
             ? [...state.blocks, { kind: "error", text, at: now }]
             : state.blocks,
+        };
+      }
+      // Our own Stop: pi ends an aborted run with an error payload ("Aborted",
+      // rpc.rs build_abort_message). That error is the cancellation outcome,
+      // not a failed model request: resolve to idle without an error card.
+      // The partial answer above it stays untouched.
+      if (state.cancelRequested) {
+        return {
+          ...state,
+          status: "idle",
+          cancelRequested: false,
+          lastErrorText: null,
+          retry: null,
         };
       }
       // Failed model request: pi ends every auto-retry attempt with the same
@@ -526,7 +606,12 @@ function applyMessageStart(
   return {
     ...state,
     seq: state.seq + 1,
-    status: role === "assistant" ? "thinking" : state.status,
+    // A straggler message_start while Cancelling does not resurrect the
+    // running label; agent_end resolves the cancel.
+    status:
+      role === "assistant" && state.status !== "cancelling"
+        ? "thinking"
+        : state.status,
     // A new user message opens a fresh turn: its failure gets its own card
     // and the turn's usage and retry state start empty.
     ...(role === "user" && {
@@ -581,8 +666,11 @@ function applyRetryStart(
   return {
     ...state,
     // The engine is working again: the header shows the retry label on top
-    // of the running state instead of the failure.
+    // of the running state instead of the failure. A retry that slipped past
+    // the cancel's abort_retry is a live run again: its outcome is reported
+    // and Stop applies to it.
     status: "thinking",
+    cancelRequested: false,
     retry: { attempt, max, delayMs },
     blocks: [...state.blocks, block],
   };
@@ -689,7 +777,9 @@ function applyToolStart(
   };
   return {
     ...state,
-    status: "tool",
+    // Cancelling keeps its label until the run ends (UX-08): a tool row that
+    // was already in flight must not flip the strip back to "running tool".
+    status: state.status === "cancelling" ? state.status : "tool",
     blocks: [...state.blocks, block],
     toolPos: { ...state.toolPos, [toolCallId]: state.blocks.length },
   };
@@ -748,7 +838,7 @@ function applyToolEnd(
     };
     return {
       ...state,
-      status: "thinking",
+      status: state.status === "cancelling" ? state.status : "thinking",
       blocks: [...state.blocks, block],
       toolPos: { ...state.toolPos, [toolCallId]: state.blocks.length },
     };
@@ -757,7 +847,11 @@ function applyToolEnd(
   if (block.kind !== "tool") return state;
   const blocks = state.blocks.slice();
   blocks[index] = { ...block, ...patch };
-  return { ...state, status: "thinking", blocks };
+  return {
+    ...state,
+    status: state.status === "cancelling" ? state.status : "thinking",
+    blocks,
+  };
 }
 
 function applyAskRequest(
@@ -809,6 +903,14 @@ function applyResponse(
 ): PiSessionState {
   if (event.command === "switch_session")
     return applySwitchResponse(state, event);
+  if (event.command === "abort") {
+    // pi 0.3.0 answers abort with response_ok even when nothing was running
+    // (rpc.rs:2340). The cancel resolves when the answer lands: Cancelling
+    // goes idle here while the run drains, and cancelRequested stays set so
+    // the closing agent_end cannot paint the abort's own error as a failure.
+    if (event.success === false || !state.cancelRequested) return state;
+    return { ...state, status: "idle" };
+  }
   if (event.command === "prompt" && event.success === false)
     return applyPromptRejection(state, event, now);
   if (event.command !== "ask_response") return state;

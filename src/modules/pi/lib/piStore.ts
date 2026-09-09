@@ -3,6 +3,8 @@ import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { create } from "zustand";
 import {
+  abortLine,
+  abortRetryLine,
   answerAsk as answerAskIn,
   applyEvent,
   askResponseLine,
@@ -11,7 +13,10 @@ import {
   messageBlocks,
   promptLine,
   recordSavedAttachments,
+  requestCancel,
   resetAsk as resetAskIn,
+  sessionExited,
+  turnInFlight,
   type PiAskAnswer,
   type PiFeedItem,
   type PiImageAttachment,
@@ -113,6 +118,17 @@ type PendingSet = {
   text: string | null;
 };
 
+/** A send awaiting pi's prompt-command acknowledgement. pi 0.3.0 accepts
+ *  several follow-ups (rpc.rs MAX_RPC_PENDING_MESSAGES = 128) and echoes no
+ *  id for our id-less commands, but answers them in stdin order, so the
+ *  oldest entry is the correlation for the next response frame. */
+export type PiPendingPrompt = {
+  text: string;
+  images: PiImageAttachment[];
+  submissionId: string | null;
+  records: PiSentRecord[];
+};
+
 /** Work created when an acknowledged user block binds a submission: the
  *  index append, then the draft record cleanup. */
 type BindJob = {
@@ -136,14 +152,9 @@ type PiTabEntry = {
   pendingAttachments?: PendingSet[];
   /** Follow-ups sent while a turn was streaming, in send order. */
   queued?: PiQueued[];
-  /** The newest send whose prompt response has not landed yet; pi 0.3.0
-   *  echoes no id for our id-less commands, so this is the correlation. */
-  lastPrompt?: {
-    text: string;
-    images: PiImageAttachment[];
-    submissionId: string | null;
-    records: PiSentRecord[];
-  } | null;
+  /** Sends whose prompt response has not landed yet, in send order; pi
+   *  answers them in stdin order, so the head is the correlation. */
+  pendingPrompts?: PiPendingPrompt[];
   rejectedDraft?: PiRejectedDraft | null;
   failedSubmission?: PiFailedSubmission | null;
   /** A failed attachment-index write, naming the path (design.md 3.4:
@@ -176,6 +187,11 @@ type PiStore = {
   /** Drops a queued prompt that pi has not acknowledged yet and hands its
    *  text back to the composer. pi's own queue cannot be cancelled. */
   removeQueued: (tabId: number, id: string) => void;
+  /** The one cancellation action behind Stop and composer Escape (design.md
+   *  3.3): sends pi's rpc abort command, never kills the process, flips the
+   *  strip to Cancelling at once and lets the abort response or the run's
+   *  agent_end resolve it to idle. */
+  cancelTurn: (tabId: number) => Promise<void>;
   /** Clears the composer restore field once Composer has rebound the text. */
   clearRejectedDraft: (tabId: number) => void;
   answerAsk: (
@@ -359,17 +375,18 @@ type PiEventPatch = Pick<
   "state"
   | "pendingAttachments"
   | "queued"
-  | "lastPrompt"
+  | "pendingPrompts"
   | "rejectedDraft"
   | "failedSubmission"
 > & { bind: BindJob | null };
 
 /** Sniffs one event line for a prompt command response; null for anything
  *  else. The reducer ignores success frames, so the queue bookkeeping here
- *  reads both outcomes: success acknowledges the newest send (an idle start
- *  or an accepted follow-up, rpc.rs answers response_ok right after
+ *  reads both outcomes: success acknowledges the send (an idle start or an
+ *  accepted follow-up, rpc.rs answers response_ok right after
  *  push_follow_up), failure refuses it. pi 0.3.0 echoes no id for our
- *  id-less commands, so lastPrompt is the correlation. */
+ *  id-less commands but answers prompts in stdin order, so the oldest
+ *  pendingPrompts entry is the correlation. */
 function promptResponse(line: string): {
   ok: boolean;
   error: string | null;
@@ -402,16 +419,19 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
   let state = applyEvent(previous, line);
   let pending = entry.pendingAttachments ?? [];
   let queued = entry.queued ?? [];
-  let lastPrompt = entry.lastPrompt ?? null;
+  let pendingPrompts = entry.pendingPrompts ?? [];
   let rejectedDraft = entry.rejectedDraft ?? null;
   let failedSubmission = entry.failedSubmission ?? null;
   let bind: BindJob | null = null;
 
   const response = promptResponse(line);
-  if (response && lastPrompt) {
-    const sentPrompt = lastPrompt;
+  if (response && pendingPrompts.length > 0) {
+    // pi answers prompts in stdin order: the oldest in-flight send owns this
+    // response frame.
+    const sentPrompt = pendingPrompts[0]!;
+    pendingPrompts = pendingPrompts.slice(1);
     if (response.ok) {
-      // Accepted: whichever matching entry is still unacked is now in pi's
+      // Accepted: the oldest matching entry still unacked is now in pi's
       // queue and Remove is no longer offered for it.
       let acked = false;
       queued = queued.map((q) => {
@@ -428,18 +448,26 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
       ) {
         failedSubmission = null;
       }
-      lastPrompt = null;
     } else {
       // Refused: pi put the "prompt rejected" card on the feed; hand the
       // text back to the composer instead of leaving it lost, and do not
-      // keep a queued entry pi never accepted. The refused send's pending
-      // set leaves the queue too: a failed submission never binds to a
-      // later turn.
+      // keep a queued entry pi never accepted. The refused send's own
+      // pending set (matched by submission id, text for the legacy path)
+      // leaves the queue too: a failed submission never binds to a later
+      // turn.
       const index = queued.findIndex(
         (q) => !q.acked && q.text === sentPrompt.text,
       );
       if (index !== -1) queued = queued.filter((_, i) => i !== index);
-      if (pending.length > 0) pending = pending.slice(0, -1);
+      const pendingIndex = pending.findIndex(
+        (p) =>
+          p.submissionId !== null
+            ? p.submissionId === sentPrompt.submissionId
+            : sentPrompt.submissionId === null && p.text === sentPrompt.text,
+      );
+      if (pendingIndex !== -1) {
+        pending = pending.filter((_, i) => i !== pendingIndex);
+      }
       if (
         failedSubmission &&
         sentPrompt.submissionId !== null &&
@@ -466,19 +494,18 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
         error: response.error,
         records: sentPrompt.records,
       };
-      lastPrompt = null;
     }
   }
 
   if (state.switching || state.blocks.length < previous.blocks.length) {
     // The session that held the follow-up queue is gone: queued prompts can
     // never run, so they must not read as pending. The composer restore and
-    // the send awaiting its ack are not tied to this session and stay.
+    // the sends awaiting their acks are not tied to this session and stay.
     return {
       state,
       pendingAttachments: [],
       queued: [],
-      lastPrompt,
+      pendingPrompts,
       rejectedDraft,
       failedSubmission,
       bind: null,
@@ -490,7 +517,7 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
       state,
       pendingAttachments: pending,
       queued,
-      lastPrompt,
+      pendingPrompts,
       rejectedDraft,
       failedSubmission,
       bind: null,
@@ -516,7 +543,7 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
       state,
       pendingAttachments: pending,
       queued,
-      lastPrompt,
+      pendingPrompts,
       rejectedDraft,
       failedSubmission,
       bind: null,
@@ -556,7 +583,7 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
     state,
     pendingAttachments: pending,
     queued,
-    lastPrompt,
+    pendingPrompts,
     rejectedDraft,
     failedSubmission,
     bind,
@@ -661,7 +688,7 @@ export const usePiStore = create<PiStore>()((set, get) => ({
       cwd: opts.cwd,
       pendingAttachments: [],
       queued: [],
-      lastPrompt: null,
+      pendingPrompts: [],
       rejectedDraft: null,
       failedSubmission: null,
       bindError: null,
@@ -671,6 +698,9 @@ export const usePiStore = create<PiStore>()((set, get) => ({
       const session = await openPiSession({
         ...opts,
         launcherDir,
+        // F7b: the global Settings piAgentBin rides to the launch resolver
+        // (the project override wins Rust-side); empty leaves it unset.
+        agentBin: resolved.agentBin,
         env: {
           // Both spawn paths (checkout launcher, direct pi) inherit this env:
           // the bppc host rides from the pref (workspace override included),
@@ -697,12 +727,21 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         },
         onExit: (code) =>
           set((s) =>
-            patchEntry(s.tabs, tabId, (e) => ({
-              ...e,
-              session: null,
-              exited: true,
-              exitCode: code,
-            })),
+            patchEntry(s.tabs, tabId, (e) =>
+              // A late exit from a superseded open must not mark the entry
+              // that replaced this session.
+              e.gen !== gen
+                ? e
+                : {
+                    ...e,
+                    session: null,
+                    exited: true,
+                    exitCode: code,
+                    // Whatever the status said, the process is gone: never a
+                    // stale thinking or Cancelling (UX-08).
+                    state: sessionExited(e.state),
+                  },
+            ),
           ),
       });
       // Events may have patched the entry before open resolved, so compare
@@ -727,6 +766,21 @@ export const usePiStore = create<PiStore>()((set, get) => ({
     const session = entry?.session;
     if (!session) return;
     const attachments: ComposerImage[] = images ?? [];
+    // A Stop is winding the run down. pi would accept the follow-up but
+    // never executes input queued behind an aborted turn (rpc.rs preserves
+    // it unexecuted), so refusing here is the honest acknowledgement: the
+    // text returns to the composer with the reason, the click is never
+    // silently swallowed.
+    if (entry.state.status === "cancelling") {
+      const message = "cancellation in progress; send again once the strip is idle";
+      set((s) =>
+        patchEntry(s.tabs, tabId, (e) => ({
+          ...e,
+          rejectedDraft: { text, images: attachments, error: message },
+        })),
+      );
+      throw new Error(message);
+    }
     // pi refuses a bare prompt while a turn is in flight ("Agent is currently
     // streaming; specify streamingBehavior"), which used to drop the text.
     // While thinking or running a tool the prompt rides streamingBehavior
@@ -838,7 +892,10 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         patchEntry(s.tabs, tabId, (e) => ({
           ...e,
           pendingAttachments: [...(e.pendingAttachments ?? []), pendingSet],
-          lastPrompt: { text, images: attachments, submissionId, records },
+          pendingPrompts: [
+            ...(e.pendingPrompts ?? []),
+            { text, images: attachments, submissionId, records },
+          ],
         })),
       );
       markDraftRecordPending(tabId, entry.cwd, submissionId, records);
@@ -930,16 +987,15 @@ export const usePiStore = create<PiStore>()((set, get) => ({
       );
     }
     // The response frame names no id for our id-less commands, so the store
-    // holds the newest send until its ack or rejection arrives.
+    // holds every send in flight until its ack or rejection arrives, in send
+    // order.
     set((s) =>
       patchEntry(s.tabs, tabId, (e) => ({
         ...e,
-        lastPrompt: {
-          text,
-          images: attachments,
-          submissionId: null,
-          records: [],
-        },
+        pendingPrompts: [
+          ...(e.pendingPrompts ?? []),
+          { text, images: attachments, submissionId: null, records: [] },
+        ],
       })),
     );
     try {
@@ -1057,12 +1113,15 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         patchEntry(s.tabs, tabId, (e) => ({
           ...e,
           pendingAttachments: [...(e.pendingAttachments ?? []), pendingSet],
-          lastPrompt: {
-            text: failed.text,
-            images: failed.images,
-            submissionId,
-            records,
-          },
+          pendingPrompts: [
+            ...(e.pendingPrompts ?? []),
+            {
+              text: failed.text,
+              images: failed.images,
+              submissionId,
+              records,
+            },
+          ],
         })),
       );
       try {
@@ -1121,6 +1180,40 @@ export const usePiStore = create<PiStore>()((set, get) => ({
     set((s) =>
       patchEntry(s.tabs, tabId, (e) => ({ ...e, rejectedDraft: null })),
     );
+  },
+
+  cancelTurn: async (tabId) => {
+    const entry = get().tabs[tabId];
+    const session = entry?.session;
+    if (!session || entry.exited || !turnInFlight(entry.state.status)) {
+      return;
+    }
+    // Acknowledge at once: the strip shows Cancelling and Stop disables
+    // before the wire round-trip. requestCancel is idempotent, so a second
+    // click during the wind-down is a no-op.
+    const retryPending = entry.state.retry !== null;
+    set((s) =>
+      patchEntry(s.tabs, tabId, (e) => ({ ...e, state: requestCancel(e.state) })),
+    );
+    try {
+      // pi's rpc abort stops the run in flight and always answers
+      // response_ok (rpc.rs "abort"); the process lives on. A pending
+      // auto-retry also gets abort_retry so the backoff window cannot
+      // restart the turn after the cancel.
+      await (session.abort ? session.abort() : session.send(abortLine()));
+      if (retryPending) await session.send(abortRetryLine());
+    } catch (error) {
+      // The abort write failed (the process is likely gone; the exit event
+      // resolves the status). Surface it: a clicked Stop is never silent.
+      set((s) =>
+        patchEntry(s.tabs, tabId, (e) => ({
+          ...e,
+          error:
+            e.error ??
+            (error instanceof Error ? error.message : String(error)),
+        })),
+      );
+    }
   },
 
   answerAsk: async (tabId, requestId, answers) => {

@@ -25,7 +25,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 // Same driver-log shape as parse.test.ts reads; the stdout entries are what
 // the reducer sees. A fixed `now` pins every block timestamp so the footer's
-// "Worked N s" is deterministic.
+// "generation N s" is deterministic.
 function replayFixture(fixture: string, now = 1000): PiFeedItem[] {
   const text = readFileSync(
     path.join(here, "../lib/__fixtures__", fixture),
@@ -59,11 +59,11 @@ describe("turn footer usage", () => {
     });
   });
 
-  it("keeps the cached share out of the worked label (K10 split)", () => {
+  it("keeps the cached share out of the footer and names the duration's scope", () => {
     expect(usageLabel(usage!)).toBe("1,204 in, 312 out");
     expect(cacheShareLabel(usage!)).toBe("89% cached");
     expect(workedLabel(turn, usage)).toBe(
-      "Worked 1 s, 1,204 in, 312 out, $0.0031",
+      "generation 1 s, 1,204 in, 312 out, $0.0031",
     );
   });
 
@@ -71,7 +71,7 @@ describe("turn footer usage", () => {
     const html = renderToStaticMarkup(
       <Transcript blocks={blocks} onAnswer={() => {}} onDismiss={() => {}} />,
     );
-    expect(html).toContain("Worked 1 s, 1,204 in, 312 out, $0.0031");
+    expect(html).toContain("generation 1 s, 1,204 in, 312 out, $0.0031");
     expect(html).toContain("retrying 1/3 in 4 s");
     expect(html).toContain("retry 1 succeeded");
   });
@@ -114,7 +114,7 @@ describe("turn footer usage", () => {
     const localTurn = groupTurns(messageBlocks(localBlocks))[0];
     const localUsage = usageByTurn(localBlocks).get(0) ?? null;
     expect(workedLabel(localTurn, localUsage)).toBe(
-      "Worked 1 s, 100 in, 20 out",
+      "generation 1 s, 100 in, 20 out",
     );
     expect(cacheShareLabel(localUsage!)).toBe("0% cached");
     const html = renderToStaticMarkup(
@@ -188,11 +188,11 @@ describe("cache qualifier (K10)", () => {
     costTotal: 0,
   };
 
-  it("renders the qualifier with the exact sentence on a turn with usage", () => {
+  it("renders the qualifier as visible text with the exact sentence on a turn with usage", () => {
     const html = render(turnBlocks(usage));
     expect(html).toContain('data-uat="cache-qualifier"');
-    expect(html).toContain(`title="${CACHE_QUALIFIER_TEXT}"`);
-    expect(html).toContain(`aria-label="${CACHE_QUALIFIER_TEXT}"`);
+    // The sentence is the rendered text, not only a title or aria-label.
+    expect(html).toContain(`>${CACHE_QUALIFIER_TEXT}</span>`);
   });
 
   it("replaces a zero-usage footer with an empty completion card", () => {
@@ -205,9 +205,17 @@ describe("cache qualifier (K10)", () => {
   it("renders the qualifier on a turn whose usage is unknown", () => {
     const html = render(turnBlocks(null));
     expect(html).toContain('data-uat="cache-qualifier"');
-    expect(html).toContain(`title="${CACHE_QUALIFIER_TEXT}"`);
+    expect(html).toContain(`>${CACHE_QUALIFIER_TEXT}</span>`);
     // No usage record, no unstable segment to mark.
     expect(html).not.toContain('data-uat="cache-share"');
+  });
+
+  it("places the qualifier outside the fold toggle so reading it never folds", () => {
+    const html = render(turnBlocks(usage));
+    const fold = html.match(/<button[^>]*data-uat="turn-fold"[^>]*>([\s\S]*?)<\/button>/);
+    expect(fold).not.toBeNull();
+    expect(fold![1]).not.toContain("cache-qualifier");
+    expect(fold![1]).not.toContain(CACHE_QUALIFIER_TEXT);
   });
 
   it("marks cache-share unstable and keeps the cached share out of the footer", () => {

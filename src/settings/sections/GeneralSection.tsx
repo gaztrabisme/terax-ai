@@ -145,6 +145,7 @@ export function GeneralSection() {
           <Switch
             checked={vimMode}
             onCheckedChange={(v) => void setVimMode(v)}
+            aria-label="Vim mode"
           />
         </SettingRow>
         <SettingRow
@@ -154,6 +155,7 @@ export function GeneralSection() {
           <Switch
             checked={editorAutoSave}
             onCheckedChange={(v) => void setEditorAutoSave(v)}
+            aria-label="Auto save"
           />
         </SettingRow>
         {editorAutoSave && (
@@ -173,6 +175,7 @@ export function GeneralSection() {
           <Switch
             checked={showHidden}
             onCheckedChange={(v) => void setShowHidden(v)}
+            aria-label="Show hidden files"
           />
         </SettingRow>
       </div>
@@ -187,6 +190,9 @@ export function GeneralSection() {
             checked={terminalComposer}
             onCheckedChange={(v) => void setTerminalComposer(v)}
             data-uat="terminal-composer-default"
+            // UX-15/K7-D01: the switch was unnamed in AX; the label names its
+            // scope, the default for new terminals.
+            aria-label="Terminal composer by default"
           />
         </SettingRow>
         <SettingRow
@@ -222,6 +228,7 @@ export function GeneralSection() {
           <Switch
             checked={terminalWebglEnabled}
             onCheckedChange={(v) => void setTerminalWebglEnabled(v)}
+            aria-label="Use WebGL renderer"
           />
         </SettingRow>
         <SettingRow
@@ -309,6 +316,7 @@ export function GeneralSection() {
             <Switch
               checked={restoreWindowState}
               onCheckedChange={(v) => void setRestoreWindowState(v)}
+              aria-label="Restore window position & size"
             />
           </SettingRow>
         </div>

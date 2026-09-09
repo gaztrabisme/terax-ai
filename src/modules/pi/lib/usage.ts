@@ -27,6 +27,35 @@ export function addUsage(a: PiUsage, b: PiUsage): PiUsage {
   ])) as PiUsage;
 }
 
+/** "$0.0031" for the small per-turn sums, "$0.92" once a run adds up. Lives
+ *  here so the session strip and the turn footer share one format. */
+export function formatCost(cost: number): string {
+  return cost >= 0.01 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(4)}`;
+}
+
+/**
+ * S2 session strip values, truthful in both directions (UX-14): before any
+ * turn has reported usage the fields say so explicitly instead of being
+ * omitted; after turns the sums render, and a session the provider never
+ * priced shows "cost unknown", never a blank or a fake $0. Zero here means
+ * "not reported" because parse.ts flattens a missing cost to 0 (design.md
+ * section 3.5: null means unknown, not 0).
+ */
+export function stripTurnTokensLabel(
+  turnTokens: number,
+  hasTurnUsage: boolean,
+): string {
+  return hasTurnUsage ? `${turnTokens.toLocaleString()} tok` : "no turns yet";
+}
+
+export function stripSessionCostLabel(
+  sessionCost: number,
+  hasTurnUsage: boolean,
+): string {
+  if (!hasTurnUsage) return "no turns yet";
+  return sessionCost > 0 ? formatCost(sessionCost) : "cost unknown";
+}
+
 export function turnUsageIssues(blocks: PiFeedItem[], ledger: LedgerSnapshot): Map<number, string> {
   const sources = new Map<string, PiUsage | null>();
   for (const source of Object.values(ledger.sources)) {

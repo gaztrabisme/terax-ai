@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ARTIFACT_CSP, type ArtifactDoc } from "../lib/artifacts";
 import { ArtifactPane, ARTIFACT_SANDBOX } from "./ArtifactPane";
@@ -110,6 +110,72 @@ describe("ArtifactPane file-first viewer", () => {
     fireEvent.click(getByRole("button", { name: "Retry artifact load" }));
     await waitFor(() => {
       expect(container_iframe()).not.toBeNull();
+    });
+  });
+
+  // UX-19: on a load error the frame is replaced by the error state, with the
+  // full path wrapped and copyable and Retry beside it.
+  it("replaces the frame with a wrapped, copyable error state on a failed first load", async () => {
+    invokeMock.mockRejectedValue(
+      new Error("cannot read artifact /proj/.pi/artifacts/art-abc123.html: no such file"),
+    );
+    const written: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: (text: string) => {
+          written.push(text);
+          return Promise.resolve();
+        },
+      },
+      configurable: true,
+    });
+    render(<ArtifactPane doc={DOC} cwd="/proj" />);
+    const errorEl = (await waitFor(() => {
+      const el = document.querySelector('[data-uat="artifact-error"]');
+      expect(el).not.toBeNull();
+      return el!;
+    })) as HTMLElement;
+    expect(container_iframe()).toBeNull();
+    expect(errorEl.textContent).toContain(
+      "/proj/.pi/artifacts/art-abc123.html",
+    );
+    expect(errorEl.querySelector(".break-all")).not.toBeNull();
+    const copy = within(errorEl).getByRole("button", { name: "Copy path" });
+    fireEvent.click(copy);
+    await waitFor(() => {
+      expect(written).toEqual(["/proj/.pi/artifacts/art-abc123.html"]);
+    });
+    within(errorEl).getByRole("button", { name: "Retry artifact load" });
+  });
+
+  it("keeps a deliberately stale frame marked stale since its load time when a refresh fails", async () => {
+    const { container, getByRole } = render(
+      <ArtifactPane doc={DOC} cwd="/proj" />,
+    );
+    await waitFor(() => expect(container.querySelector("iframe")).not.toBeNull());
+    invokeMock.mockRejectedValue(
+      new Error("cannot read artifact /proj/.pi/artifacts/art-abc123.html: no such file"),
+    );
+    fireEvent.click(getByRole("button", { name: "Refresh artifact" }));
+    const errorEl = (await waitFor(() => {
+      const el = document.querySelector('[data-uat="artifact-error"]');
+      expect(el?.textContent).toContain("cannot read artifact");
+      return el!;
+    })) as HTMLElement;
+    within(errorEl).getByRole("button", { name: "Retry artifact load" });
+    // The last good frame stays, but marked stale since its load time.
+    expect(container.querySelector("iframe")).not.toBeNull();
+    const stale = document.querySelector('[data-uat="artifact-stale"]');
+    expect(stale?.textContent).toContain("stale since");
+    expect(stale?.textContent).toMatch(/\d/);
+    // A successful retry clears the marker and the error.
+    invokeMock.mockResolvedValue(READ);
+    fireEvent.click(
+      within(errorEl).getByRole("button", { name: "Retry artifact load" }),
+    );
+    await waitFor(() => {
+      expect(document.querySelector('[data-uat="artifact-stale"]')).toBeNull();
+      expect(document.querySelector('[data-uat="artifact-error"]')).toBeNull();
     });
   });
 

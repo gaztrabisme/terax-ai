@@ -9,6 +9,8 @@ import {
 } from "./parse";
 import {
   buildRunGraph,
+  formatNodeStatus,
+  nodeStatusText,
   parentStatus,
   PARENT_NODE_ID,
   summarizeChild,
@@ -151,10 +153,33 @@ describe("runGraph over the q6 child transcript", () => {
     expect(graph.edges).toEqual([]);
   });
 
-  it("an idle parent keeps its own idle status without creating a graph node", () => {
+  it("an idle parent is always its own idle node so the empty graph explains itself", () => {
     expect(parentStatus(initialPiSessionState())).toBe("idle");
     const graph = buildRunGraph(initialPiSessionState(), {});
-    expect(graph.nodes).toHaveLength(0);
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.nodes[0].id).toBe(PARENT_NODE_ID);
+    expect(graph.nodes[0].role).toBe("parent");
+    expect(graph.nodes[0].status).toBe("idle");
+    expect(graph.edges).toEqual([]);
+  });
+
+  it("labels the orchestrator with its role and the session model", () => {
+    expect(buildRunGraph(initialPiSessionState(), {}).nodes[0].label).toBe(
+      "Orchestrator",
+    );
+    expect(
+      buildRunGraph(initialPiSessionState(), {}, undefined, undefined, "glm-4")
+        .nodes[0].label,
+    ).toBe("Orchestrator · glm-4");
+  });
+
+  it("displays a finished orchestrator run as stopped, children as done", () => {
+    const parent = buildRunGraph(replayChild(), {}).nodes[0];
+    expect(parent.status).toBe("done");
+    expect(nodeStatusText(parent)).toBe("stopped");
+    expect(formatNodeStatus(parent).startsWith("stopped")).toBe(true);
+    const child = summarizeChild(CHILD_FILE, replayChild());
+    expect(nodeStatusText(child)).toBe("done");
   });
 
   it("a finished child keeps error as its final status when a tool failed", () => {

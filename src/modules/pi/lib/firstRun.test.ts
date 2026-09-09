@@ -388,18 +388,18 @@ describe("chosenLocalEndpoints and probeUrlFor", () => {
     ).toEqual([]);
   });
 
-  it("probes <base>/health for bppc from the endpoints settings", () => {
+  it("probes <base>/models for bppc from the endpoints settings", () => {
     expect(probeUrlFor(endpoints, "bppc")).toBe(
-      "http://10.0.0.9:8080/health",
+      "http://10.0.0.9:8080/v1/models",
     );
   });
 
-  it("falls back to defaults and appends /api/status for omlx", () => {
+  it("falls back to defaults and appends /models for omlx", () => {
     expect(probeUrlFor(endpoints, "omlx")).toBe(
-      "http://127.0.0.1:8000/api/status",
+      "http://127.0.0.1:8000/models",
     );
-    expect(probeUrlFor(null, "omlx")).toBe("http://127.0.0.1:8000/api/status");
-    expect(probeUrlFor(null, "bppc")).toBe("http://127.0.0.1:8080/health");
+    expect(probeUrlFor(null, "omlx")).toBe("http://127.0.0.1:8000/models");
+    expect(probeUrlFor(null, "bppc")).toBe("http://127.0.0.1:8080/models");
   });
 
   it("fills the bppc __BPPC_HOST__ placeholder the way a render would", () => {
@@ -415,18 +415,18 @@ describe("chosenLocalEndpoints and probeUrlFor", () => {
       },
     ];
     expect(probeUrlFor(tmpl, "bppc", "100.100.100.100")).toBe(
-      "http://100.100.100.100:8080/health",
+      "http://100.100.100.100:8080/v1/models",
     );
     // Blank or unset pref keeps the render's 127.0.0.1 fallback.
     expect(probeUrlFor(tmpl, "bppc", "  ")).toBe(
-      "http://127.0.0.1:8080/health",
+      "http://127.0.0.1:8080/v1/models",
     );
     expect(probeUrlFor(tmpl, "bppc")).toBe(
-      "http://127.0.0.1:8080/health",
+      "http://127.0.0.1:8080/v1/models",
     );
     // The placeholder substitution never touches an explicit host.
     expect(probeUrlFor(endpoints, "bppc", "100.100.100.100")).toBe(
-      "http://10.0.0.9:8080/health",
+      "http://10.0.0.9:8080/v1/models",
     );
   });
 });
@@ -441,11 +441,11 @@ describe("endpointRows", () => {
     const rows = endpointRows(roles, null, health);
     expect(rows[0].status).toBe("ok");
     expect(rows[0].detail).toBe(
-      "http://127.0.0.1:8080/health answered in 12 ms",
+      "http://127.0.0.1:8080/models answered in 12 ms",
     );
     expect(rows[1].status).toBe("missing");
     expect(rows[1].detail).toBe(
-      "http://127.0.0.1:8000/api/status: connection refused",
+      "http://127.0.0.1:8000/models: connection refused",
     );
     expect(rows[1].action?.kind).toBe("focus-endpoints");
   });
@@ -545,13 +545,13 @@ describe("buildRows", () => {
   });
 });
 
-describe("probeUrlFor strips the /v1 base", () => {
-  it("probes the server root for omlx and bppc", () => {
+describe("probeUrlFor keeps the /v1 base", () => {
+  it("appends /models to the OpenAI-style base for omlx and bppc", () => {
     const endpoints = [
       { id: "omlx", baseUrl: "http://127.0.0.1:8000/v1" },
       { id: "bppc", baseUrl: "http://__BPPC_HOST__:8080/v1" },
     ] as never;
-    expect(probeUrlFor(endpoints, "omlx")).toBe("http://127.0.0.1:8000/api/status");
-    expect(probeUrlFor(endpoints, "bppc", "10.0.0.5")).toBe("http://10.0.0.5:8080/health");
+    expect(probeUrlFor(endpoints, "omlx")).toBe("http://127.0.0.1:8000/v1/models");
+    expect(probeUrlFor(endpoints, "bppc", "10.0.0.5")).toBe("http://10.0.0.5:8080/v1/models");
   });
 });

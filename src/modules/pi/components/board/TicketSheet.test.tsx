@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TicketSheet } from "./TicketSheet";
 
@@ -205,6 +205,51 @@ describe("TicketSheet harness authority", () => {
     );
     expect(refusal).not.toBeNull();
   });
+
+  it("gives the two Close controls distinct contextual names (UX-15)", async () => {
+    renderSheet("aa");
+    await loadedButton(/^Align$/);
+
+    // The board verb: accessible name "Close ticket", visible text unchanged;
+    // while the harness refuses, the tooltip still carries the reason.
+    const close = verbButton("board-close");
+    expect(close.getAttribute("aria-label")).toBe("Close ticket");
+    expect(close.textContent).toBe("Close");
+    expect(close.getAttribute("title")).toBe("Close is not offered from Todo");
+
+    // The sheet's dismiss: "Close sheet", name and tooltip agree.
+    const dismiss = document.body.querySelector(
+      "button[aria-label='Close sheet']",
+    );
+    expect(dismiss).not.toBeNull();
+    expect(dismiss!.getAttribute("title")).toBe("Close sheet");
+  });
+
+  it("titles an enabled Close verb Close ticket", async () => {
+    const DONE_TICKET = {
+      ...TODO_TICKET,
+      id: "dd",
+      status: "done",
+      allowedActions: [{ action: "close", allowed: true, reasons: [] }],
+    };
+    invokeMock.mockImplementation(async (cmd: string, args?: { command?: string }) => {
+      if (cmd === "pi_paths") {
+        return { agent: { path: "/bin/agent", source: "bundled", candidates: [] } };
+      }
+      const command = args?.command ?? "";
+      if (command.includes(" --json")) {
+        return { stdout: JSON.stringify(DONE_TICKET), stderr: "", exit_code: 0 };
+      }
+      return { stdout: "", stderr: "", exit_code: 0 };
+    });
+    renderSheet("dd");
+    const close = await verbButton("board-close");
+    await waitFor(() => {
+      expect((close as HTMLButtonElement).disabled).toBe(false);
+    });
+    expect(close.getAttribute("aria-label")).toBe("Close ticket");
+    expect(close.getAttribute("title")).toBe("Close ticket");
+  });
 });
 
 describe("TicketSheet two-click arm", () => {
@@ -247,6 +292,112 @@ describe("TicketSheet two-click arm", () => {
       );
       expect(onRefresh).toHaveBeenCalled();
     });
+  });
+});
+
+// The committed state lives in the database, not in this sheet's memory
+// (UX-11): a confirmed action refetches the exact ticket at once, holds a
+// pending state on the verbs, then shows the committed state and gates or
+// the harness error.
+const ALIGNED_TICKET = {
+  ...TODO_TICKET,
+  status: "in_progress",
+  attempt: 1,
+  gates: [
+    {
+      id: 1,
+      gate: "criteria_confirmed",
+      passed: true,
+      provider: "human",
+      source: "human",
+      attempt: 1,
+      note: "confirmed in the sheet",
+      created_at: "2026-09-09 09:00:00",
+    },
+  ],
+  allowedActions: [
+    { action: "land", allowed: false, reasons: ["resolved"] },
+    { action: "rework", allowed: true, reasons: [] },
+  ],
+};
+
+function showSequence(responses: (() => Promise<unknown>)[]) {
+  let call = 0;
+  invokeMock.mockImplementation(async (cmd: string, args?: { command?: string }) => {
+    if (cmd === "pi_paths") {
+      return { agent: { path: "/bin/agent", source: "bundled", candidates: [] } };
+    }
+    if (cmd !== "shell_run_command" || !(args?.command ?? "").includes(" --json")) {
+      return { stdout: "", stderr: "", exit_code: 0 };
+    }
+    const next = responses[Math.min(call, responses.length - 1)];
+    call += 1;
+    return next();
+  });
+}
+
+describe("TicketSheet refetch after a confirmed action", () => {
+  it("refetches the ticket at once and holds a pending state until it returns", async () => {
+    let release: ((value: unknown) => void) | null = null;
+    showSequence([
+      () => Promise.resolve({ stdout: JSON.stringify(TODO_TICKET), stderr: "", exit_code: 0 }),
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+      () => Promise.resolve({ stdout: JSON.stringify(ALIGNED_TICKET), stderr: "", exit_code: 0 }),
+    ]);
+    renderSheet("aa");
+    fireEvent.click(await loadedButton(/^Align$/));
+    fireEvent.click(await screen.findByRole("button", { name: "Align: click again" }));
+
+    // The verbs show pending until the refetched ticket arrives.
+    const pending = await screen.findByRole("button", { name: "Align pending" });
+    expect((pending as HTMLButtonElement).disabled).toBe(true);
+    expect(pending.getAttribute("data-pending")).toBe("true");
+    // The stale Todo view is still on screen while the refetch is in flight.
+    expect(screen.getByText("Todo")).toBeTruthy();
+
+    await act(async () => {
+      release?.({ stdout: JSON.stringify(ALIGNED_TICKET), stderr: "", exit_code: 0 });
+    });
+
+    // The committed state and its gates replace the stale view (the header
+    // span names the state and attempt; the reason line also mentions states,
+    // so match the header text).
+    expect(await screen.findByText(/In progress · attempt 1/)).toBeTruthy();
+    const gate = document.body.querySelector('[data-uat="ticket-gate"]');
+    expect(gate?.textContent).toContain("criteria_confirmed");
+    expect(gate?.textContent).toContain("pass");
+    expect(screen.queryByRole("button", { name: "Align pending" })).toBeNull();
+    expect(
+      (screen.getByRole("button", { name: "Align" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("shows the harness error when the refetch after a confirmed action fails", async () => {
+    showSequence([
+      () => Promise.resolve({ stdout: JSON.stringify(TODO_TICKET), stderr: "", exit_code: 0 }),
+      () =>
+        Promise.resolve({
+          stdout: "",
+          stderr: "error: cannot read ticket aa",
+          exit_code: 1,
+        }),
+    ]);
+    renderSheet("aa");
+    fireEvent.click(await loadedButton(/^Align$/));
+    fireEvent.click(await screen.findByRole("button", { name: "Align: click again" }));
+
+    // The refetch here returns within a microtask, so the pending window is
+    // too short to poll; the held-pending behavior is asserted in the test
+    // above. Wait for the harness error, then for the pending state to clear.
+    const failure = await screen.findByText("error: cannot read ticket aa");
+    expect(failure).not.toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Align pending" })).toBeNull(),
+    );
   });
 });
 

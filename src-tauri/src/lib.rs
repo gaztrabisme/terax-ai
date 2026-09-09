@@ -16,6 +16,23 @@ fn get_launch_dir(state: State<'_, LaunchDir>) -> Option<String> {
     state.0.lock().expect("LaunchDir mutex poisoned").take()
 }
 
+/// Non-drained mirror of the explicit positional dir argument. The startup
+/// decision must distinguish a dock launch (no dir at all, so the recorded
+/// last project is recovered) from a plain folder launch (a dir was passed,
+/// so the seeded shell stays) even after get_launch_dir has been drained by
+/// the first paint.
+#[derive(Default)]
+struct LaunchDirArg(Mutex<Option<String>>);
+
+#[tauri::command]
+fn get_launch_dir_arg(state: State<'_, LaunchDirArg>) -> Option<String> {
+    state
+        .0
+        .lock()
+        .expect("LaunchDirArg mutex poisoned")
+        .clone()
+}
+
 /// Drained on first read so HMR / re-mounts can't replay the launch flag.
 #[derive(Default)]
 struct LaunchPi(Mutex<bool>);
@@ -301,6 +318,7 @@ pub fn run() {
             }
             registry
         })
+        .manage(LaunchDirArg(Mutex::new(cli_dir.clone())))
         .manage(LaunchDir(Mutex::new(cli_dir)))
         .manage(LaunchPi(Mutex::new(cli_pi)))
         .manage(LaunchLauncherDir(Mutex::new(cli_launcher_dir)))
@@ -398,6 +416,7 @@ pub fn run() {
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             get_launch_dir,
+            get_launch_dir_arg,
             get_launch_pi,
             get_launch_launcher_dir,
             open_settings_window,

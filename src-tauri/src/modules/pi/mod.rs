@@ -38,11 +38,29 @@ fn grant_agent_artifacts(app: &tauri::AppHandle, agent_dir: &Path) {
     }
 }
 
+/// The agent binary the launch resolver pins: the project override
+/// (`.pi/terax.json` piAgentBin) wins over the global Settings preference the
+/// caller passes (F7b), and both are trimmed and $HOME-expanded. An empty
+/// value is unset, so the resolver falls back to the bundled sidecar only
+/// when nothing anywhere configured a path.
+fn merge_agent_bin(
+    project: Option<&str>,
+    global: Option<&str>,
+    home: Option<&str>,
+) -> Option<String> {
+    project
+        .or(global)
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(|b| launch::expand_home(b, home))
+}
+
 /// launch.rs PathSource as the lowercase label the runtime report records for
-/// the resolved binary's source.
+/// the resolved binary's source. A preference-supplied path records as
+/// "configured" so the report tells the reader their own setting was honored.
 fn path_source_label(source: launch::PathSource) -> &'static str {
     match source {
-        launch::PathSource::Pref => "pref",
+        launch::PathSource::Pref => "configured",
         launch::PathSource::Bundled => "bundled",
         launch::PathSource::Checkout => "checkout",
         launch::PathSource::Missing => "missing",
@@ -96,6 +114,7 @@ pub async fn pi_open(
     cwd: Option<String>,
     launcher_dir: Option<String>,
     program: Option<String>,
+    agent_bin: Option<String>,
     args: Option<Vec<String>>,
     env: Option<HashMap<String, String>>,
     workspace: Option<WorkspaceEnv>,
@@ -212,15 +231,40 @@ pub async fn pi_open(
         resource_dir: app.path().resource_dir().unwrap_or_default(),
     };
     let app_version = app.package_info().version.to_string();
+    // An explicitly configured binary is honored before any fallback (design
+    // 3.6): the caller's program argument is the pi binary, and the agent
+    // binary is the project .pi/terax.json piAgentBin override or, absent
+    // that, the global Settings piAgentBin the caller resolved (F7b). Neither
+    // resolution falls through to another binary: launch.rs pick_binary
+    // reports a configured-but-missing path as Missing, and the launch fails
+    // visibly below instead of quietly running the bundled sidecar.
+    let configured_pi_bin = program
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string);
+    let configured_agent_bin = merge_agent_bin(
+        overrides.agent_bin.as_deref(),
+        agent_bin.as_deref(),
+        home.as_deref(),
+    );
     let prefs = launch::PiPrefs {
         launcher_dir: launcher_dir.clone(),
         agent_dir: Some(session_agent_dir.to_string_lossy().into_owned()),
-        ..launch::PiPrefs::default()
+        pi_bin: configured_pi_bin,
+        agent_bin: configured_agent_bin.clone(),
     };
-    let board_agent_bin =
-        launch::resolve_paths(&prefs, &bundled, home.as_deref(), &app_data_dir)
-            .agent
-            .path;
+    let resolved_paths =
+        launch::resolve_paths(&prefs, &bundled, home.as_deref(), &app_data_dir);
+    let board_agent_bin = resolved_paths.agent.path.clone();
+    // A configured agent binary that resolves to nothing is a visible launch
+    // failure naming the configured path (R15.1): the bundled sidecar must
+    // never stand in for it, and no all-OK report may be written.
+    if board_agent_bin.is_none() {
+        if let Some(configured) = configured_agent_bin {
+            return Err(format!("configured agent binary not found: {configured}"));
+        }
+    }
     // Record the resolved agent dir before the spawn runs, so a transcript
     // watch armed in parallel resolves pi's real hub root instead of watching
     // the project.
@@ -849,5 +893,44 @@ mod list_models_tests {
     #[test]
     fn provider_probe_uses_the_direct_list_providers_argument() {
         assert_eq!(provider_probe_args(), vec!["--list-providers"]);
+    }
+}
+
+#[cfg(test)]
+mod agent_bin_tests {
+    use super::*;
+
+    #[test]
+    fn project_override_beats_the_global_agent_bin() {
+        assert_eq!(
+            merge_agent_bin(Some("/proj/agent"), Some("/global/agent"), Some("/u/me"))
+                .as_deref(),
+            Some("/proj/agent")
+        );
+    }
+
+    #[test]
+    fn global_agent_bin_applies_without_a_project_override() {
+        assert_eq!(
+            merge_agent_bin(None, Some("/global/agent"), Some("/u/me")).as_deref(),
+            Some("/global/agent")
+        );
+    }
+
+    #[test]
+    fn blank_values_are_unset_and_the_winner_expands_home() {
+        // Blank on either side is unset, never an empty path.
+        assert_eq!(merge_agent_bin(Some("   "), Some("/g"), Some("/u/me")), None);
+        assert_eq!(merge_agent_bin(Some("/p"), Some("   "), Some("/u/me")).as_deref(), Some("/p"));
+        assert_eq!(merge_agent_bin(None, None, Some("/u/me")), None);
+        // The winning value is $HOME-expanded for the resolver.
+        assert_eq!(
+            merge_agent_bin(None, Some("$HOME/bin/pi-agent"), Some("/u/me")).as_deref(),
+            Some("/u/me/bin/pi-agent")
+        );
+        assert_eq!(
+            merge_agent_bin(Some("$HOME/proj/agent"), Some("/g"), Some("/u/me")).as_deref(),
+            Some("/u/me/proj/agent")
+        );
     }
 }

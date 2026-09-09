@@ -52,11 +52,15 @@ import {
   type ArtifactFileRef,
 } from "@/modules/pi/lib/artifacts";
 import type { PiFailedSubmission, PiQueued } from "@/modules/pi/lib/piStore";
-import { CACHE_QUALIFIER_TEXT, cacheShareLabel, addUsage, turnUsageIssues } from "@/modules/pi/lib/usage";
+import { CACHE_QUALIFIER_TEXT, cacheShareLabel, addUsage, formatCost, turnUsageIssues } from "@/modules/pi/lib/usage";
 import { actionTurnKey, ledgerDiscrepancies, SESSION_LOG, useLedger, type LedgerSnapshot } from "@/modules/pi/lib/ledgerStore";
 import { LedgerActionRow, usageFooterId } from "@/modules/pi/components/blocks/ActionRow";
 import { KeystoneCard } from "./blocks/KeystoneCard";
 import { ToolStep } from "./blocks/ToolRow";
+
+// One cost format for the strip and the footer; re-exported for callers that
+// imported it from here.
+export { formatCost };
 
 type Props = {
   blocks: PiFeedItem[];
@@ -288,11 +292,6 @@ export function usageLabel(usage: PiUsage): string {
   return `${usage.input.toLocaleString()} in, ${usage.output.toLocaleString()} out`;
 }
 
-/** "$0.0031" for the small per-turn sums, "$0.92" once a run adds up. */
-export function formatCost(cost: number): string {
-  return cost >= 0.01 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(4)}`;
-}
-
 export function ErrorCard({
   block,
   retry,
@@ -372,7 +371,11 @@ function RetryCard({ block }: { block: PiRetryBlock }) {
 export function workedLabel(turn: Turn, usage: PiUsage | null): string {
   const parts: string[] = [];
   if (turn.durationMs !== null) {
-    parts.push(`Worked ${Math.max(1, Math.round(turn.durationMs / 1000))} s`);
+    // "generation", not "Worked": the interval measures the model's
+    // generation time, not the whole turn's wall clock (UX-14).
+    parts.push(
+      `generation ${Math.max(1, Math.round(turn.durationMs / 1000))} s`,
+    );
   }
   if (turn.counts.tools > 0) parts.push(`${turn.counts.tools} tools`);
   if (turn.counts.children > 0) parts.push(`${turn.counts.children} children`);
@@ -465,19 +468,17 @@ function ChildCard({
 
 /**
  * K10: the unconditional provider-neutral qualifier, on every rendered usage
- * footer including unknown usage. The sentence rides the title and
- * aria-label; the visible form is one muted glyph (aesthetic and
- * minimalist).
+ * footer including unknown usage. The exact sentence is the visible muted
+ * text on its own line under the footer (UX-14), never only a glyph or an
+ * aria-label; text-xs stays and the padding gives the line a 24 px target.
  */
 function CacheQualifier() {
   return (
     <span
       data-uat="cache-qualifier"
-      title={CACHE_QUALIFIER_TEXT}
-      aria-label={CACHE_QUALIFIER_TEXT}
-      className="text-muted-foreground"
+      className="block py-1 text-xs leading-4 text-muted-foreground"
     >
-      ?
+      {CACHE_QUALIFIER_TEXT}
     </span>
   );
 }
@@ -517,7 +518,7 @@ function ActivityFold({
         aria-label={`Inspect turn ${turn.index + 1} activity`}
         aria-expanded={open}
         onClick={onToggle}
-        className="group flex w-full items-center gap-1.5 rounded-md py-0.5 text-left text-xs text-muted-foreground hover:text-foreground"
+        className="group flex w-full items-center gap-2 rounded-md py-0.5 text-left text-xs text-muted-foreground hover:text-foreground"
       >
         {turn.status === "streaming" ? (
           <span id={footerId} tabIndex={-1}><Shimmer duration={1.4}>{streamingLabel(turn)}</Shimmer></span>
@@ -534,7 +535,6 @@ function ActivityFold({
                 {cacheShareLabel(usage)}
               </span>
             ) : null}
-            <CacheQualifier />
           </>
         )}
         <HugeiconsIcon
@@ -544,6 +544,9 @@ function ActivityFold({
           className={cn("transition-transform", open && "rotate-180")}
         />
       </button>
+      {/* Under the footer, outside the toggle: the qualifier must be
+          readable on its own and clicking it must not fold the turn. */}
+      {turn.status !== "streaming" && !usageError ? <CacheQualifier /> : null}
       {open ? (
         <div className="mt-1.5 ml-1 space-y-2 border-l border-border/60 pl-3">
           {turn.activity.map((entry, i) => (

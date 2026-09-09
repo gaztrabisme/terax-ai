@@ -346,31 +346,30 @@ export function chosenLocalEndpoints(roles: PiRoles): string[] {
 }
 
 /**
- * Probe URL for one local endpoint: `<base>/health` for the bppc proxy and
- * `/api/status` for oMLX. The base comes from the endpoints settings entry;
- * the fallbacks match the bundled models.json.tmpl defaults. A bppc base
- * carries the __BPPC_HOST__ placeholder, which the piBppcHost pref fills the
- * way a render would; a blank pref keeps the render's 127.0.0.1 fallback, so
- * the row probes what a session would actually reach.
+ * Probe URL for one local endpoint: `<base>/models`, the request the
+ * inference path itself answers (oMLX at http://127.0.0.1:8000/v1 and the
+ * llama-server proxies serve GET /v1/models with the bearer key; the bare
+ * base answers 404, and the old /health and /api/status endpoints sit
+ * outside or beside the authenticated API). The base comes from the
+ * endpoints settings entry; the fallbacks match the bundled
+ * models.json.tmpl defaults. A bppc base carries the __BPPC_HOST__
+ * placeholder, which the piBppcHost pref fills the way a render would; a
+ * blank pref keeps the render's 127.0.0.1 fallback, so the row probes what
+ * a session would actually reach.
  */
 export function probeUrlFor(
   endpoints: PiEndpointView[] | null,
   id: string,
   bppcHost?: string | null,
 ): string {
-  const path = id === "bppc" ? "/health" : "/api/status";
   const fallback =
     id === "bppc" ? "http://127.0.0.1:8080" : "http://127.0.0.1:8000";
   const host = bppcHost?.trim() || "127.0.0.1";
-  // The template rows carry the OpenAI-style /v1 base; the status endpoints
-  // of llama-server and oMLX sit at the server root, so drop that suffix.
   const base = (
     endpoints?.find((ep) => ep.id === id)?.baseUrl.trim().replace(/\/+$/, "") ??
     ""
-  )
-    .replace(/__BPPC_HOST__/g, host)
-    .replace(/\/v\d+$/, "");
-  return `${base.length > 0 ? base : fallback}${path}`;
+  ).replace(/__BPPC_HOST__/g, host);
+  return `${base.length > 0 ? base : fallback}/models`;
 }
 
 /**

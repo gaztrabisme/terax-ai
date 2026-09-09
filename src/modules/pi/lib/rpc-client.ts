@@ -1,5 +1,6 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { currentWorkspaceEnv } from "@/modules/workspace";
+import { abortLine } from "./parse";
 
 export type PiOpenOptions = {
   cwd?: string;
@@ -7,6 +8,10 @@ export type PiOpenOptions = {
   launcherDir?: string;
   /** Empty/undefined lets the Rust side resolve the binary from launcherDir. */
   program?: string;
+  /** The resolved global Settings piAgentBin: the agent binary the board
+   *  tools use. A project .pi/terax.json override wins Rust-side; an empty
+   *  or undefined value leaves the agent binary to the Rust resolver. */
+  agentBin?: string;
   args?: string[];
   env?: Record<string, string>;
   onEvent: (line: string) => void;
@@ -17,6 +22,11 @@ export type PiSessionHandle = {
   id: number;
   /** Sends one JSON command line to pi's stdin. */
   send: (line: string) => Promise<void>;
+  /** Sends pi's rpc abort command (rpc.rs "abort"): stops the run in flight
+   *  without killing the process. Stop and composer Escape both land here.
+   *  Optional so callers fall back to send(abortLine()); openPiSession
+   *  always provides it. */
+  abort?: () => Promise<void>;
   kill: () => Promise<void>;
 };
 
@@ -80,6 +90,7 @@ export async function openPiSession(
     cwd: opts.cwd ?? null,
     launcherDir: opts.launcherDir ?? null,
     program: opts.program ?? null,
+    agentBin: opts.agentBin ?? null,
     args: opts.args ?? null,
     env: opts.env ?? null,
     workspace: currentWorkspaceEnv(),
@@ -91,6 +102,7 @@ export async function openPiSession(
   return {
     id,
     send: (line) => invoke("pi_send", { id, line }),
+    abort: () => invoke("pi_send", { id, line: abortLine() }),
     kill: async () => {
       if (closed) return;
       closed = true;

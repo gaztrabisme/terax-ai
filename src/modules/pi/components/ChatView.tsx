@@ -38,7 +38,6 @@ export function ChatView({
   onBack,
   onFullscreen,
   onExpand,
-  onOpenTab,
   onWidthCommit,
   children,
 }: {
@@ -52,7 +51,6 @@ export function ChatView({
   onBack: () => void;
   onFullscreen: () => void;
   onExpand: () => void;
-  onOpenTab?: () => void;
   onWidthCommit: (width: number) => void;
   children: ReactNode;
 }) {
@@ -161,17 +159,6 @@ export function ChatView({
           </button>
         )}
         <span className="min-w-0 flex-1 truncate">{title}</span>
-        {onOpenTab && (
-          <button
-            type="button"
-            aria-label={`Open ${title} in tab`}
-            title={`Open ${title} in tab`}
-            onClick={onOpenTab}
-            className={cn(viewButtonClass, "w-auto px-2")}
-          >
-            Open in tab
-          </button>
-        )}
         {mode === "popover" && (
           <button
             type="button"

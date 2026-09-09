@@ -48,10 +48,15 @@ const BPPC_REPORT = {
   },
 };
 
-const { readFileMock, invokeMock, cwdsHandlers } = vi.hoisted(() => ({
+const { readFileMock, invokeMock, cwdsHandlers, healthCalls } = vi.hoisted(() => ({
   readFileMock: vi.fn(),
   invokeMock: vi.fn(),
   cwdsHandlers: [] as Array<(e: { payload: unknown }) => void>,
+  healthCalls: [] as Array<{
+    url: string;
+    agentDir: string | null;
+    provider: string | null;
+  }>,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -81,7 +86,7 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 
 import { PI_PREF_DEFAULTS } from "@/modules/pi/lib/providers";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { PiFirstRun } from "./PiFirstRun";
+import { modelsProbeUrl, PiFirstRun } from "./PiFirstRun";
 
 function seedPrefs(provider: string, smol: string) {
   usePreferencesStore.setState({
@@ -97,8 +102,11 @@ function seedPrefs(provider: string, smol: string) {
   });
 }
 
-/** The paths resolution, plus health answers keyed by URL: every other
- *  command and file read fails like on a bare machine. */
+/** The paths resolution, plus health answers keyed by the probed
+ *  `<base>/models` URL: every other command and file read fails like on a
+ *  bare machine. The health mock mirrors the backend contract: the probe is
+ *  asked with the endpoint base plus the runtime agent dir and provider, and
+ *  the answer echoes the exact URL that was (or would be) requested. */
 function mockBackend(
   health: Record<string, unknown>,
   report: typeof REPORT = REPORT,
@@ -129,9 +137,19 @@ function mockBackend(
       };
     }
     if (cmd === "pi_health") {
-      const url = (args as { url: string }).url;
-      if (url in health) return Promise.resolve(health[url]);
-      return { ok: false, status: null, ms: 0, error: `no probe for ${url}` };
+      const call = args as {
+        url: string;
+        agentDir: string | null;
+        provider: string | null;
+      };
+      healthCalls.push(call);
+      const probed = `${call.url.trim().replace(/\/+$/, "")}/models`;
+      const hit = health[probed] as
+        | { ok: boolean; status: number | null; ms: number; error?: string | null }
+        | undefined;
+      return hit
+        ? { ...hit, url: probed }
+        : { ok: false, status: null, ms: 0, error: `no probe for ${probed}`, url: probed };
     }
     throw new Error(`${cmd} unavailable in test`);
   });
@@ -153,6 +171,7 @@ async function openProjectTab() {
 
 beforeEach(() => {
   cwdsHandlers.length = 0;
+  healthCalls.length = 0;
   invokeMock.mockReset();
   readFileMock.mockReset();
 });
@@ -200,13 +219,13 @@ it("a failed report endpoint names the endpoint and error, with no fallback succ
   // the report endpoint is down: only the report row may stand, and red.
   mockBackend(
     {
-      "http://127.0.0.1:8080/health": {
+      "http://127.0.0.1:8080/models": {
         ok: true,
         status: 200,
         ms: 3,
         error: null,
       },
-      "http://127.0.0.1:9999/v1": {
+      "http://127.0.0.1:9999/v1/models": {
         ok: false,
         status: null,
         ms: 0,
@@ -226,10 +245,98 @@ it("a failed report endpoint names the endpoint and error, with no fallback succ
   const endpoint = await screen.findByText("Endpoint");
   expect(endpoint).toBeTruthy();
   expect(
-    screen.getByText("http://127.0.0.1:9999/v1: connection refused (project)"),
+    screen.getByText(
+      "http://127.0.0.1:9999/v1/models: connection refused (project)",
+    ),
   ).toBeTruthy();
   // The generic bppc row for the answering fallback URL is stood down.
-  expect(screen.queryByText(/127.0.0.1:8080\/health answered/)).toBeNull();
+  expect(screen.queryByText(/127.0.0.1:8080\/models answered/)).toBeNull();
+  // The probes went to GET <base>/models with the runtime agent dir and the
+  // report's provider, the same request path and key inference uses.
+  const runtimeProbe = healthCalls.find(
+    (call) => call.url === "http://127.0.0.1:9999/v1",
+  );
+  expect(runtimeProbe).toEqual({
+    url: "http://127.0.0.1:9999/v1",
+    agentDir: "/agents/runtime",
+    provider: "bppc",
+  });
+  const localProbe = healthCalls.find(
+    (call) => call.url === "http://127.0.0.1:8080",
+  );
+  expect(localProbe).toEqual({
+    url: "http://127.0.0.1:8080",
+    agentDir: "/agents/runtime",
+    provider: "bppc",
+  });
+});
+
+it("the endpoint check row shows the exact URL and the HTTP status", async () => {
+  seedPrefs("local-fixture", "");
+  mockBackend(
+    {
+      "http://127.0.0.1:9999/v1/models": {
+        ok: false,
+        status: 404,
+        ms: 2,
+        error: null,
+      },
+    },
+    REPORT,
+  );
+  render(<PiFirstRun
+    onFocusPaths={() => {}}
+    onFocusRoles={() => {}}
+    onFocusEndpoints={() => {}}
+    onSignIn={() => {}}
+    onAddKey={() => {}}
+  />);
+  await openProjectTab();
+  expect(
+    await screen.findByText(
+      "http://127.0.0.1:9999/v1/models: HTTP 404 (project)",
+    ),
+  ).toBeTruthy();
+});
+
+it("an answered endpoint check row names the probed URL with its latency", async () => {
+  seedPrefs("local-fixture", "");
+  mockBackend(
+    {
+      "http://127.0.0.1:9999/v1/models": {
+        ok: true,
+        status: 200,
+        ms: 4,
+        error: null,
+      },
+    },
+    REPORT,
+  );
+  render(<PiFirstRun
+    onFocusPaths={() => {}}
+    onFocusRoles={() => {}}
+    onFocusEndpoints={() => {}}
+    onSignIn={() => {}}
+    onAddKey={() => {}}
+  />);
+  await openProjectTab();
+  expect(
+    await screen.findByText(
+      "http://127.0.0.1:9999/v1/models answered in 4 ms (project)",
+    ),
+  ).toBeTruthy();
+});
+
+it("modelsProbeUrl appends /models with and without a trailing /v1", () => {
+  expect(modelsProbeUrl("http://127.0.0.1:8000/v1")).toBe(
+    "http://127.0.0.1:8000/v1/models",
+  );
+  expect(modelsProbeUrl("http://127.0.0.1:8080")).toBe(
+    "http://127.0.0.1:8080/models",
+  );
+  expect(modelsProbeUrl("http://127.0.0.1:8000/v1/")).toBe(
+    "http://127.0.0.1:8000/v1/models",
+  );
 });
 
 it("shows no report rows when the project carries no runtime.json", async () => {

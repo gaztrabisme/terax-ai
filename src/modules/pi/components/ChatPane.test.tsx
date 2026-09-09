@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { composerProps, invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
-  composerProps: [] as Array<{ modelAcceptsImages?: boolean }>,
+  composerProps: [] as Array<{
+    modelAcceptsImages?: boolean;
+    placeholder?: string;
+    onStop?: () => void;
+  }>,
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
@@ -15,7 +19,11 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 // transcript bodies are not. The composer mock records its props so the
 // vision-flag wiring can be asserted.
 vi.mock("./Composer", () => ({
-  Composer: (props: { modelAcceptsImages?: boolean }) => {
+  Composer: (props: {
+    modelAcceptsImages?: boolean;
+    placeholder?: string;
+    onStop?: () => void;
+  }) => {
     composerProps.push(props);
     return null;
   },
@@ -109,12 +117,96 @@ describe("ChatPane header chip", () => {
     expect(queryByText("$0.0000")).toBeNull();
   });
 
-  it("shows no cost chip when the session billed nothing", () => {
+  it("shows explicit no-turns-yet values in an idle strip (UX-14)", () => {
+    seedTab(10, initialPiSessionState());
+    const { getByText } = render(
+      <ChatPane tabId={10} onOpenChild={() => {}} />,
+    );
+    const strip = getByText("pi").closest('[data-uat="session-strip"]')!;
+    const tokens = strip.querySelector('[data-uat="turn-tokens"]')!;
+    const cost = strip.querySelector('[data-uat="session-cost"]')!;
+    expect(tokens.textContent).toBe("no turns yet");
+    expect(cost.textContent).toBe("no turns yet");
+  });
+
+  it("shows cost unknown, never a blank or $0, when the provider priced nothing", () => {
     seedTab(3, replayFixture("q7-rpc-model-error.jsonl"));
-    const { queryByText } = render(
+    const { getByText } = render(
       <ChatPane tabId={3} onOpenChild={() => {}} />,
     );
-    expect(queryByText(/^\$/)).toBeNull();
+    const strip = getByText("pi").closest('[data-uat="session-strip"]')!;
+    const cost = strip.querySelector('[data-uat="session-cost"]')!;
+    expect(cost.textContent).toBe("cost unknown");
+    expect(strip.textContent).not.toMatch(/^\$/m);
+  });
+
+  it("shows Cancelling with a disabled Stop and no New session", () => {
+    seedTab(
+      7,
+      replayFixture("q8-rpc-retry-success.jsonl", (raw) =>
+        raw.includes('"type":"message_start"'),
+      ),
+    );
+    usePiStore.setState((s) => ({
+      tabs: {
+        ...s.tabs,
+        7: {
+          ...s.tabs[7]!,
+          state: { ...s.tabs[7]!.state, status: "cancelling" },
+        },
+      },
+    }));
+    const { getByText, queryByText } = render(
+      <ChatPane tabId={7} onOpenChild={() => {}} />,
+    );
+    expect(getByText("cancelling")).toBeTruthy();
+    const stop = getByText("Stop") as HTMLButtonElement;
+    expect(stop.disabled).toBe(true);
+    expect(queryByText("New session")).toBeNull();
+    // Escape is not bound during a cancel: nothing to re-cancel.
+    expect(
+      composerProps[composerProps.length - 1]?.onStop,
+    ).toBeUndefined();
+  });
+
+  it("binds composer Escape to the stop action only while a turn is in flight", () => {
+    seedTab(8, replayFixture("q8-rpc-retry-success.jsonl"));
+    usePiStore.setState((s) => ({
+      tabs: {
+        ...s.tabs,
+        8: { ...s.tabs[8]!, state: { ...s.tabs[8]!.state, status: "thinking" } },
+      },
+    }));
+    render(<ChatPane tabId={8} onOpenChild={() => {}} />);
+    expect(typeof composerProps[composerProps.length - 1]?.onStop).toBe(
+      "function",
+    );
+  });
+
+  it("an exited process never shows a stale thinking strip or Stop", () => {
+    seedTab(9, replayFixture("q8-rpc-retry-success.jsonl"));
+    usePiStore.setState((s) => ({
+      tabs: {
+        ...s.tabs,
+        9: {
+          ...s.tabs[9]!,
+          exited: true,
+          exitCode: 0,
+          session: null,
+          state: { ...s.tabs[9]!.state, status: "thinking" },
+        },
+      },
+    }));
+    const { getByText, queryByText } = render(
+      <ChatPane tabId={9} onOpenChild={() => {}} />,
+    );
+    expect(getByText("exited (0)")).toBeTruthy();
+    // The exited placeholder rides the composer props (its body is mocked).
+    expect(
+      composerProps[composerProps.length - 1]?.placeholder,
+    ).toBe("Session exited");
+    expect(getByText("New session")).toBeTruthy();
+    expect(queryByText("Stop")).toBeNull();
   });
 });
 

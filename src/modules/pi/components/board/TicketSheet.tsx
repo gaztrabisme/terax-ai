@@ -1,14 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
+  SheetClose,
   SheetContent,
   SheetFooter,
   SheetHeader,
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
+import { Cancel01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { cn } from "@/lib/utils";
 import {
@@ -157,46 +160,60 @@ export function TicketSheet({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [armed, setArmed] = useState<BoardVerb | null>(null);
   const [running, setRunning] = useState(false);
+  /** True while a post-action `show --json` refetch is in flight. */
+  const [refreshing, setRefreshing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const armTimer = useRef<number | null>(null);
+  /** Sequence guard: only the latest show command may commit ticket state. */
+  const loadSeq = useRef(0);
+
+  /**
+   * One `show <id> --json` round trip. Commits the parsed ticket, or the
+   * harness error on a nonzero exit or unparseable output. Returns whether a
+   * ticket was committed; superseded runs commit nothing.
+   */
+  const fetchTicket = useCallback(async (): Promise<boolean> => {
+    if (!ticketId || !cwd) return false;
+    const run = ++loadSeq.current;
+    let out: CommandOutput;
+    try {
+      const bin = await ensureAgentBin(agentBin);
+      out = await invoke<CommandOutput>("shell_run_command", {
+        command: boardShowCommand(boardBin, cwd, ticketId, bin),
+        cwd,
+        timeoutSecs: 15,
+        workspace: currentWorkspaceEnv(),
+      });
+    } catch (e: unknown) {
+      if (run === loadSeq.current)
+        setLoadError(e instanceof Error ? e.message : String(e));
+      return false;
+    }
+    if (run !== loadSeq.current) return false;
+    try {
+      setTicket(parseTicket(out.stdout));
+      setLoadError(null);
+      return true;
+    } catch {
+      setLoadError(
+        out.stderr.trim() || `board exited ${out.exit_code ?? "with no code"}`,
+      );
+      return false;
+    }
+  }, [ticketId, cwd, boardBin, agentBin]);
 
   useEffect(() => {
     if (!ticketId || !cwd) {
       setTicket(null);
       setLoadError(null);
+      setRefreshing(false);
+      loadSeq.current += 1;
       return;
     }
-    let alive = true;
     setTicket(null);
     setLoadError(null);
-    ensureAgentBin(agentBin)
-      .then((bin) =>
-        invoke<CommandOutput>("shell_run_command", {
-          command: boardShowCommand(boardBin, cwd, ticketId, bin),
-          cwd,
-          timeoutSecs: 15,
-          workspace: currentWorkspaceEnv(),
-        }),
-      )
-      .then((out) => {
-        if (!alive) return;
-        try {
-          setTicket(parseTicket(out.stdout));
-          setLoadError(null);
-        } catch {
-          setLoadError(
-            out.stderr.trim() ||
-              `board exited ${out.exit_code ?? "with no code"}`,
-          );
-        }
-      })
-      .catch((e: unknown) => {
-        if (alive) setLoadError(e instanceof Error ? e.message : String(e));
-      });
-    return () => {
-      alive = false;
-    };
-  }, [ticketId, cwd, boardBin]);
+    void fetchTicket();
+  }, [ticketId, cwd, fetchTicket]);
 
   useEffect(() => {
     return () => {
@@ -239,6 +256,11 @@ export function TicketSheet({
           return;
         }
         onRefresh();
+        // The committed state is authoritative (design.md section 3.2): show
+        // pending on the verbs until the exact ticket's refetch returns with
+        // the committed state and gates, or the harness error.
+        setRefreshing(true);
+        void fetchTicket().finally(() => setRefreshing(false));
       })
       .catch((e: unknown) => {
         setRunning(false);
@@ -263,10 +285,24 @@ export function TicketSheet({
     <Sheet open={ticketId !== null} onOpenChange={onOpenChange}>
       <SheetContent
         side="right"
+        showCloseButton={false}
         data-uat="ticket-sheet"
         data-uat-key={ticketId ?? undefined}
         className="flex w-[480px] flex-col gap-0 p-0 sm:max-w-[480px]"
       >
+        {/* The sheet's own dismiss (UX-15): "Close sheet", distinct from the
+            board verb, so the two Close controls never share a name. */}
+        <SheetClose asChild>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="absolute top-4 right-4 z-10 bg-secondary"
+            aria-label="Close sheet"
+            title="Close sheet"
+          >
+            <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} />
+          </Button>
+        </SheetClose>
         <SheetHeader className="gap-1 border-b border-border/60 px-4 py-3">
           <SheetTitle className="flex items-center gap-2 text-[14px]">
             <span className="font-mono">{ticketId}</span>
@@ -403,7 +439,12 @@ export function TicketSheet({
             <div className="flex w-full flex-wrap gap-2">
               {verbs.map((verb) => {
                 const authority = authorities[verb];
-                const disabled = running || !authority.allowed;
+                const disabled = running || refreshing || !authority.allowed;
+                // UX-15: the board Close verb is named "Close ticket" so it
+                // never collides with the sheet's "Close sheet" dismiss; the
+                // tooltip matches unless a harness refusal reason stands.
+                const contextualName =
+                  verb === "close" ? "Close ticket" : VERB_LABELS[verb];
                 return (
                   <Button
                     key={verb}
@@ -415,18 +456,27 @@ export function TicketSheet({
                       armed === verb ? "board-confirm" : VERB_UAT_IDS[verb]
                     }
                     data-uat-key={verb}
+                    data-pending={refreshing ? "true" : undefined}
+                    aria-busy={refreshing || undefined}
                     variant={armed === verb ? "destructive" : "outline"}
                     disabled={disabled}
                     aria-disabled={disabled || undefined}
+                    aria-label={verb === "close" ? contextualName : undefined}
                     title={
-                      disabled && authority.reason ? authority.reason : undefined
+                      disabled && authority.reason
+                        ? authority.reason
+                        : verb === "close"
+                          ? contextualName
+                          : undefined
                     }
                     onClick={() => runAction(verb)}
                     className="text-[12px]"
                   >
-                    {armed === verb
-                      ? `${VERB_LABELS[verb]}: click again`
-                      : VERB_LABELS[verb]}
+                    {refreshing
+                      ? `${VERB_LABELS[verb]} pending`
+                      : armed === verb
+                        ? `${VERB_LABELS[verb]}: click again`
+                        : VERB_LABELS[verb]}
                   </Button>
                 );
               })}
