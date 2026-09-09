@@ -46,8 +46,9 @@ let releaseDraft: (content: string) => void = () => {};
 
 beforeEach(() => {
   invokeMock.mockReset();
-  invokeMock.mockImplementation((cmd: string) => {
+  invokeMock.mockImplementation((cmd: string, args?: { path?: string }) => {
     if (cmd === "fs_read_file") {
+      if (!args?.path?.endsWith(".md")) return Promise.reject(new Error("no such file"));
       return new Promise((resolve) => {
         releaseDraft = (content) => resolve({ kind: "text", content });
       });

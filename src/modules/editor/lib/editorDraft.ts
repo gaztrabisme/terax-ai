@@ -5,6 +5,7 @@ import {
   draftPath,
   findEditorDraft,
   loadEditorDraft,
+  loadDraftRecord,
   saveEditorDraft,
   sha256Hex,
 } from "@/modules/pi/lib/drafts";
@@ -98,10 +99,14 @@ export function createEditorDraftController({
   /** useDocument recover hook: always captures the base hash, then offers a
    * draft buffer when one exists for this file. */
   const recover = async (diskContent: string): Promise<RecoveryPayload | null> => {
-    loaded = true;
     activeSid = sid;
     baseSha256 = await sha256Hex(diskContent);
-    const found = await findEditorDraft(cwd, path);
+    const own = await loadDraftRecord(cwd, sid);
+    if (own && (own.kind !== "editor" || own.meta.path !== path)) {
+      throw new Error(`Draft recovery failed: ${draftPath(cwd, sid)} does not belong to ${path}`);
+    }
+    const found = own?.kind === "editor" ? own : await findEditorDraft(cwd, path);
+    loaded = true;
     if (!found) return null;
     if (found.markdown === diskContent) {
       // The draft matches the file on disk: nothing unsaved to restore.

@@ -294,6 +294,8 @@ function scheduleSave(cwd: string): void {
 
 async function writeDoc(cwd: string): Promise<void> {
   const path = uiStatePath(cwd);
+  await loadUiState(cwd);
+  if (!loaded.has(cwd)) throw new Error(`Could not load ${path} before saving`);
   if (!ensuredDirs.has(cwd)) {
     // fs_write_file renames within the target's parent, so `.pi` must exist
     // first (the same preamble the drafts use).
@@ -357,24 +359,32 @@ async function retryUiStateSave(): Promise<void> {
 }
 
 const loaded = new Set<string>();
+const loading = new Map<string, Promise<void>>();
 
 function mergeDocs(base: UiStateDoc, overlay: UiStateDoc): UiStateDoc {
   return {
     ...base,
     ...overlay,
+    windows: { ...base.windows, ...overlay.windows },
     views: { ...base.views, ...overlay.views },
     folds: { ...base.folds, ...overlay.folds },
   };
 }
 
 /**
- * Read <cwd>/.pi/ui-state.json once per cwd. A missing or unusable file
- * falls back to the one-time localStorage import, then to defaults, and
- * schedules the startup write so the file exists after the first open.
+ * Read once per cwd. Missing files use the one-time layout import or defaults.
+ * Unreadable or invalid records stay on disk with a visible recovery error.
  */
-export async function loadUiState(cwd: string): Promise<void> {
-  if (loaded.has(cwd)) return;
-  loaded.add(cwd);
+export function loadUiState(cwd: string): Promise<void> {
+  if (loaded.has(cwd)) return Promise.resolve();
+  const pending = loading.get(cwd);
+  if (pending) return pending;
+  const load = readUiState(cwd).finally(() => loading.delete(cwd));
+  loading.set(cwd, load);
+  return load;
+}
+
+async function readUiState(cwd: string): Promise<void> {
   const path = uiStatePath(cwd);
   let parsed: UiStateDoc | null = null;
   try {
@@ -385,9 +395,12 @@ export async function loadUiState(cwd: string): Promise<void> {
     if (res.kind === "text" && typeof res.content === "string") {
       parsed = parseUiState(res.content);
     }
-  } catch {
-    // First open on a fresh project has no file yet.
-    parsed = null;
+    if (!parsed) throw new Error("Invalid UI state record");
+  } catch (error) {
+    if (!/no such file|not found|os error [23]\b/i.test(String(error))) {
+      useUiStateStore.setState({ error: { path, message: messageOf(error) } });
+      return;
+    }
   }
   const seeded = consumeLayoutBucketFor(cwd);
   const state = useUiStateStore.getState();
@@ -404,8 +417,20 @@ export async function loadUiState(cwd: string): Promise<void> {
   }
   // Edits made before the read finished win over the file snapshot.
   const next = previous && touched.has(cwd) ? mergeDocs(base, previous) : base;
-  useUiStateStore.setState({ docs: { ...state.docs, [cwd]: next } });
+  loaded.add(cwd);
+  useUiStateStore.setState({
+    docs: { ...state.docs, [cwd]: next },
+    error: state.error?.path === path ? null : state.error,
+  });
   if (!parsed) scheduleSave(cwd); // startup reset writes the fresh file
+}
+
+export async function loadWindowState(cwd: string): Promise<UiWindowState | undefined> {
+  await loadUiState(cwd);
+  if (!loaded.has(cwd)) {
+    throw new Error(`${uiStatePath(cwd)}: ${useUiStateStore.getState().error?.message ?? "Recovery failed"}`);
+  }
+  return useUiStateStore.getState().docs[cwd]?.windows[MAIN_WINDOW_ID];
 }
 
 type UiStateStore = {
@@ -485,8 +510,8 @@ const lastWindows = new Map<string, string>();
 /**
  * Record the open tabs of a window into the project's ui-state doc (K11c,
  * design.md row "Layout and view state"). Called by the tab store on every
- * tab change; a snapshot identical to the last one schedules no write. The
- * record is write-only in this unit: a later unit restores from it.
+ * tab change; a snapshot identical to the last one schedules no write.
+ * Startup reads this record before creating project tabs.
  */
 export function recordWindowTabs(
   cwd: string,
@@ -510,6 +535,7 @@ export function recordWindowTabs(
 /** Test seam: forget docs, pending writes, loaded cwds and the import flag. */
 export function resetUiStateForTests(): void {
   loaded.clear();
+  loading.clear();
   touched.clear();
   queue.length = 0;
   ensuredDirs.clear();

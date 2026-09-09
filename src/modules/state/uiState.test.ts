@@ -12,6 +12,8 @@ vi.mock("@/modules/workspace", () => ({
 import { UAT_IDS_K11_STATEFUL } from "@/lib/uatIds";
 import {
   defaultUiState,
+  loadUiState,
+  loadWindowState,
   parseUiState,
   PI_LAYOUT_IMPORTED_KEY,
   PI_LAYOUT_STORAGE_KEY,
@@ -251,15 +253,19 @@ describe("uiState localStorage import", () => {
     expect(writes()).toHaveLength(0);
   });
 
-  it("treats corrupt and wrong-version files as absent", async () => {
+  it("preserves corrupt and wrong-version files with a visible storage error", async () => {
     const files = fakeProjectFiles();
     files.set(uiStatePath("/w"), "{not json");
     await useUiStateStore.getState().load("/w");
-    expect(useUiStateStore.getState().docs["/w"]).toEqual(defaultUiState());
+    expect(useUiStateStore.getState().docs["/w"]).toBeUndefined();
+    expect(useUiStateStore.getState().error?.path).toBe(uiStatePath("/w"));
 
     files.set(uiStatePath("/v"), JSON.stringify({ v: 2 }));
     await useUiStateStore.getState().load("/v");
-    expect(useUiStateStore.getState().docs["/v"]).toEqual(defaultUiState());
+    expect(useUiStateStore.getState().docs["/v"]).toBeUndefined();
+    expect(useUiStateStore.getState().error?.path).toBe(uiStatePath("/v"));
+    await vi.advanceTimersByTimeAsync(750);
+    expect(writes()).toHaveLength(0);
 
     expect(parseUiState(null)).toBeNull();
     expect(parseUiState("42")).toBeNull();
@@ -279,6 +285,26 @@ describe("uiState localStorage import", () => {
 });
 
 describe("uiState windows record (K11c)", () => {
+  it("waits for a concurrent load and keeps window identities through an early layout update", async () => {
+    const files = fakeProjectFiles();
+    const snapshot = { ...defaultUiState(), windows: {
+      main: { tabs: [{ id: "durable-chat", kind: "pi", cwd: "/w" }], activeTabId: "durable-chat" },
+    } };
+    let release!: (value: { kind: string; content: string }) => void;
+    invoke.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const first = loadUiState("/w");
+    const second = loadWindowState("/w");
+    useUiStateStore.getState().update("/w", { sessionsQuery: "typed during load" });
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "fs_read_file")).toHaveLength(1);
+    release({ kind: "text", content: JSON.stringify(snapshot) });
+    await first;
+    expect(await second).toEqual(snapshot.windows.main);
+    await useUiStateStore.getState().retry();
+    const saved = JSON.parse(files.get(uiStatePath("/w"))!);
+    expect(saved.windows.main).toEqual(snapshot.windows.main);
+    expect(saved.sessionsQuery).toBe("typed during load");
+  });
+
   it("records the window's tabs and active tab, keeping other fields", async () => {
     const files = fakeProjectFiles();
     files.set(

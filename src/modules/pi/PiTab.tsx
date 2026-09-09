@@ -49,13 +49,14 @@ import {
 } from "./lib/artifacts";
 import { sha256Hex } from "./lib/drafts";
 import { uiStatePath, useUiStateStore } from "@/modules/state/uiState";
+import type { DraftRecoveryProps } from "@/modules/tabs/RecoverableDrafts";
 import { usePiLayout } from "./lib/layoutStore";
 import { messageBlocks } from "./lib/parse";
 import { usePiStore } from "./lib/piStore";
 import { PI_MODULE_PREFS_DEFAULTS } from "./lib/settingsSchema";
 import { groupTurns } from "./lib/turns";
 
-type StackProps = {
+type StackProps = DraftRecoveryProps & {
   tabs: Tab[];
   activeId: number;
   onOpenChild: (path: string) => void;
@@ -70,7 +71,12 @@ type StackProps = {
 
 // Keep-alive slot: every pi tab stays mounted while hidden so the RPC
 // stream keeps filling the store when the user is on another tab.
-export function PiStack({ tabs, activeId, onOpenChild }: StackProps) {
+export function PiStack({
+  tabs,
+  activeId,
+  onOpenChild,
+  onRecoverDraft,
+}: StackProps) {
   const pis = tabs.filter((t): t is PiTabData => t.kind === "pi");
   if (pis.length === 0) return null;
   return (
@@ -85,7 +91,14 @@ export function PiStack({ tabs, activeId, onOpenChild }: StackProps) {
             t.id !== activeId && "invisible pointer-events-none",
           )}
         >
-          <PiTab tabId={t.id} cwd={t.cwd} active={t.id === activeId} onOpenChild={onOpenChild} />
+          <PiTab
+            tabId={t.id}
+            cwd={t.cwd}
+            active={t.id === activeId}
+            openDraftIds={tabs.flatMap((tab) => tab.sid ? [tab.sid] : [])}
+            onRecoverDraft={onRecoverDraft}
+            onOpenChild={onOpenChild}
+          />
         </div>
       ))}
     </div>
@@ -97,8 +110,10 @@ export function PiTab({
   cwd,
   active,
   onOpenChild,
+  openDraftIds,
+  onRecoverDraft,
   launcherDir = PI_MODULE_PREFS_DEFAULTS.launcherDir,
-}: {
+}: DraftRecoveryProps & {
   tabId: number;
   cwd?: string;
   /** Whether this tab is the visible one; only it mounts the run graph. */
@@ -514,6 +529,8 @@ export function PiTab({
             cwd={cwd}
             onOpenChild={onOpenChild}
             artifactFiles={artifactFiles}
+            openDraftIds={openDraftIds}
+            onRecoverDraft={onRecoverDraft}
           />
         </div>
         {view && (

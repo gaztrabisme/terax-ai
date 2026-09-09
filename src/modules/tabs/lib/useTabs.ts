@@ -12,7 +12,8 @@ import {
   splitLeaf,
 } from "@/modules/terminal/lib/panes";
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
-import { recordWindowTabs } from "@/modules/state/uiState";
+import { loadWindowState, recordWindowTabs } from "@/modules/state/uiState";
+import { loadDraftRecord } from "@/modules/pi/lib/drafts";
 import { mintSid, registerStableId } from "./sid";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
@@ -42,6 +43,7 @@ export type EditorTab = {
   kind: "editor";
   title: string;
   path: string;
+  cwd?: string;
   dirty: boolean;
   /**
    * True while the tab is in the transient "preview" state — opened by a
@@ -65,6 +67,7 @@ export type PiTab = {
   kind: "pi";
   title: string;
   cwd?: string;
+  sessionId?: string;
 };
 
 /** Full-window kanban for a project's board. One per cwd. */
@@ -154,7 +157,7 @@ function basename(path: string): string {
 }
 
 export function useTabs(initial?: Partial<TerminalTab>) {
-  const [tabs, setTabs] = useState<Tab[]>(() => {
+  const [tabs, setTabsState] = useState<Tab[]>(() => {
     const tabId = 1;
     const leafId = 2;
     const sid = mintSid();
@@ -175,9 +178,11 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const nextIdRef = useRef(3);
   const tabsRef = useRef(tabs);
 
-  useEffect(() => {
-    tabsRef.current = tabs;
-  }, [tabs]);
+  const setTabs = useCallback((update: Tab[] | ((current: Tab[]) => Tab[])) => {
+    const next = typeof update === "function" ? update(tabsRef.current) : update;
+    tabsRef.current = next;
+    setTabsState(next);
+  }, []);
 
   const newTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
@@ -235,6 +240,10 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const openFileTab = useCallback((path: string, pin = true) => {
     let targetId: number | null = null;
     setTabs((curr) => {
+      const project = curr.find((tab) =>
+        (tab.kind === "pi" || tab.kind === "board" || tab.kind === "run-graph") && tab.cwd,
+      );
+      const cwd = project && "cwd" in project ? project.cwd : undefined;
       if (pin) {
         // Persistent open: find any existing editor tab, pin it if needed.
         const existing = curr.find(
@@ -261,6 +270,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             kind: "editor",
             title: basename(path),
             path,
+            cwd,
             dirty: false,
             preview: false,
           } satisfies EditorTab,
@@ -298,6 +308,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           kind: "editor",
           title: basename(path),
           path,
+          cwd,
           dirty: false,
           preview: true,
         };
@@ -377,6 +388,77 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     setActiveId(id);
     return id;
   }, []);
+
+  const projectRestores = useRef(new Map<string, Promise<void>>());
+  const restoreProjectTabs = useCallback((cwd: string): Promise<void> => {
+    const pending = projectRestores.current.get(cwd);
+    if (pending) return pending;
+    const restore = (async () => {
+      const windowState = await loadWindowState(cwd);
+      const records = (windowState?.tabs ?? []).filter((tab) =>
+        (tab.kind === "pi" || tab.kind === "editor") && (!tab.cwd || tab.cwd === cwd),
+      );
+      const sids = new Set<string>();
+      for (const tab of records) {
+        if (!/^[a-zA-Z0-9_-]+$/.test(tab.id) || sids.has(tab.id) || (tab.kind === "editor" && !tab.path)) {
+          throw new Error(`Tab recovery failed for ${tab.path ?? tab.id} in ${cwd}/.pi/ui-state.json`);
+        }
+        sids.add(tab.id);
+      }
+      const restored: Tab[] = records
+        .filter((tab) => !tabsRef.current.some((open) => open.sid === tab.id))
+        .map((tab): Tab => {
+          const id = nextIdRef.current++;
+          registerStableId(id, tab.id);
+          return tab.kind === "pi"
+            ? { id, sid: tab.id, kind: "pi", title: "pi", cwd, sessionId: tab.sessionId }
+            : { id, sid: tab.id, kind: "editor", title: basename(tab.path!), path: tab.path!, cwd, dirty: false, preview: false };
+        });
+      const next = [...tabsRef.current, ...restored];
+      let chat = next.find((tab) => tab.kind === "pi" && tab.cwd === cwd && tab.sid === windowState?.activeTabId)
+        ?? next.find((tab) => tab.kind === "pi" && tab.cwd === cwd);
+      if (!chat) {
+        const id = nextIdRef.current++;
+        const sid = mintSid();
+        registerStableId(id, sid);
+        chat = { id, sid, kind: "pi", title: "pi", cwd };
+        next.push(chat);
+      }
+      tabsRef.current = next;
+      setTabs(next);
+      setActiveId(chat.id);
+    })().catch((error) => {
+      projectRestores.current.delete(cwd);
+      throw error;
+    });
+    projectRestores.current.set(cwd, restore);
+    return restore;
+  }, []);
+
+  const recoverDraft = useCallback(async (cwd: string, sid: string): Promise<void> => {
+    const record = await loadDraftRecord(cwd, sid);
+    if (!record) throw new Error(`${cwd}/.pi/drafts/${sid}.md: Draft is missing`);
+    const existing = tabsRef.current.find((tab) => tab.sid === sid);
+    if (existing) {
+      setActiveId(existing.id);
+      return;
+    }
+    const id = nextIdRef.current++;
+    registerStableId(id, sid);
+    const tab: Tab = record.kind === "chat"
+      ? { id, sid, kind: "pi", title: "pi", cwd }
+      : { id, sid, kind: "editor", title: basename(record.meta.path), path: record.meta.path, cwd, dirty: false, preview: false };
+    const next = [...tabsRef.current, tab];
+    tabsRef.current = next;
+    setTabs(next);
+    setActiveId(id);
+  }, []);
+
+  const returnToChat = useCallback((cwd?: string) => {
+    const chat = tabsRef.current.find((tab) => tab.kind === "pi" && (!cwd || tab.cwd === cwd));
+    if (chat) setActiveId(chat.id);
+    else newPiTab(cwd);
+  }, [newPiTab]);
 
   /** Open (or reuse + activate) the project's board tab. One per cwd. */
   const openBoardTab = useCallback((cwd: string) => {
@@ -800,8 +882,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return closedTab;
   }, []);
 
-  // K11c: mirror the open tabs into the project's ui-state.json so a later
-  // unit can restore them (nothing reads windows back yet). The project is
+  // Mirror the open tabs after loading the project's saved window. The project is
   // the first project-scoped cwd in tab order: pi, board and run-graph tabs
   // carry it, while a terminal's cwd is a shell location, not the project.
   const projectCwd = useMemo(() => {
@@ -818,18 +899,28 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     const activeSid =
       tabs.find((t) => t.id === activeId)?.sid ?? tabs[0]?.sid;
     if (!activeSid) return;
-    recordWindowTabs(
-      projectCwd,
-      tabs.map((t) => ({
-        id: t.sid ?? String(t.id),
-        kind: t.kind,
-        ...("cwd" in t && t.cwd !== undefined && { cwd: t.cwd }),
-        ...(t.kind !== "terminal" &&
-          t.kind !== "board" &&
-          "path" in t && { path: t.path }),
-      })),
-      activeSid,
-    );
+    let alive = true;
+    void loadWindowState(projectCwd).then(() => {
+      if (!alive) return;
+      recordWindowTabs(
+        projectCwd,
+        tabs.map((t) => ({
+          id: t.sid ?? String(t.id),
+          kind: t.kind,
+          ...(t.kind === "pi" && t.sessionId && { sessionId: t.sessionId }),
+          ...("cwd" in t && t.cwd !== undefined && { cwd: t.cwd }),
+          ...(t.kind !== "terminal" &&
+            t.kind !== "board" &&
+            "path" in t && { path: t.path }),
+        })),
+        activeSid,
+      );
+    }).catch(() => {
+      // The state store keeps its path-bearing error visible in the shell.
+    });
+    return () => {
+      alive = false;
+    };
   }, [tabs, activeId, projectCwd]);
 
   const resetWorkspace = useCallback((cwd?: string) => {
@@ -868,6 +959,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     pinTab,
     newMarkdownTab,
     newPiTab,
+    restoreProjectTabs,
+    recoverDraft,
+    returnToChat,
     openBoardTab,
     openRunGraphTab,
     openAgentTranscriptTab,

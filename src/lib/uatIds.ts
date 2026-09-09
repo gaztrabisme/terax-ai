@@ -203,6 +203,11 @@ export const UAT_IDS_K4_STATEFUL: UatStatefulEntry[] = [
     state: "an open editor tab with its document loaded",
   },
   {
+    id: "draft-recover",
+    file: "src/modules/tabs/RecoverableDrafts.tsx",
+    state: "a project draft whose stable id belongs to no open tab",
+  },
+  {
     id: "editor-input",
     file: "src/modules/editor/EditorPane.tsx",
     state: "an open editor tab with its document loaded",

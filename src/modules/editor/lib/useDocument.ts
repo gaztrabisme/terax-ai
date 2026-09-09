@@ -110,7 +110,7 @@ export function useDocument({
           let recovered = false;
           const hook = recoverRef.current;
           if (hook) {
-            const rec = await hook(res.content).catch(() => null);
+            const rec = await hook(res.content);
             if (cancelled) return;
             if (rec) {
               content = rec.content;

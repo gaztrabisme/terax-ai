@@ -12,7 +12,8 @@ import { currentWorkspaceEnv } from "@/modules/workspace";
 import {
   clearDraft,
   emptyChatMeta,
-  loadDraft,
+  draftPath,
+  loadDraftRecord,
   loadDraftMeta,
   saveDraft,
   saveDraftMeta,
@@ -312,12 +313,20 @@ export function Composer({
   // numeric id is only the fallback for renders outside the store (tests);
   // in-app every tab registers its stable id at creation.
   const draftKey = stableIdOf(tabId) ?? String(tabId);
+  const recoveryKey = cwd ? `${cwd}/${draftKey}` : null;
+  const [recoveredKey, setRecoveredKey] = useState<string | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [recoveryAttempt, setRecoveryAttempt] = useState(0);
+  const recovering = recoveredKey !== recoveryKey;
+  const recoveryReadyRef = useRef(!recovering);
+  recoveryReadyRef.current = !recovering;
+  const pendingInsertions = useRef<InsertDraftDetail[]>([]);
   const stopRef = useRef(onStop);
   stopRef.current = onStop;
   const submitRef = useRef(onSubmit);
   submitRef.current = onSubmit;
   const disabledRef = useRef(disabled);
-  disabledRef.current = disabled;
+  disabledRef.current = disabled || recovering;
   const chipRef = useRef<HTMLSpanElement>(null);
   const { model, smol, provider } = useModelChip(chipRef);
   // UX-21: one details affordance for the exact provider/model/role values.
@@ -661,6 +670,7 @@ export function Composer({
         "data-placeholder": placeholder,
         "aria-label": "pi composer",
         "data-uat": "composer-input",
+        tabindex: "0",
       },
     },
   });
@@ -771,11 +781,13 @@ export function Composer({
   }, [editor]);
 
   useEffect(() => {
-    if (!cwd) return;
+    if (!editor || !cwd) return;
     let alive = true;
-    void loadDraftMeta(cwd, draftKey).then(async (meta) => {
-      if (!alive || !meta || meta.attachments.length === 0) return;
-      metaRef.current = meta;
+    setRecoveryError(null);
+    void loadDraftRecord(cwd, draftKey).then(async (record) => {
+      if (!alive) return;
+      if (record?.kind === "editor") throw new Error("This draft belongs to an editor tab");
+      const meta = record?.meta ?? emptyChatMeta();
       const base = cwd.replace(/[\\/]+$/, "");
       const restored: PendingImage[] = [];
       for (const att of meta.attachments) {
@@ -787,8 +799,8 @@ export function Composer({
             { path: `${base}/${att.path}`, workspace: currentWorkspaceEnv() },
           );
           data = bytes.base64;
-        } catch {
-          error = `attachment file is missing: ${att.path}`;
+        } catch (reason) {
+          error = `Could not recover attachment ${att.path}: ${String(reason)}`;
         }
         pendingImageSeq += 1;
         restored.push({
@@ -805,46 +817,35 @@ export function Composer({
         });
       }
       if (!alive) return;
-      setChips([...imagesRef.current, ...restored]);
-      // Everything restored is queued again: the record states normalize to
-      // "draft" and a prior submission id no longer names a live attempt.
-      persistMeta({
-        v: 1,
+      metaRef.current = {
+        ...meta,
         submissionId: null,
         attachments: meta.attachments.map((a) => ({ ...a, state: "draft" })),
-        sources: meta.sources,
-      });
+      };
+      if (record?.markdown) editor.commands.setContent(record.markdown, { contentType: "markdown" });
+      setChips(restored);
+      const failures = restored.flatMap((chip) => chip.error ? [chip.error] : []);
+      setRecoveryError(failures.length ? failures.join("; ") : null);
+      setRecoveredKey(recoveryKey);
+    }).catch((reason) => {
+      if (alive) setRecoveryError(`${draftPath(cwd, draftKey)}: ${String(reason)}`);
     });
     return () => {
       alive = false;
     };
-  }, [cwd, draftKey]);
-
-  // Restore the persisted draft once, before the user types. K13: the
-  // record's queued attachments come back as path-backed chips; a draft
-  // file that cannot be read keeps its chip with the missing-file error
-  // instead of silently dropping the record's evidence.
-  useEffect(() => {
-    if (!editor || !cwd) return;
-    let alive = true;
-    void loadDraft(cwd, draftKey, { migrateFrom: tabId }).then((md) => {
-      if (alive && md && editor.isEmpty) {
-        editor.commands.setContent(md, { contentType: "markdown" });
-      }
-    });
-    return () => {
-      alive = false;
-    };
-  }, [editor, cwd, draftKey, tabId]);
+  }, [editor, cwd, draftKey, recoveryKey, recoveryAttempt]);
 
   // Debounced autosave; cleared on submit by clearDraft.
   useEffect(() => {
     if (!editor || !cwd) return;
     let timer: number | undefined;
     const onUpdate = () => {
+      if (!recoveryReadyRef.current) return;
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
-        void saveDraft(cwd, draftKey, editor.getMarkdown());
+        void saveDraft(cwd, draftKey, editor.getMarkdown()).catch((reason) => {
+          setNotice(`Could not save ${draftPath(cwd, draftKey)}: ${String(reason)}`);
+        });
       }, 500);
     };
     editor.on("update", onUpdate);
@@ -866,6 +867,10 @@ export function Composer({
       const detail = (e as CustomEvent<InsertDraftDetail>).detail;
       if (!detail || detail.tabId !== tabId) return;
       if (typeof detail.text !== "string" || detail.text.length === 0) return;
+      if (!recoveryReadyRef.current) {
+        pendingInsertions.current.push(detail);
+        return;
+      }
       const existing = editor.getMarkdown();
       if (existing.length === 0) {
         editor.commands.setContent(detail.text, { contentType: "markdown" });
@@ -906,6 +911,13 @@ export function Composer({
     };
   }, [editor, cwd, draftKey, tabId]);
 
+  useEffect(() => {
+    if (recovering) return;
+    for (const detail of pendingInsertions.current.splice(0)) {
+      window.dispatchEvent(new CustomEvent(INSERT_DRAFT_EVENT, { detail }));
+    }
+  }, [recovering]);
+
   // A send pi refused (success:false response, or the write threw) and a
   // queued Remove hand their text back through the store: put it and its
   // image chips into the empty editor once, then clear the field so it
@@ -918,7 +930,7 @@ export function Composer({
   const rejectedDraft = usePiStore((s) => s.tabs[tabId]?.rejectedDraft ?? null);
   const clearRejectedDraft = usePiStore((s) => s.clearRejectedDraft);
   useEffect(() => {
-    if (!editor || !rejectedDraft) return;
+    if (!editor || !rejectedDraft || recovering) return;
     if (!editor.isEmpty) return;
     if (rejectedDraft.text) {
       editor.commands.setContent(rejectedDraft.text, {
@@ -951,11 +963,11 @@ export function Composer({
       if (!chip.draftPath) void writeChipDraft(chip).then(applyChipUpdate);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor, rejectedDraft, clearRejectedDraft, tabId]);
+  }, [editor, rejectedDraft, clearRejectedDraft, tabId, recovering]);
 
   useEffect(() => {
-    editor?.setEditable(!disabled);
-  }, [editor, disabled]);
+    editor?.setEditable(!disabled && !recovering);
+  }, [editor, disabled, recovering]);
 
   return (
     <div
@@ -964,6 +976,13 @@ export function Composer({
         "shrink-0 border-t border-border/60 p-2",
         dragActive && "rounded-md ring-1 ring-ring",
       )}
+      onKeyDownCapture={(event) => {
+        if (recovering && event.key === "Escape" && stopRef.current) {
+          event.preventDefault();
+          event.stopPropagation();
+          stopRef.current();
+        }
+      }}
       onPaste={(e) => {
         const items = Array.from(e.clipboardData?.items ?? []);
         const files = items
@@ -996,6 +1015,13 @@ export function Composer({
         void addFiles(files);
       }}
     >
+      {recovering && !recoveryError && <p aria-live="polite" className="mb-1.5 text-xs text-muted-foreground">Recovering draft...</p>}
+      {recoveryError && (
+        <div role="alert" className="mb-1.5 text-xs text-destructive">
+          Draft recovery failed: {recoveryError}
+          {recovering && <button type="button" className="ml-2 underline" onClick={() => setRecoveryAttempt((attempt) => attempt + 1)}>Retry recovery</button>}
+        </div>
+      )}
       {images.length > 0 ? (
         <div className="mb-1.5 flex flex-wrap items-start gap-2">
           {images.map((img) => (
@@ -1095,7 +1121,7 @@ export function Composer({
           aria-label="Attach images"
           title="Attach images"
           data-uat="attach-images"
-          disabled={disabled}
+          disabled={disabled || recovering}
           onClick={() => void pickImages()}
           className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border/60 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
         >
@@ -1154,7 +1180,7 @@ export function Composer({
           type="button"
           data-uat="send-button"
           onClick={() => performSubmitRef.current()}
-          disabled={disabled}
+          disabled={disabled || recovering}
           className="h-7 shrink-0 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           Send

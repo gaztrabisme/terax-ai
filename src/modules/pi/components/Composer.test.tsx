@@ -131,7 +131,10 @@ beforeEach(() => {
   dragDropHandlers.length = 0;
   dialogOpenMock.mockReset();
   invokeMock.mockReset();
-  invokeMock.mockImplementation(async () => ({ kind: "text", content: "" }));
+  invokeMock.mockImplementation(async (cmd: string) => {
+    if (cmd === "fs_read_file") throw new Error("no such file");
+    return { kind: "ok" };
+  });
   // jsdom has no canvas: stand in for the downscale and re-encode.
   imageEncoder.encode = async (blob: Blob) => {
     encodeCalls += 1;
@@ -354,10 +357,10 @@ describe("composer image chips", () => {
 describe("composer send with images", () => {
   it("passes text and encoded images to onSubmit and clears the chips", async () => {
     // Draft restore is the headless way to put text into the editor.
-    invokeMock.mockImplementation(async (cmd: string) =>
-      cmd === "fs_read_file"
+    invokeMock.mockImplementation(async (cmd: string, args?: { path?: string }) =>
+      cmd === "fs_read_file" && args?.path?.endsWith(".md")
         ? { kind: "text", content: "what is this" }
-        : { kind: "ok" },
+        : { kind: "text", content: JSON.stringify({ v: 1, attachments: [], sources: [] }) },
     );
     const { container, onSubmit } = renderComposer(vi.fn(), {
       cwd: "/tmp/proj",
@@ -619,10 +622,10 @@ describe("composer rejected draft restore", () => {
   });
 
   it("waits when the editor already holds typed text", async () => {
-    invokeMock.mockImplementation(async (cmd: string) =>
-      cmd === "fs_read_file"
+    invokeMock.mockImplementation(async (cmd: string, args?: { path?: string }) =>
+      cmd === "fs_read_file" && args?.path?.endsWith(".md")
         ? { kind: "text", content: "typed first" }
-        : { kind: "ok" },
+        : { kind: "text", content: JSON.stringify({ v: 1, attachments: [], sources: [] }) },
     );
     const { container } = renderComposer(undefined, { cwd: "/tmp/proj" });
     const composer = container.querySelector("[aria-label='pi composer']")!;
@@ -681,7 +684,8 @@ function useMemoryFs(): Map<string, string> {
       return undefined;
     }
     if (cmd === "fs_read_file") {
-      return { kind: "text", content: files.get(path) ?? "" };
+      if (!files.has(path)) throw new Error(`no such file: ${path}`);
+      return { kind: "text", content: files.get(path) };
     }
     if (cmd === "fs_delete") {
       files.delete(path);

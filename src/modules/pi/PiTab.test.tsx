@@ -221,7 +221,7 @@ beforeEach(() => {
   boardTickets = [];
   draftPromise = null;
   invokeMock.mockReset();
-  invokeMock.mockImplementation(async (cmd: string) => {
+  invokeMock.mockImplementation(async (cmd: string, args?: { path?: string }) => {
     if (cmd === "pi_paths")
       return { agent: { path: "/agent" }, runtimeAgentDir: { path: "/agent" } };
     if (cmd === "shell_run_command")
@@ -234,8 +234,10 @@ beforeEach(() => {
           counts: {},
         }),
       };
-    if (cmd === "fs_read_file")
-      return draftPromise ?? { kind: "text", content: "" };
+    if (cmd === "fs_read_file") {
+      if (draftPromise && args?.path?.endsWith(".md")) return draftPromise;
+      throw new Error("no such file");
+    }
     if (cmd === "pi_prompts_list")
       return [
         {

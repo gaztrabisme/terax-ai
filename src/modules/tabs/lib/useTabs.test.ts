@@ -56,6 +56,20 @@ afterEach(() => {
 });
 
 describe("useTabs stable ids (K11c)", () => {
+  it("keeps batched chat and editor creation and selects the exact file", () => {
+    memoryFs();
+    const { result } = renderHook(() => useTabs());
+    act(() => {
+      result.current.newPiTab("/proj");
+      result.current.openFileTab("/proj/answer.md");
+    });
+    expect(result.current.tabs.map((tab) => tab.kind)).toEqual(["terminal", "pi", "editor"]);
+    const editor = result.current.tabs[2];
+    expect(editor).toMatchObject({ path: "/proj/answer.md", cwd: "/proj" });
+    expect(result.current.activeId).toBe(editor.id);
+    expect(stableIdOf(editor.id)).toBe(editor.sid);
+  });
+
   it("mints a stable opaque id beside every numeric id at creation", () => {
     const { result } = renderHook(() => useTabs());
     const first = result.current.tabs[0];
@@ -106,10 +120,8 @@ describe("useTabs uiState window record (K11c)", () => {
     act(() => result.current.newPiTab("/proj"));
     const pi = result.current.tabs[1];
     act(() => result.current.openFileTab("/proj/a.ts"));
-    // openFileTab's activation rides React's eager updater evaluation, which
-    // is not deterministic under fake timers: set the active tab explicitly.
     const editor = result.current.tabs[2];
-    act(() => result.current.setActiveId(editor.id));
+    expect(result.current.activeId).toBe(editor.id);
 
     await vi.advanceTimersByTimeAsync(750);
     const write = writes().find(([, a]) => a.path === uiStatePath("/proj"));
@@ -124,7 +136,7 @@ describe("useTabs uiState window record (K11c)", () => {
     expect(win.tabs).toEqual([
       { id: result.current.tabs[0].sid, kind: "terminal", cwd: undefined },
       { id: pi.sid, kind: "pi", cwd: "/proj" },
-      { id: editor.sid, kind: "editor", path: "/proj/a.ts" },
+      { id: editor.sid, kind: "editor", path: "/proj/a.ts", cwd: "/proj" },
     ]);
     expect(win.activeTabId).toBe(editor.sid);
     expect(files.get(uiStatePath("/proj"))).toBeTruthy();
@@ -183,7 +195,7 @@ describe("useTabs uiState recovery of written docs", () => {
     );
     await loadUiState("/proj");
     const doc = useUiStateStore.getState().docs["/proj"];
-    expect(doc.windows.main.tabs.map((t) => [t.kind, t.cwd ?? t.path])).toEqual(
+    expect(doc.windows.main.tabs.map((t) => [t.kind, t.path ?? t.cwd])).toEqual(
       [
         ["terminal", undefined],
         ["pi", "/proj"],

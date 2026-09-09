@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 import type { EditorTab, Tab } from "@/modules/tabs";
 import { useEffect, useMemo, useRef } from "react";
 import { EditorPane, type EditorPaneHandle } from "./EditorPane";
+import { EditorTabBoundary } from "./EditorTabBoundary";
 import { windowProjectCwd } from "./lib/editorDraft";
 
 type Props = {
@@ -10,6 +11,7 @@ type Props = {
   onDirtyChange: (id: number, dirty: boolean) => void;
   registerHandle: (id: number, handle: EditorPaneHandle | null) => void;
   onCloseTab: (id: number) => void;
+  onReturnToChat: (cwd?: string) => void;
 };
 
 export function EditorStack({
@@ -18,6 +20,7 @@ export function EditorStack({
   onDirtyChange,
   registerHandle,
   onCloseTab,
+  onReturnToChat,
 }: Props) {
   const editors = tabs.filter((t): t is EditorTab => t.kind === "editor");
   // K11c: drafts belong to the project; the window's project is the first
@@ -103,14 +106,20 @@ export function EditorStack({
             )}
           >
             <div className="h-full overflow-hidden rounded-md border border-border/60 bg-background">
-              <EditorPane
-                ref={getRefCallback(t.id)}
+              <EditorTabBoundary
+                key={t.path}
                 path={t.path}
-                sid={t.sid}
-                projectCwd={projectCwd}
-                onDirtyChange={getDirtyCallback(t.id)}
-                onClose={getCloseCallback(t.id)}
-              />
+                onReturnToChat={() => onReturnToChat(t.cwd ?? projectCwd ?? undefined)}
+              >
+                <EditorPane
+                  ref={getRefCallback(t.id)}
+                  path={t.path}
+                  sid={t.sid}
+                  projectCwd={t.cwd ?? projectCwd}
+                  onDirtyChange={getDirtyCallback(t.id)}
+                  onClose={getCloseCallback(t.id)}
+                />
+              </EditorTabBoundary>
             </div>
           </div>
         );

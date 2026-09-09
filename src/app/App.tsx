@@ -208,6 +208,9 @@ export default function App() {
     pinTab,
     newMarkdownTab,
     newPiTab,
+    restoreProjectTabs,
+    recoverDraft,
+    returnToChat,
     openBoardTab,
     openRunGraphTab,
     openAgentTranscriptTab,
@@ -476,6 +479,15 @@ export default function App() {
   const [startupPick, setStartupPick] = useState<{
     missingPath: string | null;
   } | null>(null);
+  const [tabRecoveryError, setTabRecoveryError] = useState<{ cwd: string; message: string } | null>(null);
+  const openProjectTabs = useCallback(async (cwd: string) => {
+    try {
+      await restoreProjectTabs(cwd);
+      setTabRecoveryError(null);
+    } catch (error) {
+      setTabRecoveryError({ cwd, message: String(error) });
+    }
+  }, [restoreProjectTabs]);
   useEffect(() => {
     let alive = true;
     let decided = false;
@@ -518,7 +530,7 @@ export default function App() {
         for (const effect of launchEffects(plan)) {
           switch (effect.kind) {
             case "open-chat":
-              openChatTab(effect.project);
+              await openProjectTabs(effect.project);
               break;
             case "close-initial-shell": {
               const shellId = initialShellTabIdRef.current;
@@ -543,7 +555,7 @@ export default function App() {
     return () => {
       alive = false;
     };
-  }, [openChatTab, closeTab]);
+  }, [openProjectTabs, closeTab]);
 
   // The picker side of dock recovery: the existing open-folder flow, whose
   // pick authorizes the folder the same way a --pi argument path is. The
@@ -557,11 +569,11 @@ export default function App() {
       return;
     }
     setStartupPick(null);
-    openChatTab(picked.dir);
+    await openProjectTabs(picked.dir);
     setInitialShellHidden(false);
     const shellId = initialShellTabIdRef.current;
     if (shellId !== null) closeTab(shellId);
-  }, [openChatTab, closeTab]);
+  }, [openProjectTabs, closeTab]);
 
   // The launcher passes --launcher-dir <checkout> next to --pi. An empty
   // launcherDir pref adopts the passed path (one log line); a stored value
@@ -1360,6 +1372,14 @@ export default function App() {
 
   const workspaceSurface = (
     <div className="relative h-full min-h-0">
+      {tabRecoveryError && (
+        <div role="alert" className="absolute inset-x-3 top-2 z-50 rounded border border-destructive bg-background p-3 text-sm text-destructive">
+          Draft recovery failed: {tabRecoveryError.message}
+          <button type="button" className="ml-3 underline" onClick={() => void openProjectTabs(tabRecoveryError.cwd)}>
+            Retry recovery
+          </button>
+        </div>
+      )}
       {startupPick && (
         <div
           data-uat="startup-project-picker"
@@ -1415,6 +1435,7 @@ export default function App() {
           registerHandle={registerEditorHandle}
           onDirtyChange={handleEditorDirty}
           onCloseTab={disposeTab}
+          onReturnToChat={returnToChat}
         />
       </div>
       <div
@@ -1439,6 +1460,7 @@ export default function App() {
           onOpenChild={openChildTranscript}
           onOpenBoard={openBoardTab}
           onOpenRunGraph={openRunGraphTab}
+          onRecoverDraft={recoverDraft}
         />
       </div>
       <div

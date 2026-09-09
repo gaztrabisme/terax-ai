@@ -15,8 +15,9 @@ import {
 } from "../lib/usage";
 import { Composer } from "./Composer";
 import { Transcript } from "./Transcript";
+import { RecoverableDrafts, type DraftRecoveryProps } from "@/modules/tabs/RecoverableDrafts";
 
-type Props = {
+type Props = DraftRecoveryProps & {
   tabId: number;
   cwd?: string;
   onOpenChild: (path: string) => void;
@@ -53,7 +54,7 @@ function statusLabel(
 // The chat column of a pi tab: session header, transcript, composer. Owns no
 // session lifecycle beyond the header buttons; PiTab opens the session and
 // the layout owns the tab.
-export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
+export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds, onRecoverDraft }: Props) {
   const entry = usePiStore((s) => s.tabs[tabId]);
   const sendPrompt = usePiStore((s) => s.sendPrompt);
   const retrySubmission = usePiStore((s) => s.retrySubmission);
@@ -341,6 +342,7 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles }: Props) {
         onOpenChild={onOpenChild}
       />
 
+      {cwd && onRecoverDraft && <RecoverableDrafts cwd={cwd} openDraftIds={openDraftIds} onRecoverDraft={onRecoverDraft} />}
       <Composer
         tabId={tabId}
         cwd={cwd}

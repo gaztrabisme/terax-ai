@@ -175,6 +175,92 @@ function parseEditorMeta(raw: string): EditorDraftMeta | null {
   };
 }
 
+export function isMissingDraftFile(error: unknown): boolean {
+  return /no such file|not found|os error [23]\b/i.test(String(error));
+}
+
+async function readRecoveryText(path: string): Promise<string | null> {
+  try {
+    const res = await invoke<{ kind: string; content?: string }>("fs_read_file", {
+      path, workspace: currentWorkspaceEnv(),
+    });
+    if (res.kind !== "text" || typeof res.content !== "string") {
+      throw new Error("Expected a text file");
+    }
+    return res.content;
+  } catch (error) {
+    if (isMissingDraftFile(error)) return null;
+    throw new Error(`${path}: ${String(error)}`);
+  }
+}
+
+export type RecoverableDraft = { sid: string; firstLine: string; error?: string };
+export type DraftRecord = {
+  sid: string;
+  markdown: string;
+} & (
+  | { kind: "chat"; meta: ChatDraftMeta }
+  | { kind: "editor"; meta: EditorDraftMeta }
+);
+
+export async function loadDraftRecord(cwd: string, sid: string): Promise<DraftRecord | null> {
+  if (!/^[a-zA-Z0-9_-]+$/.test(sid)) throw new Error(`Invalid draft id: ${sid}`);
+  const [markdown, rawMeta] = await Promise.all([
+    readRecoveryText(draftPath(cwd, sid)),
+    readRecoveryText(draftMetaPath(cwd, sid)),
+  ]);
+  if (markdown === null && rawMeta === null) return null;
+  if (rawMeta !== null) {
+    const editorMeta = parseEditorMeta(rawMeta);
+    if (editorMeta) {
+      if (markdown === null) throw new Error(`${draftPath(cwd, sid)}: Editor buffer is missing`);
+      return { sid, kind: "editor", markdown, meta: editorMeta };
+    }
+    const meta = parseChatMeta(rawMeta);
+    if (!meta) throw new Error(`${draftMetaPath(cwd, sid)}: Invalid draft record`);
+    const raw = JSON.parse(rawMeta) as Record<string, unknown>;
+    if ((raw.attachments !== undefined && !Array.isArray(raw.attachments)) ||
+        (Array.isArray(raw.attachments) && raw.attachments.length !== meta.attachments.length) ||
+        new Set(meta.attachments.map((attachment) => attachment.id)).size !== meta.attachments.length ||
+        meta.attachments.some((attachment) => !attachment.id || !attachment.sha256 ||
+          !attachment.mime.startsWith("image/") ||
+          !/^\.pi\/(drafts|attachments)\/[a-zA-Z0-9_.-]+$/.test(attachment.path))) {
+      throw new Error(`${draftMetaPath(cwd, sid)}: Invalid attachment record`);
+    }
+    return { sid, kind: "chat", markdown: markdown ?? "", meta };
+  }
+  return { sid, kind: "chat", markdown: markdown ?? "", meta: emptyChatMeta() };
+}
+
+export async function listRecoverableDrafts(cwd: string, openSids: readonly string[]): Promise<RecoverableDraft[]> {
+  let entries: { name: string; kind: string }[];
+  try {
+    entries = await invoke("fs_read_dir", {
+      path: draftsDir(cwd), showHidden: true, workspace: currentWorkspaceEnv(),
+    });
+  } catch (error) {
+    if (isMissingDraftFile(error)) return [];
+    throw new Error(`${draftsDir(cwd)}: ${String(error)}`);
+  }
+  const open = new Set(openSids);
+  const sids = new Set(entries.flatMap((entry) => {
+    const match = entry.kind === "file" && /^([a-zA-Z0-9_-]+)\.(md|json)$/.exec(entry.name);
+    return match && !open.has(match[1]) ? [match[1]] : [];
+  }));
+  const drafts = await Promise.all([...sids].sort().map(async (sid): Promise<RecoverableDraft | null> => {
+    try {
+      const record = await loadDraftRecord(cwd, sid);
+      if (!record) return null;
+      const fallback = record.kind === "editor" ? record.meta.path
+        : record.meta.attachments.length ? "Queued images" : "Empty draft";
+      return { sid, firstLine: record.markdown.split(/\r?\n/, 1)[0] || fallback };
+    } catch (error) {
+      return { sid, firstLine: sid, error: String(error) };
+    }
+  }));
+  return drafts.filter((draft): draft is RecoverableDraft => draft !== null);
+}
+
 // ---------------------------------------------------------------------------
 // Chat drafts
 // ---------------------------------------------------------------------------

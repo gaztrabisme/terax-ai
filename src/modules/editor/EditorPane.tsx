@@ -261,6 +261,14 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       [path],
     );
 
+    const onDocChange = useCallback(
+      (next: string) => {
+        controller?.scheduleSave(next);
+        onChange(next);
+      },
+      [controller, onChange],
+    );
+
     if (doc.status === "loading") {
       return (
         <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
@@ -271,7 +279,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     if (doc.status === "error") {
       return (
         <div className="flex h-full items-center justify-center px-6 text-center text-xs text-destructive">
-          {doc.message}
+          {path}: {doc.message}
         </div>
       );
     }
@@ -295,16 +303,6 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         </div>
       );
     }
-
-    // Feed the controller the latest buffer; the debounced mirror writes it
-    // while the document is dirty.
-    const onDocChange = useCallback(
-      (next: string) => {
-        controller?.scheduleSave(next);
-        onChange(next);
-      },
-      [controller, onChange],
-    );
 
     return (
       <div className="flex h-full min-h-0 flex-col">
