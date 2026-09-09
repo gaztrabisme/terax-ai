@@ -14,7 +14,12 @@ import {
   stripTurnTokensLabel,
 } from "../lib/usage";
 import { Composer } from "./Composer";
-import { Transcript } from "./Transcript";
+import { ErrorCard, Transcript } from "./Transcript";
+import { scrollToSnippet } from "./SessionSearch";
+import {
+  resolveSessionPath,
+  shortSessionId,
+} from "../lib/sessionFile";
 import { RecoverableDrafts, type DraftRecoveryProps } from "@/modules/tabs/RecoverableDrafts";
 
 type Props = DraftRecoveryProps & {
@@ -68,6 +73,37 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
 
   const blocks = entry?.state.blocks ?? [];
   const state = entry?.state;
+  const sessionId = state?.sessionId ?? null;
+
+  // The strip's session identity (F1b): the file path pi has loaded is known
+  // once a switch committed; otherwise the project locator names the live
+  // session's exact file. Neither known, the title still carries the id.
+  const [locatorPath, setLocatorPath] = useState<string | null>(null);
+  useEffect(() => {
+    setLocatorPath(null);
+    if (!cwd || !sessionId) return;
+    let alive = true;
+    void resolveSessionPath(cwd, sessionId).then((path) => {
+      if (alive) setLocatorPath(path);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [cwd, sessionId]);
+  const sessionPath = entry?.sessionPath ?? locatorPath;
+
+  // A committed switch scrolls to the hit after the restored transcript has
+  // rendered: the store swapped the parsed history in atomically, so one
+  // tick later the matching turn exists in this tab's chat column.
+  const scrollRequest = entry?.scrollRequest ?? null;
+  useEffect(() => {
+    if (!scrollRequest) return;
+    const timer = window.setTimeout(() => {
+      scrollToSnippet(scrollRequest.snippet, tabId);
+      usePiStore.getState().clearScrollRequest(tabId, scrollRequest.seq);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [scrollRequest, tabId]);
 
   // Sent thumbnails are local turn state: pi's session file may not echo the
   // image bytes back, so each queued set binds FIFO to the next user message
@@ -259,6 +295,15 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
         <span data-uat="session-cost">
           {stripSessionCostLabel(state?.sessionCost ?? 0, hasTurnUsage)}
         </span>
+        {sessionId ? (
+          <span
+            data-uat="session-id"
+            className="shrink-0 truncate font-mono text-[11px]"
+            title={sessionPath ? `${sessionId}\n${sessionPath}` : sessionId}
+          >
+            {shortSessionId(sessionId)}
+          </span>
+        ) : null}
         <span className="flex-1" />
         {showStop ? (
           <button
@@ -321,6 +366,13 @@ export function ChatPane({ tabId, cwd, onOpenChild, artifactFiles, openDraftIds,
           className="mx-3 mt-3 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive"
         >
           {entry.bindError}
+        </div>
+      ) : null}
+      {entry?.switchError ? (
+        <div className="mx-3 mt-3">
+          {/* A failed or refused session switch names its file; the previous
+              conversation above stays untouched. */}
+          <ErrorCard block={{ kind: "error", text: entry.switchError, at: 0 }} />
         </div>
       ) : null}
 

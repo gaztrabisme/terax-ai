@@ -32,6 +32,7 @@ import {
   type PiModelRow,
   type PiRuntimePrefs,
 } from "./providers";
+import { restoredUsageTotals, type ParsedSessionFile } from "./sessionFile";
 import { openPiSession, type PiSessionHandle } from "./rpc-client";
 import { PI_MODULE_PREFS_DEFAULTS } from "./settingsSchema";
 import { groupTurns, messageText } from "./turns";
@@ -139,6 +140,21 @@ type BindJob = {
   text: string;
 };
 
+/** A session switch staged for an atomic commit (F1b): the target file has
+ *  already been read and parsed, so the switch command goes out only when
+ *  the restored transcript is in hand and the reset can swap it in the
+ *  moment pi acknowledges. */
+export type PendingSwitch = ParsedSessionFile & {
+  /** Absolute path of the session file, for the strip identity and errors. */
+  path: string;
+  /** The hit's snippet, scrolled to once the transcript has swapped in. */
+  snippet: string;
+};
+
+/** One pending scroll-to-turn after a committed switch; `seq` pairs the
+ *  consume acknowledgement so an older request is never cleared by mistake. */
+export type ScrollRequest = { seq: number; snippet: string };
+
 type PiTabEntry = {
   /** Open generation; a later open for the same tab supersedes this one. */
   gen: number;
@@ -160,6 +176,15 @@ type PiTabEntry = {
   /** A failed attachment-index write, naming the path (design.md 3.4:
    *  a write error displays a message and the intended path). */
   bindError?: string | null;
+  /** A staged switch waiting for pi's switch_session acknowledgement. */
+  pendingSwitch?: PendingSwitch | null;
+  /** A failed or refused switch, naming the session file; the previous
+   *  conversation stays untouched (design.md 3.5: an error names its path). */
+  switchError?: string | null;
+  /** The session file pi has loaded, known once a switch committed. */
+  sessionPath?: string | null;
+  /** A turn to scroll to after the restored transcript has rendered. */
+  scrollRequest?: ScrollRequest | null;
 };
 
 type PiStore = {
@@ -200,6 +225,18 @@ type PiStore = {
     answers: PiAskAnswer[],
   ) => Promise<void>;
   dismissAsk: (tabId: number, requestId: string) => Promise<void>;
+  /** Switches the tab's pi session to an already-parsed session file (F1b):
+   *  stages the parsed transcript, sends switch_session, and lets the ack
+   *  swap it in atomically. The current transcript stays until the commit;
+   *  a refused send stages nothing and reports the file. One switch at a
+   *  time per tab: a second call while one is in flight throws. */
+  switchToSession: (
+    tabId: number,
+    request: PendingSwitch,
+  ) => Promise<void>;
+  /** Consumes a committed switch's scroll request once the transcript has
+   *  rendered and the turn has been scrolled to. */
+  clearScrollRequest: (tabId: number, seq: number) => void;
   kill: (tabId: number) => Promise<void>;
   close: (tabId: number) => void;
 };
@@ -224,6 +261,9 @@ let queuedSeq = 0;
 
 /** Session-wide counter minting submission ids for the K13 transaction. */
 let submissionSeq = 0;
+
+/** Session-wide counter pairing scroll requests with their consumers. */
+let scrollSeq = 0;
 
 function attachmentError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -378,7 +418,51 @@ type PiEventPatch = Pick<
   | "pendingPrompts"
   | "rejectedDraft"
   | "failedSubmission"
+  | "pendingSwitch"
+  | "switchError"
+  | "sessionPath"
+  | "scrollRequest"
 > & { bind: BindJob | null };
+
+/** Sniffs one event line for a switch_session response; null for anything
+ *  else. pi 0.3.0 answers the switch with response_ok
+ *  {data:{cancelled:false}} and no session id (rpc.rs "switch_session"); an
+ *  extension veto answers {cancelled:true}, a refused switch success:false. */
+function switchAck(line: string): {
+  ok: boolean;
+  cancelled: boolean;
+  error: string | null;
+} | null {
+  const trimmed = line.trimStart();
+  if (!trimmed.startsWith("{")) return null;
+  let event: unknown;
+  try {
+    event = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (
+    typeof event !== "object" ||
+    event === null ||
+    (event as { type?: unknown }).type !== "response" ||
+    (event as { command?: unknown }).command !== "switch_session"
+  ) {
+    return null;
+  }
+  const record = event as { success?: unknown; error?: unknown; data?: unknown };
+  const cancelled =
+    isRecord(record.data) && record.data.cancelled === true;
+  return {
+    ok: record.success !== false && !cancelled,
+    cancelled,
+    error: typeof record.error === "string" ? record.error : null,
+  };
+}
+
+/** Is `record` a plain object? Local twin of parse.ts's guard. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
 /** Sniffs one event line for a prompt command response; null for anything
  *  else. The reducer ignores success frames, so the queue bookkeeping here
@@ -414,6 +498,20 @@ function promptResponse(line: string): {
   };
 }
 
+/** Switch bookkeeping that branches below do not touch: a staged switch
+ *  stays staged until its ack arrives, and a standing switch error or the
+ *  committed session path survive unrelated events. */
+function switchPassthrough(
+  entry: PiTabEntry,
+): Pick<PiTabEntry, "pendingSwitch" | "switchError" | "sessionPath" | "scrollRequest"> {
+  return {
+    pendingSwitch: entry.pendingSwitch ?? null,
+    switchError: entry.switchError ?? null,
+    sessionPath: entry.sessionPath ?? null,
+    scrollRequest: entry.scrollRequest ?? null,
+  };
+}
+
 function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
   const previous = entry.state;
   let state = applyEvent(previous, line);
@@ -423,6 +521,60 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
   let rejectedDraft = entry.rejectedDraft ?? null;
   let failedSubmission = entry.failedSubmission ?? null;
   let bind: BindJob | null = null;
+
+  // The staged switch resolves on pi's switch_session ack (F1b). With the
+  // parsed transcript already staged, the commit is one atomic swap: the
+  // reset the reducer applies on the ack lands with the restored history
+  // already in it, so the chat never shows an empty transcript. A refused
+  // or vetoed switch keeps the previous conversation and names the file.
+  const ack = switchAck(line);
+  const staged = entry.pendingSwitch ?? null;
+  if (ack && staged) {
+    if (!ack.ok) {
+      return {
+        state: previous,
+        pendingAttachments: pending,
+        queued,
+        pendingPrompts,
+        rejectedDraft,
+        failedSubmission,
+        pendingSwitch: null,
+        switchError: `${staged.path}: ${ack.error ?? (ack.cancelled ? "switch cancelled" : "switch refused")}`,
+        sessionPath: entry.sessionPath ?? null,
+        scrollRequest: entry.scrollRequest ?? null,
+        bind: null,
+      };
+    }
+    const totals = restoredUsageTotals(staged.blocks);
+    return {
+      state: {
+        ...state,
+        // applyEvent reset to a fresh session on the ack; swap the parsed
+        // history in as the new session's transcript and adopt its id.
+        switching: false,
+        sessionId: staged.sessionId,
+        blocks: staged.blocks,
+        turnTokens: totals.turnTokens,
+        sessionCost: totals.sessionCost,
+        turnUsage: totals.turnUsage,
+      },
+      pendingAttachments: [],
+      queued: [],
+      pendingPrompts,
+      rejectedDraft,
+      failedSubmission,
+      pendingSwitch: null,
+      switchError: null,
+      sessionPath: staged.path,
+      scrollRequest: { seq: (scrollSeq += 1), snippet: staged.snippet },
+      bind: null,
+    };
+  }
+  if (ack && !staged) {
+    // An ack with nothing staged (a late duplicate) must not clear the
+    // conversation: keep the state as it was before this line.
+    state = previous;
+  }
 
   const response = promptResponse(line);
   if (response && pendingPrompts.length > 0) {
@@ -508,6 +660,7 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
       pendingPrompts,
       rejectedDraft,
       failedSubmission,
+      ...switchPassthrough(entry),
       bind: null,
     };
   }
@@ -520,6 +673,7 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
       pendingPrompts,
       rejectedDraft,
       failedSubmission,
+      ...switchPassthrough(entry),
       bind: null,
     };
   }
@@ -546,6 +700,7 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
       pendingPrompts,
       rejectedDraft,
       failedSubmission,
+      ...switchPassthrough(entry),
       bind: null,
     };
   }
@@ -586,6 +741,7 @@ function applyPiEvent(entry: PiTabEntry, line: string): PiEventPatch {
     pendingPrompts,
     rejectedDraft,
     failedSubmission,
+    ...switchPassthrough(entry),
     bind,
   };
 }
@@ -692,6 +848,10 @@ export const usePiStore = create<PiStore>()((set, get) => ({
       rejectedDraft: null,
       failedSubmission: null,
       bindError: null,
+      pendingSwitch: null,
+      switchError: null,
+      sessionPath: null,
+      scrollRequest: null,
     };
     set((s) => ({ tabs: { ...s.tabs, [tabId]: entry } }));
     try {
@@ -1264,6 +1424,57 @@ export const usePiStore = create<PiStore>()((set, get) => ({
         })),
       );
     }
+  },
+
+  switchToSession: async (tabId, request) => {
+    const entry = get().tabs[tabId];
+    const session = entry?.session;
+    if (!entry || !session) {
+      throw new Error(`${request.path}: no live pi session to switch into`);
+    }
+    if (entry.pendingSwitch) {
+      throw new Error(
+        `switch_session already in progress (${entry.pendingSwitch.path})`,
+      );
+    }
+    // Stage the parsed transcript before the wire command: the ack can then
+    // swap it in atomically, and the current conversation stays untouched
+    // until pi confirms the switch.
+    set((s) =>
+      patchEntry(s.tabs, tabId, (e) => ({
+        ...e,
+        pendingSwitch: request,
+        switchError: null,
+      })),
+    );
+    try {
+      await session.send(
+        JSON.stringify({ type: "switch_session", sessionPath: request.path }),
+      );
+    } catch (error) {
+      // The write never reached pi or its pipe was gone: unstage and name
+      // the file. The previous conversation stands.
+      set((s) =>
+        patchEntry(s.tabs, tabId, (e) =>
+          e.pendingSwitch === request
+            ? {
+                ...e,
+                pendingSwitch: null,
+                switchError: `${request.path}: ${attachmentError(error)}`,
+              }
+            : e,
+        ),
+      );
+      throw error;
+    }
+  },
+
+  clearScrollRequest: (tabId, seq) => {
+    set((s) =>
+      patchEntry(s.tabs, tabId, (e) =>
+        e.scrollRequest?.seq === seq ? { ...e, scrollRequest: null } : e,
+      ),
+    );
   },
 
   kill: async (tabId) => {

@@ -5,13 +5,14 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { composerProps, invokeMock } = vi.hoisted(() => ({
+const { composerProps, errorCards, invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   composerProps: [] as Array<{
     modelAcceptsImages?: boolean;
     placeholder?: string;
     onStop?: () => void;
   }>,
+  errorCards: [] as string[],
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
@@ -32,6 +33,10 @@ vi.mock("./Transcript", () => ({
   Transcript: () => null,
   formatCost: (cost: number) =>
     cost >= 0.01 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(4)}`,
+  ErrorCard: (props: { block: { text: string } }) => {
+    errorCards.push(props.block.text);
+    return null;
+  },
 }));
 
 import {
@@ -290,6 +295,91 @@ describe("ChatPane composer vision flag", () => {
     });
     await waitFor(() => {
       expect(composerProps[composerProps.length - 1]?.modelAcceptsImages).toBe(true);
+    });
+  });
+});
+
+describe("ChatPane session identity (F1b)", () => {
+  const FULL_ID = "019ea7c5-abcd-4e5f-8a1b-2c3d4e5f6a7b";
+  const SESSION_FILE =
+    "/tmp/p/.pi/sessions/--tmp-p--/2026-06-08T15-07-02-400Z_019ea7c5.jsonl";
+
+  afterEach(() => {
+    cleanup();
+    usePiStore.setState({ tabs: {} });
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  it("names the active session in the strip with the short id, full id and path in the title", () => {
+    seedTab(30, { ...initialPiSessionState(), sessionId: FULL_ID });
+    usePiStore.setState((s) => ({
+      tabs: { ...s.tabs, 30: { ...s.tabs[30]!, sessionPath: SESSION_FILE } },
+    }));
+    const { getByText } = render(<ChatPane tabId={30} onOpenChild={() => {}} />);
+    const id = getByText("019ea7c5");
+    expect(id.getAttribute("data-uat")).toBe("session-id");
+    expect(id.title).toBe(`${FULL_ID}\n${SESSION_FILE}`);
+  });
+
+  it("the title falls back to the id alone when no file path is known", () => {
+    seedTab(31, { ...initialPiSessionState(), sessionId: FULL_ID });
+    const { getByText } = render(<ChatPane tabId={31} onOpenChild={() => {}} />);
+    expect(getByText("019ea7c5").title).toBe(FULL_ID);
+  });
+
+  it("resolves the live session's file from the project locator", async () => {
+    invokeMock.mockResolvedValue({
+      kind: "text",
+      content: JSON.stringify({
+        v: 1,
+        sessions: [{ id: FULL_ID, path: ".pi/sessions/--tmp-p--/2026-06-08T15-07-02-400Z_019ea7c5.jsonl" }],
+      }),
+    });
+    seedTab(32, { ...initialPiSessionState(), sessionId: FULL_ID });
+    const { getByText } = render(
+      <ChatPane tabId={32} cwd="/tmp/p" onOpenChild={() => {}} />,
+    );
+    await waitFor(() => {
+      expect(getByText("019ea7c5").title).toBe(`${FULL_ID}\n${SESSION_FILE}`);
+    });
+  });
+
+  it("a failed switch renders a file-naming error card and keeps the strip", () => {
+    seedTab(33, { ...initialPiSessionState(), sessionId: FULL_ID });
+    usePiStore.setState((s) => ({
+      tabs: {
+        ...s.tabs,
+        33: {
+          ...s.tabs[33]!,
+          switchError: "/tmp/p/.pi/sessions/x.jsonl: no such file",
+        },
+      },
+    }));
+    render(<ChatPane tabId={33} onOpenChild={() => {}} />);
+    expect(errorCards[errorCards.length - 1]).toBe(
+      "/tmp/p/.pi/sessions/x.jsonl: no such file",
+    );
+  });
+
+  it("a committed switch scrolls to the hit once the transcript rendered", async () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    document.body.innerHTML =
+      '<div data-pi-chat="34"><div id="turn">saved prompt</div></div>';
+    seedTab(34, { ...initialPiSessionState(), sessionId: FULL_ID });
+    usePiStore.setState((s) => ({
+      tabs: {
+        ...s.tabs,
+        34: { ...s.tabs[34]!, scrollRequest: { seq: 7, snippet: "...saved prompt..." } },
+      },
+    }));
+    render(<ChatPane tabId={34} onOpenChild={() => {}} />);
+    await waitFor(() => {
+      expect(scroll).toHaveBeenCalledWith({ block: "center" });
+    });
+    await waitFor(() => {
+      expect(usePiStore.getState().tabs[34]!.scrollRequest).toBeNull();
     });
   });
 });

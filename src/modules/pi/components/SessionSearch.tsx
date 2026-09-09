@@ -8,6 +8,7 @@ import {
   type PiSessionHit,
   type PiSessionSummary,
 } from "../lib/sessions";
+import { loadSessionFile, pathMatchesSessionId } from "../lib/sessionFile";
 import { usePiStore } from "../lib/piStore";
 import { formatHistoryTime } from "@/modules/terminal/lib/historyTime";
 
@@ -73,9 +74,11 @@ export function sessionIdFromPath(path: string): string {
 /**
  * Conversation search over pi's session store (philosophy 1: the disk is the
  * truth). Without a query it lists the tab cwd's sessions; with one, it shows
- * the first hit per session. Clicking a result switches the tab's pi rpc
- * session to it (switch_session), or, when the hit is in the session already
- * open in this tab, scrolls the transcript to that turn instead.
+ * the first hit per session. Clicking a hit in the session already open in
+ * this tab only scrolls the transcript to that turn. Clicking a past hit
+ * loads the session file first, then commits the switch atomically (the
+ * store stages the parsed history and swaps it in on pi's switch_session
+ * ack), so the chat never shows an emptied transcript.
  */
 export function SessionSearch({
   tabId,
@@ -156,23 +159,35 @@ export function SessionSearch({
   const openHit = (hit: PiSessionHit) => {
     const entry = usePiStore.getState().tabs[tabId];
     const sessionId = entry?.state.sessionId ?? null;
-    // The current session's file name ends with the id pi reported at
-    // agent_start: <timestamp>_<id>.jsonl.
-    if (sessionId !== null && hit.path.endsWith(`_${sessionId}.jsonl`)) {
+    // A hit in the session already open here only scrolls. pi names session
+    // files <timestamp>_<first-8-id-chars>.jsonl (the full id never appears
+    // in the name), so the match is by short id.
+    if (sessionId !== null && pathMatchesSessionId(hit.path, sessionId)) {
       if (scrollToSnippet(hit.snippet, tabId)) onActivate?.(hit);
-      else setError("Matching turn is not available in this session.");
+      else setError("Matching turn is not rendered in this session.");
       return;
     }
-    const session = entry?.session;
-    if (!session) return;
-    void session
-      .send(JSON.stringify({ type: "switch_session", sessionPath: hit.path }))
-      .then(() => {
+    // A past hit loads and parses the session file BEFORE anything is sent
+    // (F1b): pi's switch_session replays no history, so the store stages the
+    // parsed transcript and swaps it in on pi's ack, keeping this
+    // conversation visible until then. A read or parse failure names the
+    // file and changes nothing.
+    if (!cwd) return;
+    void (async () => {
+      try {
+        const parsed = await loadSessionFile(hit.path);
+        await usePiStore.getState().switchToSession(tabId, {
+          ...parsed,
+          path: hit.path,
+          snippet: hit.snippet,
+        });
+        // The wire command was accepted: arm the tab's pending hit so the
+        // popover closes when pi's ack swaps the restored transcript in.
         if (mounted.current) onActivate?.(hit);
-      })
-      .catch((e: unknown) => {
+      } catch (e) {
         if (mounted.current) setError(errorMessage(e));
-      });
+      }
+    })();
   };
 
   const openSummary = (summary: PiSessionSummary) => {

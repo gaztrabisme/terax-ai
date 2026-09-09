@@ -5,14 +5,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-import { initialPiSessionState } from "../lib/parse";
+import { initialPiSessionState, type PiFeedItem } from "../lib/parse";
 import { usePiStore } from "../lib/piStore";
 import { SessionSearch, groupHits, snippetProbe, sessionLabel, sessionIdFromPath } from "./SessionSearch";
 import type { PiSessionHit, PiSessionSummary } from "../lib/sessions";
 
 const CWD = "/tmp/proj";
 const AGENT_DIR = "/home/u/agent";
-const CURRENT_ID = "019ea7c5-current";
+// The full id pi reports on agent_start; session FILES carry only its first
+// eight characters (`<timestamp>_<short id>.jsonl`).
+const CURRENT_ID = "019ea7c5-abcd-4e5f-8a1b-2c3d4e5f6a7b";
+const PAST_PATH =
+  "/a/sessions/--tmp-proj--/2026-06-08T15-07-02-400Z_bbbbbbbb.jsonl";
+
+/** A saved past session in pi's jsonl shape, served by the fs_read_file mock. */
+function pastSessionText(): string {
+  return [
+    '{"type":"session","version":3,"id":"bbbbbbbb-2222-4bbb-8bbb-bbbbbbbbbbbb","timestamp":"2026-06-08T15:07:02.400Z","cwd":"/tmp/proj"}',
+    '{"type":"message","id":"e1","parentId":null,"timestamp":"2026-06-08T15:07:02.408Z","message":{"role":"user","content":[{"type":"text","text":"...please find the grail diary..."}]}}',
+    '{"type":"message","id":"e2","parentId":"e1","timestamp":"2026-06-08T15:07:05.778Z","message":{"role":"assistant","content":[{"type":"text","text":"cited"}],"model":"q","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2},"stopReason":"stop","timestamp":1}}',
+    "",
+  ].join("\n");
+}
 
 function summary(over: Partial<PiSessionSummary>): PiSessionSummary {
   return {
@@ -35,13 +49,17 @@ function hit(over: Partial<PiSessionHit> = {}): PiSessionHit {
   };
 }
 
-function seedTab(tabId: number, sessionId: string | null) {
+function seedTab(
+  tabId: number,
+  sessionId: string | null,
+  blocks: PiFeedItem[] = [],
+) {
   const send = vi.fn().mockResolvedValue(undefined);
   usePiStore.setState({
     tabs: {
       [tabId]: {
         gen: 1,
-        state: { ...initialPiSessionState(), sessionId },
+        state: { ...initialPiSessionState(), sessionId, blocks },
         session: { id: 9, send, kill: vi.fn().mockResolvedValue(undefined) },
         exited: false,
         exitCode: null,
@@ -51,6 +69,19 @@ function seedTab(tabId: number, sessionId: string | null) {
     },
   });
   return send;
+}
+
+function currentBlock(): PiFeedItem {
+  return {
+    kind: "message",
+    id: "msg-0",
+    role: "user",
+    parts: [{ type: "text", text: "live prompt" }],
+    model: null,
+    usage: null,
+    streaming: false,
+    at: 1000,
+  };
 }
 
 describe("helpers", () => {
@@ -231,8 +262,8 @@ describe("SessionSearch", () => {
     expect(queryByText("assistant")).toBeTruthy();
   });
 
-  it("clicking a hit in another session sends switch_session", async () => {
-    const send = seedTab(7, CURRENT_ID);
+  it("a past hit reads the session file before switching and stages the parsed history", async () => {
+    const send = seedTab(7, CURRENT_ID, [currentBlock()]);
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pi_paths") {
         return Promise.resolve({
@@ -243,7 +274,12 @@ describe("SessionSearch", () => {
         });
       }
       if (cmd === "pi_sessions_list") return Promise.resolve([]);
-      if (cmd === "pi_sessions_search") return Promise.resolve([hit()]);
+      if (cmd === "pi_sessions_search") {
+        return Promise.resolve([hit({ path: PAST_PATH })]);
+      }
+      if (cmd === "fs_read_file") {
+        return Promise.resolve({ kind: "text", content: pastSessionText() });
+      }
       return Promise.reject(new Error(`unexpected ${cmd}`));
     });
     const { findByText, getByLabelText } = render(
@@ -256,17 +292,69 @@ describe("SessionSearch", () => {
     await waitFor(() => {
       expect(send).toHaveBeenCalledTimes(1);
     });
-    const line = JSON.parse(send.mock.calls[0][0] as string);
-    expect(line).toEqual({
-      type: "switch_session",
-      sessionPath:
-        "/a/sessions/--tmp-proj--/2026-06-08T15-07-02-400Z_other.jsonl",
+    // The file read preceded the wire command.
+    const readIndex = invokeMock.mock.calls.findIndex(
+      (c) => c[0] === "fs_read_file",
+    );
+    expect(readIndex).toBeGreaterThanOrEqual(0);
+    expect(invokeMock.mock.calls[readIndex]![1]).toMatchObject({
+      path: PAST_PATH,
     });
+    expect(invokeMock.mock.invocationCallOrder[readIndex]!).toBeLessThan(
+      send.mock.invocationCallOrder[0]!,
+    );
+    const line = JSON.parse(send.mock.calls[0][0] as string);
+    expect(line).toEqual({ type: "switch_session", sessionPath: PAST_PATH });
+    // The parsed history is staged for the ack; the old transcript is still
+    // the visible one and no scroll happened yet.
+    expect(usePiStore.getState().tabs[7]!.pendingSwitch?.sessionId).toBe(
+      "bbbbbbbb-2222-4bbb-8bbb-bbbbbbbbbbbb",
+    );
+    expect(usePiStore.getState().tabs[7]!.pendingSwitch?.blocks).toHaveLength(2);
+    expect(usePiStore.getState().tabs[7]!.state.blocks).toHaveLength(1);
     expect(scrollMock).not.toHaveBeenCalled();
   });
 
+  it("a failed read keeps the conversation and names the file", async () => {
+    const send = seedTab(7, CURRENT_ID, [currentBlock()]);
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pi_paths") {
+        return Promise.resolve({
+          pi: { path: "/pi", source: "pref", candidates: [] },
+          agent: { path: "/agent", source: "pref", candidates: [] },
+          agentDir: { path: AGENT_DIR, source: "pref", candidates: [] },
+          runtimeAgentDir: { path: AGENT_DIR, source: "pref", seeded: true },
+        });
+      }
+      if (cmd === "pi_sessions_list") return Promise.resolve([]);
+      if (cmd === "pi_sessions_search") {
+        return Promise.resolve([hit({ path: PAST_PATH })]);
+      }
+      if (cmd === "fs_read_file") {
+        return Promise.reject(new Error("no such file"));
+      }
+      return Promise.reject(new Error(`unexpected ${cmd}`));
+    });
+    const { findByText, getByLabelText } = render(
+      <SessionSearch tabId={7} cwd={CWD} />,
+    );
+    fireEvent.change(getByLabelText("Search pi sessions"), {
+      target: { value: "grail" },
+    });
+    fireEvent.click(await findByText("...please find the grail diary..."));
+    const error = await findByText(`${PAST_PATH}: no such file`);
+    expect(error).toBeTruthy();
+    // Nothing was sent and the previous conversation stands.
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      usePiStore.getState().tabs[7]!.pendingSwitch ?? null,
+    ).toBeNull();
+    expect(usePiStore.getState().tabs[7]!.state.sessionId).toBe(CURRENT_ID);
+    expect(usePiStore.getState().tabs[7]!.state.blocks).toHaveLength(1);
+  });
+
   it("clicking a hit in the current session scrolls instead of switching", async () => {
-    const send = seedTab(7, CURRENT_ID);
+    const send = seedTab(7, CURRENT_ID, [currentBlock()]);
     document.body.innerHTML =
       '<div data-pi-chat="7"><div id="turn">please find the grail diary</div></div>';
     invokeMock.mockImplementation((cmd: string) => {
@@ -281,8 +369,10 @@ describe("SessionSearch", () => {
       if (cmd === "pi_sessions_list") return Promise.resolve([]);
       if (cmd === "pi_sessions_search") {
         return Promise.resolve([
+          // pi's file name carries only the short id form.
           hit({
-            path: `/a/sessions/--tmp-proj--/2026-06-08T15-07-02-400Z_${CURRENT_ID}.jsonl`,
+            path:
+              "/a/sessions/--tmp-proj--/2026-06-08T15-07-02-400Z_019ea7c5.jsonl",
           }),
         ]);
       }
@@ -299,7 +389,12 @@ describe("SessionSearch", () => {
       expect(scrollMock).toHaveBeenCalledTimes(1);
     });
     expect(scrollMock.mock.calls[0][0]).toEqual({ block: "center" });
+    // Scroll only: no file read, no switch, no reset.
     expect(send).not.toHaveBeenCalled();
+    expect(
+      invokeMock.mock.calls.some((c) => c[0] === "fs_read_file"),
+    ).toBe(false);
+    expect(usePiStore.getState().tabs[7]!.state.blocks).toHaveLength(1);
   });
 
   it("hints when the tab has no project directory", async () => {

@@ -11,6 +11,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Tab } from "@/modules/tabs";
 import { MOD_PROP } from "@/lib/platform";
+import { recordChatView, useUiStateStore } from "@/modules/state/uiState";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   initialPiSessionState,
@@ -103,6 +104,25 @@ const originalStore = usePiStore.getState();
 const defaultShortcuts = usePreferencesStore.getState().shortcuts;
 let boardTickets: { id: string; status: string; title?: string }[];
 let draftPromise: Promise<{ kind: string; content: string }> | null;
+// F1b: the past session file at /sessions/date_other.jsonl is readable and
+// pi_sessions_search returns these hits (default: the current-session one).
+let pastSessionReadable = true;
+let sessionSearchHits: {
+  path: string;
+  snippet: string;
+  startedAt: string;
+  role: string;
+}[] = [];
+
+/** A saved session in pi's jsonl shape; its header id matches the file
+ *  name's short id ("other"), as pi writes both. */
+function pastSessionText(): string {
+  return [
+    '{"type":"session","version":3,"id":"other","timestamp":"2026-09-08T22:29:21.435Z","cwd":"/proj-1"}',
+    '{"type":"message","id":"e1","parentId":null,"timestamp":"2026-09-08T22:29:21.442Z","message":{"role":"user","content":[{"type":"text","text":"Recovered prompt"}]}}',
+    "",
+  ].join("\n");
+}
 
 function seedTabs(ids: number[]) {
   for (const id of ids) {
@@ -206,6 +226,7 @@ beforeEach(() => {
   localStorage.clear();
   setLayoutStorageForTests(localStorage);
   usePiLayoutStore.setState({ layouts: {} });
+  useUiStateStore.setState({ docs: {}, error: null, cleanAtLoad: {} });
   useChildStore.getState().reset();
   usePreferencesStore.setState({ shortcuts: defaultShortcuts });
   usePiStore.setState({
@@ -220,6 +241,15 @@ beforeEach(() => {
   send.mockReset().mockResolvedValue(undefined);
   boardTickets = [];
   draftPromise = null;
+  pastSessionReadable = true;
+  sessionSearchHits = [
+    {
+      path: "/sessions/date_current.jsonl",
+      snippet: "matching prompt",
+      startedAt: "2026-09-08",
+      role: "user",
+    },
+  ];
   invokeMock.mockReset();
   invokeMock.mockImplementation(async (cmd: string, args?: { path?: string }) => {
     if (cmd === "pi_paths")
@@ -236,6 +266,10 @@ beforeEach(() => {
       };
     if (cmd === "fs_read_file") {
       if (draftPromise && args?.path?.endsWith(".md")) return draftPromise;
+      if (args?.path === "/sessions/date_other.jsonl") {
+        if (!pastSessionReadable) throw new Error("no such file");
+        return { kind: "text", content: pastSessionText() };
+      }
       throw new Error("no such file");
     }
     if (cmd === "pi_prompts_list")
@@ -259,15 +293,7 @@ beforeEach(() => {
       ];
     if (cmd === "pi_write_artifact")
       return { path: ".pi/artifacts/art-mock.html", sha256: "f00d", reused: false };
-    if (cmd === "pi_sessions_search")
-      return [
-        {
-          path: "/sessions/date_current.jsonl",
-          snippet: "matching prompt",
-          startedAt: "2026-09-08",
-          role: "user",
-        },
-      ];
+    if (cmd === "pi_sessions_search") return sessionSearchHits;
     return undefined;
   });
 });
@@ -390,10 +416,13 @@ describe("PiTab mode strip", () => {
     expect(loadLayouts()["/proj-1"].sessionsQuery).toBe("saved query");
   });
 
-  it("closes a popover on successful hit activation, then scrolls to the recovered turn", async () => {
+  it("closes a popover on the committed switch, then scrolls to the recovered turn", async () => {
     mount();
+    setSession(1, { blocks: [message("Live answer")] });
     click("Sessions");
     fireEvent.click(await screen.findByText("Recovered prompt"));
+    // The session file is read first; the wire command carries the same
+    // path and the old conversation stays until the ack.
     await waitFor(() =>
       expect(send).toHaveBeenCalledWith(
         JSON.stringify({
@@ -402,24 +431,65 @@ describe("PiTab mode strip", () => {
         }),
       ),
     );
+    expect(invokeMock.mock.calls.some((c) => c[0] === "fs_read_file" && c[1]?.path === "/sessions/date_other.jsonl")).toBe(true);
+    expect(screen.getByText("Live answer")).toBeTruthy();
     expect(uat("sessions-popover")).toBeTruthy();
-    setSession(1, {
-      sessionId: "other",
-      blocks: [message("Recovered prompt")],
-    });
-    expect(uat("sessions-popover")).toBeNull();
+    // The ack: the store swaps in the restored transcript, adopts the
+    // restored id and requests the scroll to the hit; the popover closes
+    // and the scroll request is consumed after scrolling.
+    act(() =>
+      usePiStore.setState((s) => ({
+        tabs: {
+          ...s.tabs,
+          1: {
+            ...s.tabs[1]!,
+            state: {
+              ...s.tabs[1]!.state,
+              sessionId: "other",
+              blocks: [message("Recovered prompt")],
+            },
+            sessionPath: "/sessions/date_other.jsonl",
+            scrollRequest: { seq: 3, snippet: "...Recovered prompt..." },
+          },
+        },
+      })),
+    );
+    await waitFor(() => expect(uat("sessions-popover")).toBeNull());
     expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith({
       block: "center",
     });
+    await waitFor(() =>
+      expect(usePiStore.getState().tabs[1]!.scrollRequest).toBeNull(),
+    );
   });
 
-  it("keeps the popover and query when switching a hit fails", async () => {
-    send.mockRejectedValueOnce(new Error("Cannot recover session"));
+  it("keeps the popover, the query and the transcript when the session file read fails", async () => {
+    pastSessionReadable = false;
+    sessionSearchHits = [
+      {
+        path: "/sessions/date_other.jsonl",
+        snippet: "...Recovered prompt...",
+        startedAt: "2026-09-08",
+        role: "user",
+      },
+    ];
     mount();
+    setSession(1, { blocks: [message("Live answer")] });
     click("Sessions");
-    fireEvent.click(await screen.findByText("Recovered prompt"));
-    expect(await screen.findByText("Cannot recover session")).toBeTruthy();
+    fireEvent.change(uat("sessions-search")!, {
+      target: { value: "Recovered" },
+    });
+    fireEvent.click(await screen.findByText("...Recovered prompt..."));
+    // The failure names the file; nothing was sent and nothing was cleared.
+    expect(
+      await screen.findByText("/sessions/date_other.jsonl: no such file"),
+    ).toBeTruthy();
+    expect(send).not.toHaveBeenCalled();
     expect(uat("sessions-popover")).toBeTruthy();
+    expect((uat("sessions-search") as HTMLInputElement).value).toBe(
+      "Recovered",
+    );
+    expect(screen.getByText("Live answer")).toBeTruthy();
   });
 
   it("shows board and child badge updates and artifact availability without opening", async () => {
@@ -763,5 +833,69 @@ describe("focused-control priority and active-tab shortcuts", () => {
     expect(uat("board-panel")).toBeTruthy();
     expect(kill).not.toHaveBeenCalled();
     expect(composer.textContent).toBe("/rev");
+  });
+});
+
+describe("F9 restore working layout", () => {
+  it("offers the recorded view after an interrupted exit and restores it at its width", async () => {
+    usePiLayoutStore
+      .getState()
+      .update("/proj-1", { views: { board: { widthCss: 360 } } });
+    recordChatView("/proj-1", "pita1", { view: "board", mode: "panel" });
+    render(<PiTab tabId={1} sid="pita1" cwd="/proj-1" active onOpenChild={() => {}} />);
+    expect(await screen.findByText("Last session ended unexpectedly.")).toBeTruthy();
+    expect(document.querySelectorAll("section[data-mode]")).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore working layout" }));
+    expect(uat("board-panel")?.style.width).toBe("360px");
+    expect(screen.queryByText("Last session ended unexpectedly.")).toBeNull();
+  });
+
+  it("restores a recorded fullscreen view through the mode machine", () => {
+    recordChatView("/proj-1", "pita1", { view: "graph", mode: "fullscreen" });
+    render(<PiTab tabId={1} sid="pita1" cwd="/proj-1" active onOpenChild={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Restore working layout" }));
+    expect(uat("graph-fullscreen")).toBeTruthy();
+  });
+
+  it("records the open view while working and starts closed again, dismissable", async () => {
+    const { unmount } = render(
+      <PiTab tabId={1} cwd="/proj-1" active onOpenChild={() => {}} />,
+    );
+    click("Board");
+    await waitFor(() =>
+      expect(useUiStateStore.getState().docs["/proj-1"]?.chatViews["1"]).toEqual({
+        view: "board",
+        mode: "panel",
+      }),
+    );
+    unmount();
+
+    // Views start closed; the interrupted exit offers the recorded one back.
+    render(<PiTab tabId={1} cwd="/proj-1" active onOpenChild={() => {}} />);
+    expect(await screen.findByText("Last session ended unexpectedly.")).toBeTruthy();
+    expect(document.querySelectorAll("section[data-mode]")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByText("Last session ended unexpectedly.")).toBeNull();
+    expect(document.querySelectorAll("section[data-mode]")).toHaveLength(0);
+  });
+
+  it("offers nothing after a clean exit or without a recorded view", async () => {
+    recordChatView("/proj-1", "pita1", { view: "board", mode: "panel" });
+    useUiStateStore.setState((s) => ({
+      cleanAtLoad: { ...s.cleanAtLoad, "/proj-1": true },
+    }));
+    const { unmount } = render(
+      <PiTab tabId={1} sid="pita1" cwd="/proj-1" active onOpenChild={() => {}} />,
+    );
+    await act(async () => {});
+    expect(screen.queryByText("Last session ended unexpectedly.")).toBeNull();
+    unmount();
+
+    useUiStateStore.setState({ docs: {}, error: null, cleanAtLoad: {} });
+    render(<PiTab tabId={1} sid="pita1" cwd="/proj-1" active onOpenChild={() => {}} />);
+    await act(async () => {});
+    expect(screen.queryByText("Last session ended unexpectedly.")).toBeNull();
+    expect(document.querySelectorAll("section[data-mode]")).toHaveLength(0);
   });
 });

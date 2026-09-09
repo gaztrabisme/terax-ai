@@ -28,6 +28,24 @@ export const PI_LAYOUT_IMPORTED_KEY = "terax.pi.layout.v1.imported";
 
 export type UiViewWidths = Record<UiView, { widthCss: number | null }>;
 
+/** Open modes a chat tab's view can be recorded in (design.md section 3.1). */
+export const UI_VIEW_MODES = ["popover", "panel", "fullscreen"] as const;
+export type UiViewMode = (typeof UI_VIEW_MODES)[number];
+
+/**
+ * One chat tab's recorded open view (F9 restore offer). The record exists
+ * only while a view is open; a closed tab carries no entry, so views still
+ * start closed by default.
+ */
+export type UiChatViewRecord = { view: string; mode: UiViewMode };
+
+/**
+ * How the previous app process ended, read from the file at load. Only the
+ * app's own quit path (markCleanExit, App.tsx) writes "clean"; anything
+ * else, including a missing or malformed field, counts as interrupted.
+ */
+export type UiLastExit = "clean" | "interrupted";
+
 /**
  * One tab of a recorded window (K11c). `id` is the tab's stable opaque id,
  * never the numeric list position. `sessionId` is reserved for the pi session
@@ -58,6 +76,14 @@ export type UiStateDoc = {
   folds: Record<string, boolean>;
   selectedArtifact: string | null;
   sidebarVisible: boolean;
+  /**
+   * Open chat-tab views per tab stable id (F9). The pi tab records every
+   * transition through recordChatView; the entry is removed when the tab's
+   * views close, so a fresh open always starts closed.
+   */
+  chatViews: Record<string, UiChatViewRecord>;
+  /** How the previous process ended: "clean" only after markCleanExit. */
+  lastExit: UiLastExit;
 };
 
 export function defaultUiState(): UiStateDoc {
@@ -76,6 +102,10 @@ export function defaultUiState(): UiStateDoc {
     // design.md:160: the sidebar starts collapsed for every launch and no
     // background event restores a saved visibility flag.
     sidebarVisible: false,
+    chatViews: {},
+    // Without a file (or with a malformed one) the previous exit is treated
+    // as interrupted; "clean" is only ever written through markCleanExit.
+    lastExit: "interrupted",
   };
 }
 
@@ -193,6 +223,29 @@ export function parseUiState(raw: string | null): UiStateDoc | null {
   if (typeof value.sidebarVisible === "boolean") {
     doc.sidebarVisible = value.sidebarVisible;
   }
+  if (
+    typeof value.chatViews === "object" &&
+    value.chatViews !== null &&
+    !Array.isArray(value.chatViews)
+  ) {
+    const chatViews: Record<string, UiChatViewRecord> = {};
+    for (const [tabKey, record] of Object.entries(value.chatViews)) {
+      if (!nonEmptyString(tabKey)) continue;
+      if (typeof record !== "object" || record === null || Array.isArray(record)) {
+        continue;
+      }
+      const r = record as Record<string, unknown>;
+      if (
+        nonEmptyString(r.view) &&
+        UI_VIEW_MODES.includes(r.mode as UiViewMode)
+      ) {
+        chatViews[tabKey] = { view: r.view, mode: r.mode as UiViewMode };
+      }
+    }
+    doc.chatViews = chatViews;
+  }
+  // Anything the file says other than exactly "clean" counts as interrupted.
+  if (value.lastExit === "clean") doc.lastExit = "clean";
   return doc;
 }
 
@@ -368,6 +421,7 @@ function mergeDocs(base: UiStateDoc, overlay: UiStateDoc): UiStateDoc {
     windows: { ...base.windows, ...overlay.windows },
     views: { ...base.views, ...overlay.views },
     folds: { ...base.folds, ...overlay.folds },
+    chatViews: { ...base.chatViews, ...overlay.chatViews },
   };
 }
 
@@ -416,13 +470,22 @@ async function readUiState(cwd: string): Promise<void> {
     };
   }
   // Edits made before the read finished win over the file snapshot.
-  const next = previous && touched.has(cwd) ? mergeDocs(base, previous) : base;
+  let next = previous && touched.has(cwd) ? mergeDocs(base, previous) : base;
+  // F9: the previous run's "clean" counts only at this load. This process is
+  // live from here on, so the doc runs as interrupted until markCleanExit
+  // fires; the flip is written so a later crash cannot inherit the clean.
+  const staleClean = next.lastExit === "clean";
+  if (staleClean) next = { ...next, lastExit: "interrupted" };
   loaded.add(cwd);
   useUiStateStore.setState({
     docs: { ...state.docs, [cwd]: next },
     error: state.error?.path === path ? null : state.error,
+    cleanAtLoad: {
+      ...useUiStateStore.getState().cleanAtLoad,
+      [cwd]: parsed?.lastExit === "clean",
+    },
   });
-  if (!parsed) scheduleSave(cwd); // startup reset writes the fresh file
+  if (!parsed || staleClean) scheduleSave(cwd); // startup reset, and the flip
 }
 
 export async function loadWindowState(cwd: string): Promise<UiWindowState | undefined> {
@@ -436,6 +499,12 @@ export async function loadWindowState(cwd: string): Promise<UiWindowState | unde
 type UiStateStore = {
   docs: Record<string, UiStateDoc>;
   error: UiStateError | null;
+  /**
+   * Per cwd: true only when the file's loaded lastExit was "clean" (F9). The
+   * restore offer consults this, not the live doc, because readUiState flips
+   * the in-memory value to interrupted for the running process.
+   */
+  cleanAtLoad: Record<string, boolean>;
   load: (cwd: string) => Promise<void>;
   update: (cwd: string, patch: UiStatePatch) => void;
   retry: () => Promise<void>;
@@ -444,6 +513,7 @@ type UiStateStore = {
 export const useUiStateStore = create<UiStateStore>()(() => ({
   docs: {},
   error: null,
+  cleanAtLoad: {},
   load: (cwd) => loadUiState(cwd),
   update: (cwd, patch) => {
     const state = useUiStateStore.getState();
@@ -532,6 +602,64 @@ export function recordWindowTabs(
   });
 }
 
+/**
+ * Records one chat tab's open view and mode into the project doc (F9). The
+ * pi tab calls this on every view transition; `null` removes the tab's
+ * entry so a closed tab never offers a stale restore. An identical record
+ * schedules no write.
+ */
+export function recordChatView(
+  cwd: string,
+  tabKey: string,
+  open: { view: string; mode: UiViewMode } | null,
+): void {
+  if (!cwd || !tabKey) return;
+  const state = useUiStateStore.getState();
+  const previous = state.docs[cwd];
+  const current = previous?.chatViews ?? {};
+  const entry = current[tabKey];
+  const same =
+    open === null
+      ? entry === undefined
+      : entry !== undefined &&
+        entry.view === open.view &&
+        entry.mode === open.mode;
+  if (same) return;
+  const chatViews: Record<string, UiChatViewRecord> = { ...current };
+  if (open) chatViews[tabKey] = { view: open.view, mode: open.mode };
+  else delete chatViews[tabKey];
+  const doc: UiStateDoc = previous
+    ? { ...previous, chatViews }
+    : { ...defaultUiState(), chatViews };
+  useUiStateStore.setState({ docs: { ...state.docs, [cwd]: doc } });
+  scheduleSave(cwd);
+}
+
+/**
+ * The app's own quit path (App.tsx registers it on the window close
+ * request, whose handler the webview awaits before destroying): every
+ * loaded project's doc is marked lastExit "clean" and flushed now, outside
+ * the debounce. Process loss of any other kind leaves the interrupted
+ * value this run started with on disk.
+ */
+export async function markCleanExit(): Promise<void> {
+  const state = useUiStateStore.getState();
+  const cwds = Object.keys(state.docs);
+  if (cwds.length === 0) return;
+  const docs: Record<string, UiStateDoc> = { ...state.docs };
+  for (const cwd of cwds) docs[cwd] = { ...docs[cwd], lastExit: "clean" };
+  useUiStateStore.setState({ docs });
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  for (const cwd of cwds) {
+    touched.add(cwd);
+    if (!queue.includes(cwd)) queue.push(cwd);
+  }
+  await flushSaves();
+}
+
 /** Test seam: forget docs, pending writes, loaded cwds and the import flag. */
 export function resetUiStateForTests(): void {
   loaded.clear();
@@ -546,5 +674,5 @@ export function resetUiStateForTests(): void {
     timer = null;
   }
   inFlight = null;
-  useUiStateStore.setState({ docs: {}, error: null });
+  useUiStateStore.setState({ docs: {}, error: null, cleanAtLoad: {} });
 }

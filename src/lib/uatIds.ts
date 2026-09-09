@@ -25,6 +25,7 @@ export const UAT_IDS_K4: UatIdEntry[] = [
   { id: "session-status", file: "src/modules/pi/components/ChatPane.tsx" },
   { id: "turn-tokens", file: "src/modules/pi/components/ChatPane.tsx" },
   { id: "session-cost", file: "src/modules/pi/components/ChatPane.tsx" },
+  { id: "session-id", file: "src/modules/pi/components/ChatPane.tsx" },
   { id: "stop-button", file: "src/modules/pi/components/ChatPane.tsx" },
   { id: "new-session", file: "src/modules/pi/components/ChatPane.tsx" },
   { id: "transcript", file: "src/modules/pi/components/Transcript.tsx" },
@@ -382,4 +383,57 @@ export const UAT_IDS_K12F_STATEFUL: UatStatefulEntry[] = [
     file: "src/modules/pi/components/AgentTranscriptPane.tsx",
     state: "a child transcript tab, with navigation enabled by its owning delegation",
   })),
+];
+
+/**
+ * F9 stateful ids: the restore offer renders only when a chat tab reopens on
+ * an interrupted exit that recorded an open view; the run summary and its
+ * transcript link render only on an open ticket sheet; the confirmation
+ * area, Confirm and Cancel exist only while a board verb is armed.
+ */
+export const UAT_IDS_F9_STATEFUL: UatStatefulEntry[] = [
+  {
+    id: "layout-offer",
+    file: "src/modules/pi/PiTab.tsx",
+    state:
+      "a chat tab reopening on an interrupted exit that recorded an open view",
+  },
+  {
+    id: "layout-restore",
+    file: "src/modules/pi/PiTab.tsx",
+    state:
+      "a chat tab reopening on an interrupted exit that recorded an open view",
+  },
+  {
+    id: "layout-dismiss",
+    file: "src/modules/pi/PiTab.tsx",
+    state:
+      "a chat tab reopening on an interrupted exit that recorded an open view",
+  },
+  {
+    id: "ticket-run-summary",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+    state: "the ticket sheet open on a ticket",
+  },
+  {
+    id: "child-open-transcript-link",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+    state:
+      "the ticket sheet whose latest delegation record names a child transcript",
+  },
+  {
+    id: "board-confirm-area",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+    state: "an armed board verb waiting on its confirmation area",
+  },
+  {
+    id: "board-confirm",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+    state: "an armed board verb waiting on its confirmation area",
+  },
+  {
+    id: "board-cancel",
+    file: "src/modules/pi/components/board/TicketSheet.tsx",
+    state: "an armed board verb waiting on its confirmation area",
+  },
 ];

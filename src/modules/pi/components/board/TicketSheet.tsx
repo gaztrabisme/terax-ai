@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useChildStore } from "@/modules/pi/lib/childStore";
+import { ticketChildRun, useLedger } from "@/modules/pi/lib/ledgerStore";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -39,14 +41,14 @@ type Props = {
   /** Overrides DEFAULT_AGENT_BIN; the settings worker wires a preference later. */
   agentBin?: string;
   ticketId: string | null;
+  /** The owning chat tab's pi session, for the ledger-backed run summary. */
+  sessionId?: string | null;
+  /** Opens a child transcript tab from the run summary's link. */
+  onOpenChild?: (path: string) => void;
   onOpenChange: (open: boolean) => void;
   /** Bumped into the parent after a successful action. */
   onRefresh: () => void;
 };
-
-// No confirm dialogs here (they block the webview); the first click arms the
-// button, the second click within a few seconds runs the action.
-const ARM_RESET_MS = 4000;
 
 const VERB_LABELS: Record<BoardVerb, string> = {
   align: "Align",
@@ -62,6 +64,33 @@ const VERB_UAT_IDS: Record<BoardVerb, string> = {
   close: "board-close",
   rework: "board-rework",
 };
+
+/** Spine successor each verb commits to; the harness performs the real
+ * transition, the confirmation area names it exactly (design.md section 3.2,
+ * the two-click protocol). */
+const TARGET_STATES: Record<BoardVerb, string> = {
+  align: "in_progress",
+  land: "land",
+  close: "done",
+  rework: "rework",
+};
+
+/** Rework must explain any worktree cleanup before confirmation. */
+const REWORK_CLEANUP_NOTE =
+  "Rework cleans up the attempt worktree before the next aligned attempt.";
+
+const RUN_STATUS_LABELS: Record<
+  "running" | "done" | "failed" | "cancelled",
+  string
+> = { running: "Running", done: "Done", failed: "Failed", cancelled: "Cancelled" };
+
+function consequenceText(verb: BoardVerb, ticket: Ticket): string {
+  const entry = allowedActionFor(ticket, verb);
+  const reasons = entry?.reasons ?? [];
+  const base =
+    reasons.length > 0 ? reasons.join(", ") : "none recorded by the harness";
+  return verb === "rework" ? `${base}; ${REWORK_CLEANUP_NOTE}` : base;
+}
 
 type VerbAuthority = { allowed: boolean; reason: string | null };
 
@@ -153,6 +182,8 @@ export function TicketSheet({
   boardBin,
   agentBin = DEFAULT_AGENT_BIN,
   ticketId,
+  sessionId,
+  onOpenChild,
   onOpenChange,
   onRefresh,
 }: Props) {
@@ -163,9 +194,23 @@ export function TicketSheet({
   /** True while a post-action `show --json` refetch is in flight. */
   const [refreshing, setRefreshing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const armTimer = useRef<number | null>(null);
   /** Sequence guard: only the latest show command may commit ticket state. */
   const loadSeq = useRef(0);
+  // Run summary (review disagreement 2): the ledger is polled only while a
+  // ticket is open, so the line keeps up with a child starting or ending,
+  // and the child store decides whether the transcript is still live.
+  const children = useChildStore((s) => s.children);
+  const ledger = useLedger(cwd, sessionId, ticketId !== null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!ticketId) return;
+    const tick = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(tick);
+  }, [ticketId]);
+  const childRun = useMemo(
+    () => ticketChildRun(ticketId, ledger, children, cwd, now),
+    [ticketId, ledger, children, cwd, now],
+  );
 
   /**
    * One `show <id> --json` round trip. Commits the parsed ticket, or the
@@ -207,6 +252,7 @@ export function TicketSheet({
       setTicket(null);
       setLoadError(null);
       setRefreshing(false);
+      setArmed(null);
       loadSeq.current += 1;
       return;
     }
@@ -215,26 +261,20 @@ export function TicketSheet({
     void fetchTicket();
   }, [ticketId, cwd, fetchTicket]);
 
-  useEffect(() => {
-    return () => {
-      if (armTimer.current !== null) window.clearTimeout(armTimer.current);
-    };
-  }, []);
+  const disarm = () => setArmed(null);
 
-  const disarm = () => {
-    if (armTimer.current !== null) window.clearTimeout(armTimer.current);
-    setArmed(null);
+  /** First click of the two-click protocol: arm only, naming the exact
+   * transition and consequences in the stable area below the verbs. The
+   * armed verb's own button commits nothing on a repeat click. */
+  const armVerb = (verb: BoardVerb) => {
+    if (running || refreshing) return;
+    setArmed(verb);
+    setActionError(null);
   };
 
-  const runAction = (verb: BoardVerb) => {
-    if (!cwd || !ticketId || running) return;
-    if (armed !== verb) {
-      setArmed(verb);
-      setActionError(null);
-      if (armTimer.current !== null) window.clearTimeout(armTimer.current);
-      armTimer.current = window.setTimeout(() => setArmed(null), ARM_RESET_MS);
-      return;
-    }
+  const confirmAction = () => {
+    const verb = armed;
+    if (!verb || !cwd || !ticketId || running || refreshing) return;
     disarm();
     setRunning(true);
     setActionError(null);
@@ -288,6 +328,14 @@ export function TicketSheet({
         showCloseButton={false}
         data-uat="ticket-sheet"
         data-uat-key={ticketId ?? undefined}
+        onEscapeKeyDown={(event) => {
+          // Escape cancels the armed action instead of closing the sheet;
+          // defaultPrevented stops Radix's dismiss.
+          if (armed !== null && !running) {
+            event.preventDefault();
+            disarm();
+          }
+        }}
         className="flex w-[480px] flex-col gap-0 p-0 sm:max-w-[480px]"
       >
         {/* The sheet's own dismiss (UX-15): "Close sheet", distinct from the
@@ -326,6 +374,51 @@ export function TicketSheet({
             <SheetDescription className="sr-only">Ticket detail</SheetDescription>
           )}
         </SheetHeader>
+        {ticketId ? (
+          <div
+            data-uat="ticket-run-summary"
+            aria-live="polite"
+            className="flex min-h-9 flex-wrap items-center gap-x-1.5 gap-y-0.5 border-b border-border/60 px-4 py-1.5 text-[12px] text-muted-foreground"
+          >
+            {childRun ? (
+              <>
+                <span
+                  className={
+                    childRun.running ? "font-medium text-foreground" : undefined
+                  }
+                >
+                  {childRun.running
+                    ? RUN_STATUS_LABELS.running
+                    : RUN_STATUS_LABELS[childRun.action.status]}
+                </span>
+                <span aria-hidden>&middot;</span>
+                <span className="font-mono">
+                  {childRun.agentId ?? "child"}
+                </span>
+                {childRun.elapsedMs !== null ? (
+                  <>
+                    <span aria-hidden>&middot;</span>
+                    <span>{(childRun.elapsedMs / 1000).toFixed(1)}s</span>
+                  </>
+                ) : null}
+                {childRun.transcriptPath && onOpenChild ? (
+                  <button
+                    type="button"
+                    data-uat="child-open-transcript-link"
+                    aria-label={`Open transcript for ${childRun.agentId ?? "child"}`}
+                    title="Open transcript"
+                    onClick={() => onOpenChild(childRun.transcriptPath!)}
+                    className="ml-auto underline hover:text-foreground"
+                  >
+                    Open transcript
+                  </button>
+                ) : null}
+              </>
+            ) : (
+              <span>No child run for this ticket</span>
+            )}
+          </div>
+        ) : null}
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3">
           {loadError ? (
@@ -450,14 +543,14 @@ export function TicketSheet({
                     key={verb}
                     type="button"
                     size="sm"
-                    // The armed verb IS the two-click confirm: the second
-                    // click targets board-confirm (design.md section 3.7).
-                    data-uat={
-                      armed === verb ? "board-confirm" : VERB_UAT_IDS[verb]
-                    }
+                    // The verb always keeps its canonical id; the armed step
+                    // renders its own Confirm in the area below (the same
+                    // button never both arms and commits).
+                    data-uat={VERB_UAT_IDS[verb]}
                     data-uat-key={verb}
                     data-pending={refreshing ? "true" : undefined}
                     aria-busy={refreshing || undefined}
+                    aria-pressed={armed === verb || undefined}
                     variant={armed === verb ? "destructive" : "outline"}
                     disabled={disabled}
                     aria-disabled={disabled || undefined}
@@ -469,30 +562,56 @@ export function TicketSheet({
                           ? contextualName
                           : undefined
                     }
-                    onClick={() => runAction(verb)}
+                    onClick={() => {
+                      if (armed !== verb) armVerb(verb);
+                    }}
                     className="text-[12px]"
                   >
                     {refreshing
                       ? `${VERB_LABELS[verb]} pending`
-                      : armed === verb
-                        ? `${VERB_LABELS[verb]}: click again`
-                        : VERB_LABELS[verb]}
+                      : VERB_LABELS[verb]}
                   </Button>
                 );
               })}
-              {armed ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  data-uat="board-cancel"
-                  onClick={disarm}
-                  className="text-[12px]"
-                >
-                  Cancel
-                </Button>
-              ) : null}
             </div>
+            {armed && ticket ? (
+              <div
+                data-uat="board-confirm-area"
+                role="group"
+                aria-label={`Confirm ${VERB_LABELS[armed]}`}
+                className="mt-2 rounded-md border border-border/60 bg-accent/30 p-2"
+              >
+                <p className="text-[12px] text-foreground">
+                  {ticket.id}: {ticket.status} to {TARGET_STATES[armed]}{" "}
+                  through {armed}
+                </p>
+                <p className="mt-1 text-[12px] text-muted-foreground">
+                  Consequences: {consequenceText(armed, ticket)}
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    data-uat="board-confirm"
+                    disabled={running || refreshing}
+                    onClick={confirmAction}
+                    className="text-[12px]"
+                  >
+                    Confirm
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    data-uat="board-cancel"
+                    onClick={disarm}
+                    className="text-[12px]"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {reasonLine ? (
               <p className="mt-2 text-[12px] text-muted-foreground">
                 {reasonLine}

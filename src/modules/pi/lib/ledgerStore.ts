@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect } from "react";
 import { create } from "zustand";
 import { currentWorkspaceEnv } from "@/modules/workspace";
-import { messageSourceKey, type PiFeedItem } from "@/modules/pi/lib/parse";
+import { messageSourceKey, type PiFeedItem, type PiSessionState } from "@/modules/pi/lib/parse";
 
 export type ActionRecord = {
   v: 1;
@@ -251,6 +251,84 @@ export function ledgerDiscrepancies(ledger: LedgerSnapshot, inFlight: boolean): 
     if (!id || ledger.sources[id]?.type === "turn_end") return [];
     return [`usage-discrepancy: action ${action.actionId} displayed=${JSON.stringify(action.usage)}; source=missing event ${id} (${SESSION_LOG})`];
   });
+}
+
+/** Child transcript statuses that mean the child process is still working
+ * (the same live set the pi tab counts for the graph badge). */
+const LIVE_CHILD_STATUS = new Set(["thinking", "tool", "awaiting-ask"]);
+
+/** Resolved child run for one ticket, joined from the ledger's latest
+ * delegation record and the child store's live transcripts (F9 run
+ * summary). */
+export type TicketChildRun = {
+  /** The latest delegation record recorded for the ticket. */
+  action: ActionRecord;
+  /** Transcript path resolved from the record's evidence, when it names one. */
+  transcriptPath: string | null;
+  /** agentId from the record, else the transcript filename stem. */
+  agentId: string | null;
+  /** True while the delegation runs and the known child transcript is live;
+   * a finished or stopped transcript never reads running, whatever the
+   * record still claims. */
+  running: boolean;
+  /** While running: now minus startedAt. After: the record's duration. */
+  elapsedMs: number | null;
+};
+
+function delegationTranscriptPath(
+  action: ActionRecord,
+  cwd?: string,
+): string | null {
+  // Same resolution as runGraph.actionTranscriptPath; duplicated here
+  // because runGraph imports values from this module and importing back
+  // would cycle.
+  const path = action.evidencePath?.replace(/\\/g, "/");
+  if (!path?.endsWith(".transcript.jsonl")) return null;
+  if (path.startsWith("/") || /^[A-Za-z]:\//.test(path)) return path;
+  if (!cwd || path.split("/").includes("..")) return null;
+  return `${cwd.replace(/[\\/]+$/, "")}/${path.replace(/^\.\//, "")}`;
+}
+
+/**
+ * The delegation to name in the ticket sheet's run summary: the ticket's
+ * latest delegation record by startedAt, its transcript resolved through
+ * the child store, and whether the child is still working.
+ */
+export function ticketChildRun(
+  ticketId: string | null | undefined,
+  ledger: LedgerSnapshot,
+  children: Record<string, PiSessionState>,
+  cwd?: string,
+  now: number = Date.now(),
+): TicketChildRun | null {
+  if (!ticketId) return null;
+  let action: ActionRecord | null = null;
+  for (const record of Object.values(ledger.actions)) {
+    if (record.kind !== "delegation" || record.ticketId !== ticketId) continue;
+    if (!action || (record.startedAt ?? "") > (action.startedAt ?? "")) {
+      action = record;
+    }
+  }
+  if (!action) return null;
+  const transcriptPath = delegationTranscriptPath(action, cwd);
+  const child = transcriptPath !== null ? children[transcriptPath] : undefined;
+  const running =
+    action.status === "running" &&
+    (child === undefined || LIVE_CHILD_STATUS.has(child.status));
+  const elapsedMs = running
+    ? action.startedAt !== null
+      ? Math.max(0, now - Date.parse(action.startedAt))
+      : null
+    : actionDuration(action);
+  const agentId =
+    action.agentId ??
+    (transcriptPath !== null
+      ? (transcriptPath.split(/[\\/]/).pop() ?? transcriptPath).replace(
+          /\.transcript\.jsonl$/,
+          "",
+        )
+      : null);
+  return { action, transcriptPath, agentId, running, elapsedMs };
 }
 
 export function resetLedgerStore(): void {

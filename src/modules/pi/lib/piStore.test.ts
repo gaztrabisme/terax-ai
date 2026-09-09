@@ -38,7 +38,8 @@ openPiSessionMock.mockImplementation(
 );
 
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { usePiStore } from "./piStore";
+import { initialPiSessionState, type PiFeedItem } from "./parse";
+import { usePiStore, type PendingSwitch } from "./piStore";
 
 // Every patch goes through zustand's set(); a patch that returns the tabs map
 // instead of { tabs } silently updates nothing. Assert through the store.
@@ -932,5 +933,219 @@ describe("piStore cancellation and queue acknowledgement", () => {
     } finally {
       usePreferencesStore.setState({ piAgentBin: "" });
     }
+  });
+});
+
+/** F1b wire shape: the switch ack carries success and no session id; the
+ *  new id arrives on the session file's header, which the store stages. */
+const SWITCH_ACK =
+  '{"command":"switch_session","data":{"cancelled":false},"id":"9","success":true,"type":"response"}';
+const REFUSED_ACK =
+  '{"command":"switch_session","error":"a turn is streaming","id":"9","success":false,"type":"response"}';
+const CANCELLED_ACK =
+  '{"command":"switch_session","data":{"cancelled":true},"id":"9","success":true,"type":"response"}';
+const RESTORED_ID = "bbbbbbbb-2222-4bbb-8bbb-bbbbbbbbbbbb";
+const RESTORED_PATH =
+  "/tmp/p/.pi/sessions/--tmp-p--/2026-06-08T15-07-02-400Z_bbbbbbbb.jsonl";
+
+function historyBlock(
+  id: string,
+  role: "user" | "assistant",
+  text: string,
+): PiFeedItem {
+  return {
+    kind: "message",
+    id,
+    role,
+    parts: [{ type: "text", text }],
+    model: role === "assistant" ? "q" : null,
+    usage: null,
+    streaming: false,
+    at: 1000,
+  };
+}
+
+function stagedSwitch(): PendingSwitch {
+  return {
+    sessionId: RESTORED_ID,
+    blocks: [historyBlock("h-1", "user", "saved prompt"), historyBlock("h-2", "assistant", "saved answer")],
+    path: RESTORED_PATH,
+    snippet: "...saved prompt...",
+  };
+}
+
+/** The onEvent of the most recent openSession mock. */
+function lastOnEvent(): (line: string) => void {
+  const calls = openPiSessionMock.mock.calls;
+  const call = calls[calls.length - 1]!;
+  return call[0].onEvent as (line: string) => void;
+}
+
+describe("piStore session switch (F1b)", () => {
+  beforeEach(() => {
+    usePiStore.setState({ tabs: {} });
+    sent.length = 0;
+    aborts.length = 0;
+    exits.length = 0;
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "fs_read_file") return { kind: "text", content: "" };
+      return ".pi/attachments/0-0.png";
+    });
+  });
+
+  it("stages the parsed history, keeps the transcript, then commits both on the ack", async () => {
+    await usePiStore.getState().openSession(40, { cwd: "/tmp/p" });
+    await usePiStore.getState().sendPrompt(40, "hello");
+    const before = usePiStore.getState().tabs[40]!.state;
+    await usePiStore.getState().switchToSession(40, stagedSwitch());
+    // pi has the command, the old transcript is still on screen.
+    expect(sent[sent.length - 1]).toBe(
+      JSON.stringify({ type: "switch_session", sessionPath: RESTORED_PATH }),
+    );
+    expect(usePiStore.getState().tabs[40]!.state.sessionId).toBe(
+      before.sessionId,
+    );
+    expect(usePiStore.getState().tabs[40]!.pendingSwitch?.path).toBe(
+      RESTORED_PATH,
+    );
+    lastOnEvent()(SWITCH_ACK);
+    const entry = usePiStore.getState().tabs[40]!;
+    expect(entry.state.sessionId).toBe(RESTORED_ID);
+    expect(entry.state.blocks).toHaveLength(2);
+    expect(entry.state.switching).toBe(false);
+    expect(entry.sessionPath).toBe(RESTORED_PATH);
+    expect(entry.pendingSwitch).toBeNull();
+    expect(entry.scrollRequest).toMatchObject({ snippet: "...saved prompt..." });
+    expect(entry.switchError).toBeNull();
+  });
+
+  it("a committed switch totals the restored usage for the strip", async () => {
+    await usePiStore.getState().openSession(41, { cwd: "/tmp/p" });
+    const request = stagedSwitch();
+    const usageBlock: PiFeedItem = {
+      kind: "message",
+      id: "h-3",
+      role: "assistant",
+      parts: [{ type: "text", text: "second answer" }],
+      model: "q",
+      usage: {
+        input: 10,
+        output: 2,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 12,
+        costTotal: 0.004,
+      },
+      streaming: false,
+      at: 1000,
+    };
+    request.blocks = [...request.blocks, usageBlock];
+    await usePiStore.getState().switchToSession(41, request);
+    lastOnEvent()(SWITCH_ACK);
+    const state = usePiStore.getState().tabs[41]!.state;
+    expect(state.turnTokens).toBe(12);
+    expect(state.sessionCost).toBeCloseTo(0.004, 6);
+    expect(state.turnUsage?.totalTokens).toBe(12);
+  });
+
+  it("a refused switch keeps the conversation and names the file", async () => {
+    await usePiStore.getState().openSession(42, { cwd: "/tmp/p" });
+    await usePiStore.getState().sendPrompt(42, "hello");
+    const before = usePiStore.getState().tabs[42]!.state;
+    await usePiStore.getState().switchToSession(42, stagedSwitch());
+    lastOnEvent()(REFUSED_ACK);
+    const entry = usePiStore.getState().tabs[42]!;
+    expect(entry.state.sessionId).toBe("abcd1234-test");
+    expect(entry.state.blocks).toEqual(before.blocks);
+    expect(entry.pendingSwitch).toBeNull();
+    expect(entry.scrollRequest).toBeNull();
+    expect(entry.switchError).toBe(`${RESTORED_PATH}: a turn is streaming`);
+  });
+
+  it("a vetoed switch (extension cancelled) keeps the conversation too", async () => {
+    await usePiStore.getState().openSession(43, { cwd: "/tmp/p" });
+    await usePiStore.getState().switchToSession(43, stagedSwitch());
+    lastOnEvent()(CANCELLED_ACK);
+    const entry = usePiStore.getState().tabs[43]!;
+    expect(entry.state.sessionId).toBe("abcd1234-test");
+    expect(entry.switchError).toBe(`${RESTORED_PATH}: switch cancelled`);
+  });
+
+  it("a failed switch write unstages and reports the file", async () => {
+    usePiStore.setState({
+      tabs: {
+        44: {
+          gen: 1,
+          state: { ...initialPiSessionState(), sessionId: "abcd1234-test" },
+          session: {
+            id: 9,
+            send: vi.fn().mockRejectedValue(new Error("pipe gone")),
+            kill: vi.fn().mockResolvedValue(undefined),
+          },
+          exited: false,
+          exitCode: null,
+          error: null,
+          roles: { provider: "omlx", model: "q", smol: "" },
+        },
+      },
+    });
+    await expect(
+      usePiStore.getState().switchToSession(44, stagedSwitch()),
+    ).rejects.toThrow("pipe gone");
+    const entry = usePiStore.getState().tabs[44]!;
+    expect(entry.pendingSwitch).toBeNull();
+    expect(entry.switchError).toBe(`${RESTORED_PATH}: pipe gone`);
+    expect(entry.state.blocks).toHaveLength(0);
+  });
+
+  it("a second switch while one is staged is refused", async () => {
+    await usePiStore.getState().openSession(45, { cwd: "/tmp/p" });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    openPiSessionMock.mockImplementationOnce(async (opts: { onEvent: (l: string) => void; onExit?: (c: number) => void }) => {
+      exits.push(opts.onExit ?? (() => {}));
+      return {
+        id: 8,
+        send: () => gate,
+        abort: async () => {},
+        kill: async () => opts.onExit?.(0),
+      };
+    });
+    await usePiStore.getState().openSession(45, { cwd: "/tmp/p" });
+    const pending = usePiStore.getState().switchToSession(45, stagedSwitch());
+    await expect(
+      usePiStore.getState().switchToSession(45, stagedSwitch()),
+    ).rejects.toThrow("switch_session already in progress");
+    release();
+    await pending;
+    lastOnEvent()(SWITCH_ACK);
+    expect(usePiStore.getState().tabs[45]!.state.sessionId).toBe(RESTORED_ID);
+  });
+
+  it("an ack with nothing staged never clears the conversation", async () => {
+    await usePiStore.getState().openSession(46, { cwd: "/tmp/p" });
+    await usePiStore.getState().sendPrompt(46, "hello");
+    const before = usePiStore.getState().tabs[46]!.state;
+    lastOnEvent()(SWITCH_ACK);
+    const entry = usePiStore.getState().tabs[46]!;
+    expect(entry.state.sessionId).toBe(before.sessionId);
+    expect(entry.state.blocks).toEqual(before.blocks);
+    expect(entry.switchError).toBeNull();
+    expect(entry.scrollRequest).toBeNull();
+  });
+
+  it("clearScrollRequest clears only its own seq", async () => {
+    await usePiStore.getState().openSession(47, { cwd: "/tmp/p" });
+    await usePiStore.getState().switchToSession(47, stagedSwitch());
+    lastOnEvent()(SWITCH_ACK);
+    const entry = usePiStore.getState().tabs[47]!;
+    const seq = entry.scrollRequest!.seq;
+    usePiStore.getState().clearScrollRequest(47, seq + 1);
+    expect(usePiStore.getState().tabs[47]!.scrollRequest?.seq).toBe(seq);
+    usePiStore.getState().clearScrollRequest(47, seq);
+    expect(usePiStore.getState().tabs[47]!.scrollRequest).toBeNull();
   });
 });

@@ -312,7 +312,9 @@ export function messageSourceKey(message: unknown): string {
 
 // User messages carry a plain string content; assistant messages carry the
 // typed part array. Normalize both so renderers only ever see parts.
-function toParts(content: unknown): PiContentPart[] {
+// Exported for the session-file reader, which parses stored messages into
+// the same blocks the wire reducer builds (F1b: restore a saved transcript).
+export function toParts(content: unknown): PiContentPart[] {
   if (typeof content === "string") {
     return [{ type: "text", text: content }];
   }

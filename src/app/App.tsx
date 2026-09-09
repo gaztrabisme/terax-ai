@@ -77,6 +77,7 @@ import {
   type InsertDraftDetail,
   type SendToChatDetail,
 } from "@/modules/pi/lib/sendToChat";
+import { markCleanExit } from "@/modules/state/uiState";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
@@ -645,6 +646,27 @@ export default function App() {
       if (!alive) un();
       else unlisten = un;
     });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, []);
+
+  // F9 clean-exit marker: the app's own quit path runs through the window
+  // close request, and the api awaits this handler before destroying the
+  // webview. Every loaded project's ui-state doc is marked lastExit "clean"
+  // and flushed there; process loss of any other kind leaves the
+  // interrupted value this run started with on disk.
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebviewWindow()
+      .onCloseRequested(() => markCleanExit())
+      .then((un) => {
+        if (alive) unlisten = un;
+        else un();
+      })
+      .catch(() => {});
     return () => {
       alive = false;
       unlisten?.();

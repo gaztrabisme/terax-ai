@@ -21,6 +21,7 @@ import {
 } from "@/modules/shortcuts/lib/eventPriority";
 import { awaitingDecisionCount, useBoardData } from "./lib/useBoardData";
 import {
+  CHAT_VIEWS,
   CLOSED_VIEW,
   MODE_STRIP_WIDTH,
   isNarrowContent,
@@ -48,7 +49,12 @@ import {
   type ArtifactFileRef,
 } from "./lib/artifacts";
 import { sha256Hex } from "./lib/drafts";
-import { uiStatePath, useUiStateStore } from "@/modules/state/uiState";
+import {
+  recordChatView,
+  uiStatePath,
+  useUiStateStore,
+  type UiChatViewRecord,
+} from "@/modules/state/uiState";
 import type { DraftRecoveryProps } from "@/modules/tabs/RecoverableDrafts";
 import { usePiLayout } from "./lib/layoutStore";
 import { messageBlocks } from "./lib/parse";
@@ -93,6 +99,7 @@ export function PiStack({
         >
           <PiTab
             tabId={t.id}
+            sid={t.sid}
             cwd={t.cwd}
             active={t.id === activeId}
             openDraftIds={tabs.flatMap((tab) => tab.sid ? [tab.sid] : [])}
@@ -107,6 +114,7 @@ export function PiStack({
 
 export function PiTab({
   tabId,
+  sid,
   cwd,
   active,
   onOpenChild,
@@ -115,12 +123,16 @@ export function PiTab({
   launcherDir = PI_MODULE_PREFS_DEFAULTS.launcherDir,
 }: DraftRecoveryProps & {
   tabId: number;
+  /** Stable tab id; the restore record is keyed by it. */
+  sid?: string;
   cwd?: string;
   /** Whether this tab is the visible one; only it mounts the run graph. */
   active: boolean;
   onOpenChild: (path: string) => void;
   launcherDir?: string;
 }) {
+  /** Stable restore key: the recorded sid, else the numeric tab id. */
+  const tabKey = sid ?? String(tabId);
   const entry = usePiStore((s) => s.tabs[tabId]);
   const openSession = usePiStore((s) => s.openSession);
   const [boardTick, setBoardTick] = useState(0);
@@ -141,7 +153,28 @@ export function PiTab({
   // until Retry flushes it (no saved state while the banner shows).
   const storageError = useUiStateStore((s) => s.error);
   const retryStorage = useUiStateStore((s) => s.retry);
+  // F9 restore offer: recorded view of this tab plus how the previous
+  // process exited. The offer consults cleanAtLoad (what the file said at
+  // load), not the live doc, which runs interrupted until the quit path.
+  const uiDoc = useUiStateStore((s) => (cwd ? s.docs[cwd] : undefined));
+  const cleanExitAtLoad = useUiStateStore((s) =>
+    cwd ? (s.cleanAtLoad[cwd] ?? false) : false,
+  );
+  const recordedView: UiChatViewRecord | null =
+    cwd && uiDoc ? (uiDoc.chatViews[tabKey] ?? null) : null;
+  const [offerDismissed, setOfferDismissed] = useState(false);
+  const [pendingRestore, setPendingRestore] =
+    useState<UiChatViewRecord | null>(null);
   const [viewState, dispatch] = useReducer(viewReducer, CLOSED_VIEW);
+  const layoutOffer = Boolean(
+    cwd &&
+      uiDoc &&
+      recordedView &&
+      (CHAT_VIEWS as readonly string[]).includes(recordedView.view) &&
+      !offerDismissed &&
+      !viewState.view &&
+      !cleanExitAtLoad,
+  );
   const rootRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<HTMLElement>(null);
   const buttons = useRef<Partial<Record<View, HTMLButtonElement>>>({});
@@ -164,6 +197,49 @@ export function PiTab({
     dispatch(event);
   };
   const toggle = (view: View) => transition({ type: "toggle", view, narrow });
+
+  // F9: restore the recorded view at its recorded mode (width comes from the
+  // view's saved width); "open" then a fullscreen step when it ran one.
+  const restoreLayout = () => {
+    if (!cwd || !recordedView) return;
+    setOfferDismissed(true);
+    setPendingRestore(recordedView);
+    transition({ type: "open", view: recordedView.view as View, narrow });
+  };
+  useEffect(() => {
+    if (!pendingRestore) return;
+    if (viewState.view === pendingRestore.view) {
+      if (
+        pendingRestore.mode === "fullscreen" &&
+        viewState.mode !== "fullscreen"
+      ) {
+        transition({ type: "fullscreen" });
+      }
+      setPendingRestore(null);
+      return;
+    }
+    if (viewState.view) setPendingRestore(null);
+  }, [viewState, pendingRestore]);
+
+  // F9: every view transition records this tab's open view and mode, so an
+  // interrupted exit can offer the working layout back. A closed tab's
+  // entry is removed, so views still start closed by default. The initial
+  // closed state records nothing: mounting must not wipe the record the
+  // offer is about to read.
+  const lastRecordedView = useRef("");
+  useEffect(() => {
+    if (!cwd) return;
+    const current = viewState.view
+      ? `${viewState.view}:${viewState.mode}`
+      : "";
+    if (lastRecordedView.current === current) return;
+    lastRecordedView.current = current;
+    recordChatView(
+      cwd,
+      tabKey,
+      viewState.view ? { view: viewState.view, mode: viewState.mode } : null,
+    );
+  }, [cwd, tabKey, viewState]);
 
   useEffect(() => {
     const navigate = (event: Event) => {
@@ -517,6 +593,37 @@ export function PiTab({
       }}
     >
       {storageBanner}
+      {layoutOffer && recordedView ? (
+        <div
+          data-uat="layout-offer"
+          role="status"
+          className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-secondary/60 px-2 text-xs font-medium"
+        >
+          <span className="min-w-0 flex-1 truncate">
+            Last session ended unexpectedly.
+          </span>
+          <button
+            type="button"
+            data-uat="layout-restore"
+            aria-label="Restore working layout"
+            title="Restore working layout"
+            onClick={restoreLayout}
+            className={viewButtonClass}
+          >
+            Restore working layout
+          </button>
+          <button
+            type="button"
+            data-uat="layout-dismiss"
+            aria-label="Dismiss"
+            title="Dismiss"
+            onClick={() => setOfferDismissed(true)}
+            className={viewButtonClass}
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
       <div className="flex min-h-0 min-w-0 flex-1">
         <div
           data-pi-chat={tabId}
@@ -560,7 +667,17 @@ export function PiTab({
                 active={active}
                 mode={viewState.mode === "fullscreen" ? "full" : "rail"}
               />
-              <TicketSheet cwd={cwd} boardBin={PI_MODULE_PREFS_DEFAULTS.boardBin} ticketId={active ? childTicketId : null} onOpenChange={(open) => { if (!open) setChildTicketId(null); }} onRefresh={() => setBoardTick((tick) => tick + 1)} />
+              <TicketSheet
+                cwd={cwd}
+                boardBin={PI_MODULE_PREFS_DEFAULTS.boardBin}
+                ticketId={active ? childTicketId : null}
+                sessionId={entry?.state.sessionId ?? null}
+                onOpenChild={onOpenChild}
+                onOpenChange={(open) => {
+                  if (!open) setChildTicketId(null);
+                }}
+                onRefresh={() => setBoardTick((tick) => tick + 1)}
+              />
               </>
             )}
             {view === "graph" && active && (

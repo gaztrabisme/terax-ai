@@ -14,9 +14,11 @@ import {
   defaultUiState,
   loadUiState,
   loadWindowState,
+  markCleanExit,
   parseUiState,
   PI_LAYOUT_IMPORTED_KEY,
   PI_LAYOUT_STORAGE_KEY,
+  recordChatView,
   recordWindowTabs,
   resetUiStateForTests,
   setUiStateStorageForTests,
@@ -129,6 +131,8 @@ describe("uiState round trip", () => {
       folds: { "turn-1": true },
       selectedArtifact: "doc-2",
       sidebarVisible: true,
+      chatViews: {},
+      lastExit: "interrupted",
     });
   });
 
@@ -446,5 +450,93 @@ describe("K11b UAT ids", () => {
       expect(entry.state.length).toBeGreaterThan(0);
     }
     expect(files.size).toBe(1);
+  });
+});
+
+describe("F9 lastExit and chat views", () => {
+  it("marks lastExit clean at quit without waiting for the debounce, interrupted otherwise", async () => {
+    const files = fakeProjectFiles();
+    await useUiStateStore.getState().load("/w");
+    useUiStateStore.getState().update("/w", { sessionsQuery: "kept" });
+    await markCleanExit();
+    const written = JSON.parse(files.get(uiStatePath("/w")) ?? "null");
+    expect(written.lastExit).toBe("clean");
+    expect(written.sessionsQuery).toBe("kept");
+    expect(useUiStateStore.getState().docs["/w"]!.lastExit).toBe("clean");
+
+    // Process loss of any other kind: the startup reset already wrote the
+    // interrupted value this run started with.
+    const lost = fakeProjectFiles();
+    await useUiStateStore.getState().load("/v");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(JSON.parse(lost.get(uiStatePath("/v")) ?? "null").lastExit).toBe(
+      "interrupted",
+    );
+  });
+
+  it("flips a loaded clean to interrupted for this run and rewrites the file", async () => {
+    const files = fakeProjectFiles();
+    files.set(
+      uiStatePath("/w"),
+      JSON.stringify({
+        v: 1,
+        lastExit: "clean",
+        chatViews: { pita1: { view: "board", mode: "panel" } },
+      }),
+    );
+    await useUiStateStore.getState().load("/w");
+    const doc = useUiStateStore.getState().docs["/w"]!;
+    // The loaded clean is answered once (cleanAtLoad), then this run is live.
+    expect(useUiStateStore.getState().cleanAtLoad["/w"]).toBe(true);
+    expect(doc.lastExit).toBe("interrupted");
+    expect(doc.chatViews.pita1).toEqual({ view: "board", mode: "panel" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(JSON.parse(files.get(uiStatePath("/w")) ?? "null").lastExit).toBe(
+      "interrupted",
+    );
+  });
+
+  it("records and clears a chat tab's open view, skipping identical records", async () => {
+    fakeProjectFiles();
+    await useUiStateStore.getState().load("/w");
+    invoke.mockClear();
+    recordChatView("/w", "pita1", { view: "board", mode: "panel" });
+    recordChatView("/w", "pita1", { view: "board", mode: "panel" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(writes()).toHaveLength(1);
+    expect(useUiStateStore.getState().docs["/w"]!.chatViews.pita1).toEqual({
+      view: "board",
+      mode: "panel",
+    });
+
+    recordChatView("/w", "pita1", null);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(writes()).toHaveLength(2);
+    expect(useUiStateStore.getState().docs["/w"]!.chatViews).toEqual({});
+
+    // The removal survives a reload; views start closed.
+    resetUiStateForTests();
+    await useUiStateStore.getState().load("/w");
+    expect(useUiStateStore.getState().docs["/w"]!.chatViews).toEqual({});
+  });
+
+  it("drops junk chat view rows and any lastExit other than clean when parsing", () => {
+    const parsed = parseUiState(
+      JSON.stringify({
+        v: 1,
+        lastExit: "crashed",
+        chatViews: {
+          good: { view: "graph", mode: "fullscreen" },
+          noview: { mode: "panel" },
+          badmode: { view: "board", mode: "modal" },
+          "": { view: "board", mode: "panel" },
+        },
+      }),
+    )!;
+    expect(parsed.chatViews).toEqual({ good: { view: "graph", mode: "fullscreen" } });
+    expect(parsed.lastExit).toBe("interrupted");
+    expect(parseUiState(JSON.stringify({ v: 1, lastExit: "clean" }))!.lastExit).toBe(
+      "clean",
+    );
   });
 });
